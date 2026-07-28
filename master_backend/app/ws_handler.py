@@ -30,6 +30,16 @@ _frontend_connections: set[WebSocket] = set()
 _latest_samples: dict[str, dict] = {}
 
 
+def _state_pong(command_id: str = "") -> bytes:
+    """Authoritative session state, delivered on the PONG heartbeat (plan DD-1)."""
+    return make_pong(
+        command_id,
+        state=session_manager.state.value,
+        session_id=session_manager.session_id or "",
+        late_sid=io_manager.late_session_id,
+    )
+
+
 def drop_latest_sample(device_id: str) -> None:
     """Remove a pruned device's cached sample so /ws/live stops re-broadcasting it
     and the cache cannot grow unbounded across device churn."""
@@ -74,12 +84,29 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 continue
 
             if session_manager.state != SessionState.RECORDING:
+                # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
+                # flushing the buffered tail of the session that just ended. Dropping it
+                # here (and letting the phone then erase its own copy) was a total-loss
+                # path (plan D3).
+                late_sid = io_manager.late_session_id
+                if late_sid:
+                    dev = session_manager.get_device(device_id)
+                    role = dev.device_role if dev else "unknown"
+                    if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
+                        dedup.add(device_id, late_sid, pkt.sequence_number)
+                        await io_manager.write_late(pkt, role)
                 continue
 
             if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
                 continue
 
             dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
+            # A device that joined or rejoined after START has no writer yet; without this
+            # every one of its packets is discarded while the dashboard counts them (plan D2).
+            if not io_manager.has_writer(device_id):
+                dev = session_manager.get_device(device_id)
+                if dev is not None:
+                    await io_manager.ensure_writer(device_id, dev.device_role)
             session_manager.increment_packets(device_id)
             session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
             try:
@@ -151,6 +178,10 @@ async def control_ws(websocket: WebSocket) -> None:
         )
         # Notify frontend immediately so device shows as online.
         await broadcast_to_frontends(_state_snapshot())
+        # Reconciliation on (re)connect: tell the device what the backend believes is
+        # happening RIGHT NOW. Without this a phone that was offline during STOP stays
+        # stuck showing "RECORDING" forever (plan D1).
+        await websocket.send_bytes(_state_pong())
 
         # Subsequent messages are Commands.
         async for raw in websocket.iter_bytes():
@@ -181,7 +212,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
     match cmd.type:
         case CommandType.PING:
             session_manager.mark_ping(device_id)
-            await ws.send_bytes(make_pong(cmd.command_id))
+            await ws.send_bytes(_state_pong(cmd.command_id))
 
         case CommandType.CLOCK_SYNC:
             t1_ms = int(time.time() * 1000)
@@ -200,10 +231,8 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                 payload = json.loads(cmd.payload) if cmd.payload else {}
             except Exception:
                 payload = {}
-            ok = await session_manager.start_recording(payload)
-            status = "ok" if ok else "fail"
-            detail = "" if ok else "Invalid state for START_SESSION"
-            await ws.send_bytes(make_ack(cmd.command_id, status, detail))
+            ok, detail = await session_manager.start_recording(payload)
+            await ws.send_bytes(make_ack(cmd.command_id, "ok" if ok else "fail", "" if ok else detail))
             if ok:
                 await audit.log("INFO", "session_start", {"initiated_by": device_id[:8]})
                 # Broadcast START to all other connected devices.
@@ -223,7 +252,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                 reason = payload.get("reason", "operator_stop")
             except Exception:
                 reason = "operator_stop"
-            report = await session_manager.stop_recording(reason)
+            await session_manager.stop_recording(reason)
             await ws.send_bytes(make_ack(cmd.command_id, "ok"))
             await audit.log("INFO", "session_stop", {"reason": reason})
 
@@ -356,6 +385,8 @@ def _state_snapshot() -> dict:
                 "substate": d.substate,
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),
+                "rate_hz": round(d.rate_hz, 1),
+                "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }
             for d in session_manager._devices.values()
         ],

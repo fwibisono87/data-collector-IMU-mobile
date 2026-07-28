@@ -16,8 +16,6 @@ The recommended order is backend first, then dashboard, then the phones.
 - `protoc` if you need to regenerate shared protobuf bindings
 - Windows with a writable local storage path for session files
 
-## 1. Backend setup
-
 ## Quick start (all-in-one)
 
 Assumes env + build already done (see first-time setup below if not):
@@ -42,7 +40,8 @@ See `connectivity_ops_fixes_plan.md` §9a for the full peer-onboarding rationale
 
 ---
 
-## Backend (FastAPI)
+## 1. Backend setup
+
 The backend is responsible for session state, WebSocket routing, audit logging, and mDNS discovery.
 
 ### First-time setup
@@ -72,6 +71,8 @@ PORT=8000
 LAN_SUBNET=192.168.1.0/24
 FSYNC_INTERVAL_SEC=5
 MAX_CONCURRENT_DEVICES=8
+LATE_ACCEPT_SEC=600             # how long after STOP a phone can still deliver buffered data
+SORT_CSV_ON_CLOSE=true          # repair out-of-order rows from a mid-session reconnect
 ```
 
 Create the storage directories if they do not already exist:
@@ -172,15 +173,18 @@ Use the IP that is on the same Wi-Fi subnet as the phones, usually something lik
 
 ---
 
-## See also
+## What the connectivity alarm means
 
-- `docs/REDMI_NOTE_12_SETUP.md` — per-phone MIUI/HyperOS setup to stop mid-session drops.
-- `connectivity_ops_fixes_plan.md` — what changed in the launcher/diagnostics/Redmi fixes and why.
-| Backend fails with ModuleNotFoundError | Run commands from the repository root or activate the backend virtual environment first |
-| Port 8000 already in use | Check which process owns the port and stop it before restarting |
-| Frontend cannot connect to backend | Verify the backend is running, the IP is correct, and the firewall allows LAN traffic on port 8000 |
-| Flutter cannot discover the backend | Use the manual IP field and confirm both devices are on the same Wi-Fi network |
-| SSD_PATH write errors | Create the directory or update the path to a writable location |
+If a phone drops mid-recording, it loops an audible alarm + vibration + a red
+"DISCONNECTED · 00:24 · N packets buffered" banner until it reconnects or the operator
+taps **SILENCE**. This is not a failure — the phone keeps recording locally the whole
+time (see `docs/REDMI_NOTE_12_SETUP.md` → Data recovery) and buffers for replay once the
+network returns. It is a **prompt to go check the phone**, not a data-loss alarm. The
+dashboard mirrors the same signal (a beep + a permanent red banner while any device is
+offline during RECORDING) plus a connectivity event log, so after the session you can see
+exactly when and how long each drop lasted instead of guessing why a report is PARTIAL.
+
+---
 
 ## Optional helper commands
 
@@ -191,3 +195,8 @@ The root `Makefile` includes a few shortcuts:
 - `make run-frontend` - start the dashboard
 - `make install-backend` - install backend dependencies
 - `make install-frontend` - install frontend dependencies
+
+## See also
+
+- `docs/REDMI_NOTE_12_SETUP.md` — per-phone MIUI/HyperOS setup to stop mid-session drops.
+- `connectivity_ops_fixes_plan.md` — what changed in the launcher/diagnostics/Redmi fixes and why.

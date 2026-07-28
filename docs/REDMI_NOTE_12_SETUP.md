@@ -61,6 +61,49 @@ either physically prevents Doze from engaging.
 If it still drops after all 7 steps, use the field fallback (step 8) and note the unit
 so it can be swapped or re-checked.
 
+## Data recovery
+
+Every session is also written to phone-local storage from START to STOP, regardless of
+Wi-Fi state:
+
+```
+/sdcard/Android/data/com.example.sensors_app/files/imu_sessions/<session_id>_<role>.csv
+```
+
+Pull it with:
+
+```
+adb pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup
+```
+
+or over USB/MTP: **Internal storage → Android → data → com.example.sensors_app → files →
+imu_sessions**. No root or special permission is needed — this is app-private external
+storage. The app keeps the last 20 sessions (~25 MB/hour each).
+
+If the dashboard reports a **PARTIAL** integrity status for a session, merge data in this
+order:
+1. `<session_id>_<role>_sensor_data.csv` (the primary backend capture)
+2. `<session_id>_<role>_sensor_data_late.csv` (buffered rows the phone delivered within
+   10 minutes of STOP), if present
+3. Sort the combined rows by `timestamp_ms` and drop duplicate `(device_id,
+   sequence_number)` pairs
+4. If rows are still missing from that window, pull them from the phone-local CSV above —
+   it is the only copy guaranteed to be complete regardless of what happened to Wi-Fi.
+
+Note: the phone-local CSV's `label_id`/`label_name` reflect the last label the phone
+received over the network. If the phone was offline when the operator changed the label,
+those columns may be stale — the backend's primary CSV is authoritative for labels.
+
+### About `orphan_*.bin` files
+
+If the app's own "Local files" list ever shows an `orphan_*.bin` file, it means the
+network-buffer flush could not confirm which session those bytes belonged to and
+quarantined them rather than deleting them. **The phone-local CSV above is already the
+recovery path** — orphan files hold the same packets, so you normally don't need them.
+They exist for forensics, and for the rare case of a phone that recorded before this
+local-CSV feature was deployed. To read one, use `tools/decode_fallback_buffer.py
+<file> --device-role <role> -o out.csv` from the repo root.
+
 ## Related
 
 See `connectivity_ops_fixes_plan.md` §5 for the full analysis (why this is ~80% phone /

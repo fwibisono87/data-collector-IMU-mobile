@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from .audit_logger import audit
-from .session_manager import session_manager
+from .session_manager import SessionState, session_manager
 from .ws_handler import router as ws_router, _live_broadcaster_loop
 
 
@@ -55,7 +55,16 @@ async def lifespan(app: FastAPI):
         local_ip, port, local_ip, port, local_ip, port, local_ip, port,
     )
     yield
-    # Shutdown
+    # Shutdown — finalise an in-flight session so the CSV tail is fsynced, the file is
+    # closed, and an integrity report exists. Ctrl-C used to lose up to FSYNC_INTERVAL_SEC
+    # of rows and leave the session unfinalised (plan D8).
+    try:
+        if session_manager.state == SessionState.RECORDING:
+            logger.warning("Shutdown during RECORDING — finalising session %s",
+                           session_manager.session_id)
+            await session_manager.stop_recording("backend_shutdown")
+    except Exception as exc:
+        logger.error("Shutdown finalisation failed: %s", exc)
     await audit.close()
     await _stop_mdns()
 
