@@ -84,12 +84,29 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 continue
 
             if session_manager.state != SessionState.RECORDING:
+                # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
+                # flushing the buffered tail of the session that just ended. Dropping it
+                # here (and letting the phone then erase its own copy) was a total-loss
+                # path (plan D3).
+                late_sid = io_manager.late_session_id
+                if late_sid:
+                    dev = session_manager.get_device(device_id)
+                    role = dev.device_role if dev else "unknown"
+                    if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
+                        dedup.add(device_id, late_sid, pkt.sequence_number)
+                        await io_manager.write_late(pkt, role)
                 continue
 
             if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
                 continue
 
             dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
+            # A device that joined or rejoined after START has no writer yet; without this
+            # every one of its packets is discarded while the dashboard counts them (plan D2).
+            if not io_manager.has_writer(device_id):
+                dev = session_manager.get_device(device_id)
+                if dev is not None:
+                    await io_manager.ensure_writer(device_id, dev.device_role)
             session_manager.increment_packets(device_id)
             session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
             try:

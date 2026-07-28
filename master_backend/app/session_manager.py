@@ -395,6 +395,11 @@ class SessionManager:
         from .ws_handler import broadcast_to_frontends, _state_snapshot, drop_latest_sample
         while True:
             await asyncio.sleep(1)
+
+            late_summary = await io_manager.finalize_late()
+            if late_summary:
+                await broadcast_to_frontends({"type": "LATE_DELIVERY", **late_summary})
+
             if self.state != SessionState.IDLE:
                 continue
             dead = [
