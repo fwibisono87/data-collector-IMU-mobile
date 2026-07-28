@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/internal_sensor_manager.dart';
+import '../services/local_session_recorder.dart';
 import '../services/websocket_client.dart';
 import '../widgets/graph_widget.dart';
 import '../models/sensor_packet.dart';
@@ -95,6 +96,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.folder_outlined, color: Colors.white54),
+            onPressed: () => _showLocalFiles(context),
+            tooltip: 'Local files',
+          ),
           _WsStatusDot(_wsState),
           const SizedBox(width: 12),
         ],
@@ -115,6 +121,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             sent: _packetsSent,
             buffered: _packetsBuffered,
             activeLabel: _activeLabel,
+            localRows: LocalSessionRecorder().rows,
+            localOpen: LocalSessionRecorder().isOpen,
+            localError: LocalSessionRecorder().lastError,
           ),
           Expanded(
             child: ListView(
@@ -184,6 +193,54 @@ class _DashboardScreenState extends State<DashboardScreen> {
       MaterialPageRoute(builder: (_) => const ConnectionScreen()),
     );
   }
+
+  Future<void> _showLocalFiles(BuildContext context) async {
+    final files = await LocalSessionRecorder().listSessions();
+    if (!context.mounted) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16213E),
+      isScrollControlled: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        builder: (_, scrollController) => Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(12),
+              child: Text('Local session recordings',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            if (files.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text('No local recordings yet.',
+                    style: TextStyle(color: Colors.white38)),
+              ),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                itemCount: files.length,
+                itemBuilder: (_, i) {
+                  final f = files[i];
+                  final sizeMb = f.lengthSync() / (1024 * 1024);
+                  return ListTile(
+                    dense: true,
+                    title: Text(f.uri.pathSegments.last,
+                        style: const TextStyle(color: Colors.white, fontSize: 12)),
+                    subtitle: SelectableText(f.path,
+                        style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                    trailing: Text('${sizeMb.toStringAsFixed(1)} MB',
+                        style: const TextStyle(color: Colors.cyanAccent, fontSize: 11)),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _WsStatusDot extends StatelessWidget {
@@ -223,6 +280,9 @@ class _StatusBar extends StatelessWidget {
   final int sent;
   final int buffered;
   final int activeLabel;
+  final int localRows;
+  final bool localOpen;
+  final String? localError;
 
   const _StatusBar({
     required this.role,
@@ -233,6 +293,9 @@ class _StatusBar extends StatelessWidget {
     required this.sent,
     required this.buffered,
     required this.activeLabel,
+    required this.localRows,
+    required this.localOpen,
+    required this.localError,
   });
 
   @override
@@ -305,6 +368,13 @@ class _StatusBar extends StatelessWidget {
                     style: TextStyle(
                         color: activeLabel == 0 ? Colors.white54 : Colors.greenAccent,
                         fontSize: 11)),
+              if (localError != null)
+                Text('Local backup FAILED: $localError',
+                    style: const TextStyle(
+                        color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold))
+              else if (localOpen)
+                Text('Local: ${localRows.toString()} rows',
+                    style: const TextStyle(color: Colors.cyanAccent, fontSize: 11)),
             ],
           ),
         ],
