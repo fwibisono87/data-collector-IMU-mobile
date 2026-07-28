@@ -38,6 +38,7 @@ class WebSocketClient {
   int _sequence = 0;
   int _packetsSent = 0;
   int _packetsBuffered = 0;
+  int _flushCounter = 0;
   DateTime? _lastPong;
   String? _activeSessionId;
   String? _lastConnectError;
@@ -95,6 +96,7 @@ class WebSocketClient {
     _deviceId = await DeviceIdService().getDeviceId();
     _deviceRole = await DeviceIdService().getDeviceRole();
     await DeviceIdService().saveServerIp(serverIp);
+    await _restoreSequenceIfInterrupted();
 
     try {
       _control = WebSocketChannel.connect(
@@ -138,6 +140,10 @@ class WebSocketClient {
       // Start foreground service to keep process alive when screen is off.
       // Guard inside start() means repeated calls on reconnect are safe.
       await ForegroundServiceHandler().start();
+      // Reconcile against the backend, then decide what to do with any buffered bytes.
+      // This must run for EVERY connect path (first connect, reconnect, resume-after-kill),
+      // not just the reconnect timer (plan R3).
+      unawaited(_afterConnectReconcile());
       return true;
     } catch (e) {
       // Real failure (network still down, handshake timed out). Go offline and let the
@@ -194,25 +200,30 @@ class WebSocketClient {
 
     final bytes = proto.toBytes();
 
+    // Persist the sequence counter on BOTH the online and offline paths — persisting only
+    // while connected meant a process kill during an offline stretch restored a sequence
+    // number stale by the whole outage, defeating the D5 fix's +5000 margin (plan R5).
+    if (_activeSessionId != null && seq % 250 == 0) {
+      _persistSequence(seq);
+    }
+
     if (_state == WsState.connected && _telemetry != null) {
       _telemetry!.sink.add(bytes);
       _packetsSent++;
-
-      // Persist sequence number every 500 packets.
-      if (_activeSessionId != null && seq % 500 == 0) {
-        _persistSequence(seq);
-      }
     } else {
-      // Network offline — buffer to disk.
-      if (!FallbackBufferManager().isActive) {
-        FallbackBufferManager().activate();
+      // Only buffer while a session is actually running. Buffering during idle offline
+      // periods filled storage with data nobody asked for; and _activeSessionId is
+      // exactly the tag we need to prove, later, which session these bytes belong to
+      // (plan T10).
+      if (_activeSessionId == null) return;
+      final buf = FallbackBufferManager();
+      if (!buf.isActive) {
+        // fire-and-forget open; enqueue() below queues in memory until the file is ready
+        buf.activate(sessionId: _activeSessionId);
       }
-      FallbackBufferManager().write(bytes);
-      _packetsBuffered = FallbackBufferManager().bufferedCount;
-      ForegroundServiceHandler().updateNotification(
-        _packetsSent,
-        _packetsBuffered,
-      );
+      buf.enqueue(bytes);
+      _packetsBuffered = buf.bufferedCount;
+      ForegroundServiceHandler().updateNotification(_packetsSent, _packetsBuffered);
     }
   }
 
@@ -364,23 +375,53 @@ class WebSocketClient {
   void _scheduleReconnect() {
     Future.delayed(const Duration(seconds: 3), () async {
       if (_state != WsState.offline) return;
-      final ok = await connect(_serverIp);
-      if (ok && FallbackBufferManager().isActive) {
-        await _flushFallbackBuffer();
-      }
+      await connect(_serverIp);
+      // Reconciliation + flush now happen inside connect()'s success path for every
+      // entry point, not just this timer (plan R3).
     });
   }
 
+  Future<void> _afterConnectReconcile() async {
+    await _waitForServerState(const Duration(seconds: 3));
+    await _flushFallbackBuffer();
+  }
+
   Future<void> _flushFallbackBuffer() async {
-    if (!FallbackBufferManager().isActive) return;
+    final buf = FallbackBufferManager();
+    // Not just in-memory state: a buffer that survived a process death has isActive==false
+    // and bufferedCount==0 in this fresh process, but real bytes still sit on disk (plan T17).
+    if (!buf.isActive && (await buf.pendingOnDisk()) == 0) return;
+
+    // Deliver ONLY into the session these bytes belong to. The backend discards telemetry
+    // that does not match an open (or late-window) session, and the old code then erased
+    // the local copy on "flush completed" — which only meant the socket accepted the
+    // bytes, never that anything was written (plan D3).
+    final target = (_serverState == 'RECORDING') ? _activeSessionId : _serverLateSid;
+    if (target == null || buf.sessionId == null || buf.sessionId != target) {
+      final moved = await buf.quarantine();
+      _packetsBuffered = 0;
+      _emitEvent({'type': 'buffer_orphaned', 'files': moved, 'session_id': buf.sessionId});
+      return;
+    }
+
     bool completed = true;
-    await for (final bytes in FallbackBufferManager().flushStream()) {
+    await for (final bytes in buf.flushStream()) {
       if (_state != WsState.connected) { completed = false; break; }
       _telemetry?.sink.add(bytes);
+      if (++_flushCounter % 200 == 0) {
+        // Re-check the target: a new session may have started mid-flush, and the rest of
+        // this buffer does NOT belong to it (plan R6).
+        final stillValid = (_serverState == 'RECORDING')
+            ? (_activeSessionId == target)
+            : (_serverLateSid == target);
+        if (!stillValid) { completed = false; break; }
+        await Future.delayed(const Duration(milliseconds: 2));   // pace the sink, no backpressure
+      }
     }
     if (completed && _state == WsState.connected) {
-      await FallbackBufferManager().clearAfterFlush();
+      await buf.clearAfterFlush();
       _packetsBuffered = 0;
+      _emitEvent({'type': 'buffer_flushed'});
     }
     // If the socket dropped mid-flush, leave the buffer intact; the next reconnect
     // re-flushes it. Backend dedup (device_id, session_id, sequence_number) makes the
@@ -465,6 +506,26 @@ class WebSocketClient {
       lastSequenceNumber: seq,
       deviceRole: _deviceRole,
     );
+  }
+
+  // The backend dedups on (device_id, session_id, sequence_number). After a process kill
+  // (MIUI does this routinely) _sequence restarted at 0 while the backend had already seen
+  // 0…N for this session, so every packet was silently discarded until the counter caught
+  // up — up to the entire remaining session (plan D5). Resume above the last persisted
+  // value with a margin larger than the persistence interval. Sequence gaps are harmless:
+  // dedup is keyed on exact values, not ranges.
+  Future<void> _restoreSequenceIfInterrupted() async {
+    if (_activeSessionId != null || _sequence != 0) return;
+    final saved = await SessionPersistence().loadInterrupted();
+    if (saved == null) return;
+    if (saved['device_id'] != _deviceId) return;
+    final sid = saved['session_id']?.toString();
+    final last = (saved['last_sequence_number'] as num?)?.toInt();
+    if (sid == null || last == null) return;
+    _activeSessionId = sid;
+    _sequence = last + 5000;
+    await FallbackBufferManager().loadMeta();     // re-attach any surviving buffer to its session
+    _emitEvent({'type': 'session_resumed', 'session_id': sid, 'from_sequence': _sequence});
   }
 
   // ── Disconnect ───────────────────────────────────────────────────────────
