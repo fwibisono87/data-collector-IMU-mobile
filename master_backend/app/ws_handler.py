@@ -30,6 +30,16 @@ _frontend_connections: set[WebSocket] = set()
 _latest_samples: dict[str, dict] = {}
 
 
+def _state_pong(command_id: str = "") -> bytes:
+    """Authoritative session state, delivered on the PONG heartbeat (plan DD-1)."""
+    return make_pong(
+        command_id,
+        state=session_manager.state.value,
+        session_id=session_manager.session_id or "",
+        late_sid=io_manager.late_session_id,
+    )
+
+
 def drop_latest_sample(device_id: str) -> None:
     """Remove a pruned device's cached sample so /ws/live stops re-broadcasting it
     and the cache cannot grow unbounded across device churn."""
@@ -151,6 +161,10 @@ async def control_ws(websocket: WebSocket) -> None:
         )
         # Notify frontend immediately so device shows as online.
         await broadcast_to_frontends(_state_snapshot())
+        # Reconciliation on (re)connect: tell the device what the backend believes is
+        # happening RIGHT NOW. Without this a phone that was offline during STOP stays
+        # stuck showing "RECORDING" forever (plan D1).
+        await websocket.send_bytes(_state_pong())
 
         # Subsequent messages are Commands.
         async for raw in websocket.iter_bytes():
@@ -181,7 +195,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
     match cmd.type:
         case CommandType.PING:
             session_manager.mark_ping(device_id)
-            await ws.send_bytes(make_pong(cmd.command_id))
+            await ws.send_bytes(_state_pong(cmd.command_id))
 
         case CommandType.CLOCK_SYNC:
             t1_ms = int(time.time() * 1000)
@@ -200,10 +214,8 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                 payload = json.loads(cmd.payload) if cmd.payload else {}
             except Exception:
                 payload = {}
-            ok = await session_manager.start_recording(payload)
-            status = "ok" if ok else "fail"
-            detail = "" if ok else "Invalid state for START_SESSION"
-            await ws.send_bytes(make_ack(cmd.command_id, status, detail))
+            ok, detail = await session_manager.start_recording(payload)
+            await ws.send_bytes(make_ack(cmd.command_id, "ok" if ok else "fail", "" if ok else detail))
             if ok:
                 await audit.log("INFO", "session_start", {"initiated_by": device_id[:8]})
                 # Broadcast START to all other connected devices.
@@ -223,7 +235,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                 reason = payload.get("reason", "operator_stop")
             except Exception:
                 reason = "operator_stop"
-            report = await session_manager.stop_recording(reason)
+            await session_manager.stop_recording(reason)
             await ws.send_bytes(make_ack(cmd.command_id, "ok"))
             await audit.log("INFO", "session_stop", {"reason": reason})
 

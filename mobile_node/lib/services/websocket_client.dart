@@ -43,6 +43,22 @@ class WebSocketClient {
   String? _lastConnectError;
   String? get lastConnectError => _lastConnectError;
 
+  String? _serverState;          // authoritative backend session state, from PONG
+  String? _serverLateSid;        // session still accepting late telemetry, or null
+  DateTime? _lastStateAtMs;      // when we last heard authoritative state
+  DateTime? _offlineSince;       // for the UI's "offline for 00:24" timer
+
+  String? get serverState => _serverState;
+  String? get serverLateSid => _serverLateSid;
+  DateTime? get lastStateAt => _lastStateAtMs;
+  DateTime? get offlineSince => _offlineSince;
+  /// True when we believe we are recording but have not heard from the backend
+  /// for >15 s — the UI must show this as "unconfirmed", never as a confident red.
+  bool get isRecordingUnconfirmed =>
+      _activeSessionId != null &&
+      (_lastStateAtMs == null ||
+       DateTime.now().difference(_lastStateAtMs!).inSeconds > 15);
+
   // Pending CLOCK_SYNC requests: commandId → t0Ms
   final Map<String, int> _pendingSyncs = {};
   final List<int> _syncOffsets = [];
@@ -113,6 +129,7 @@ class WebSocketClient {
       );
 
       _setState(WsState.connected);
+      _offlineSince = null;
       // Reset the pong clock so the first ping-timer tick after (re)connect does not
       // immediately time out on a stale _lastPong (Defect A — the critical fix).
       _lastPong = DateTime.now();
@@ -215,6 +232,7 @@ class WebSocketClient {
     switch (cmd.type) {
       case CommandType.PONG:
         _lastPong = DateTime.now();
+        await _applyServerState(cmd.payload);
         _emitEvent({'type': 'pong'});
 
       case CommandType.CLOCK_SYNC:
@@ -277,12 +295,67 @@ class WebSocketClient {
     }
   }
 
+  // The backend is the single source of truth for session state. It rides on the 1 Hz
+  // PONG heartbeat and on one unsolicited PONG right after registration, so a phone that
+  // missed a START or a STOP while offline is corrected within ~1 s of reconnecting
+  // instead of staying wrong forever (plan D1).
+  Future<void> _applyServerState(String payload) async {
+    if (payload.isEmpty) return;            // old backend → no information, keep today's behaviour
+    Map<String, dynamic> p;
+    try {
+      p = jsonDecode(payload) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    final state = p['state']?.toString();
+    if (state == null || state.isEmpty) return;
+
+    String? nonEmpty(Object? v) {
+      final s = v?.toString() ?? '';
+      return s.isEmpty ? null : s;
+    }
+
+    _serverState = state;
+    _serverLateSid = nonEmpty(p['late_sid']);
+    _lastStateAtMs = DateTime.now();
+
+    final sid = nonEmpty(p['session_id']);
+    final serverRecording = state == 'RECORDING';
+
+    if (!serverRecording && _activeSessionId != null) {
+      // We think we are recording; the backend is not. We missed the STOP.
+      final ended = _activeSessionId!;
+      _activeSessionId = null;
+      SessionPersistence().clear();
+      _emitEvent({'type': 'stop_session', 'reason': 'state_resync', 'session_id': ended});
+    } else if (serverRecording && sid != null && _activeSessionId != sid) {
+      // A session is running that we are not part of — we missed the START, or a new
+      // session began while we were dark. Adopt it and start a fresh dedup namespace.
+      _activeSessionId = sid;
+      _sequence = 0;
+      _emitEvent({'type': 'start_session', 'reason': 'state_resync', 'session_id': sid});
+    }
+  }
+
+  /// Wait briefly for the first authoritative state after (re)connect.
+  Future<bool> _waitForServerState(Duration timeout) async {
+    final deadline = DateTime.now().add(timeout);
+    while (_serverState == null && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      if (_state != WsState.connected) return false;
+    }
+    return _serverState != null;
+  }
+
   void _onControlDisconnect() {
     // Only a live, connected channel can trigger a drop→reconnect. If we are already
     // disconnected (explicit), offline (reconnect pending), or connecting, ignore the
     // duplicate signal so reconnect attempts never stack (Defect C).
     if (_state != WsState.connected) return;
     _setState(WsState.offline);
+    _serverState = null;      // never gate a buffer flush on a stale "RECORDING"
+    _serverLateSid = null;
+    _offlineSince = DateTime.now();
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
     _scheduleReconnect();

@@ -16,6 +16,7 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   StreamSubscription? _stateSub;
   StreamSubscription? _eventSub;
+  Timer? _tickTimer;
   Stream<SensorPacket>? _sensorStream;
 
   WsState _wsState = WsState.disconnected;
@@ -23,6 +24,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   int _packetsSent = 0;
   int _packetsBuffered = 0;
   String? _sessionId;
+  String? _serverState;
   int _activeLabel = 0;
   String _deviceRole = WebSocketClient().deviceRole;
 
@@ -41,6 +43,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // Reflect current state immediately.
     _wsState = WebSocketClient().state;
+
+    // Drives time-based UI (unconfirmed-recording badge, offline timer) that would
+    // otherwise only refresh when a new WebSocketClient event arrives.
+    _tickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
   }
 
   void _onEvent(Map<String, dynamic> e) {
@@ -49,6 +57,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _packetsSent = WebSocketClient().packetsSent;
       _packetsBuffered = WebSocketClient().packetsBuffered;
       _sessionId = WebSocketClient().activeSessionId;
+      _serverState = WebSocketClient().serverState;
       if (type == 'start_session') _isRecording = true;
       if (type == 'stop_session') {
         _isRecording = false;
@@ -69,6 +78,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _stateSub?.cancel();
     _eventSub?.cancel();
+    _tickTimer?.cancel();
     InternalSensorManager().stop();
     WebSocketClient().detachSensorStream();
     super.dispose();
@@ -99,6 +109,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           _StatusBar(
             role: _deviceRole,
             isRecording: _isRecording,
+            unconfirmed: WebSocketClient().isRecordingUnconfirmed,
+            serverState: _serverState,
             sessionId: _sessionId,
             sent: _packetsSent,
             buffered: _packetsBuffered,
@@ -205,6 +217,8 @@ class _WsStatusDot extends StatelessWidget {
 class _StatusBar extends StatelessWidget {
   final String role;
   final bool isRecording;
+  final bool unconfirmed;
+  final String? serverState;
   final String? sessionId;
   final int sent;
   final int buffered;
@@ -213,6 +227,8 @@ class _StatusBar extends StatelessWidget {
   const _StatusBar({
     required this.role,
     required this.isRecording,
+    required this.unconfirmed,
+    required this.serverState,
     required this.sessionId,
     required this.sent,
     required this.buffered,
@@ -247,12 +263,28 @@ class _StatusBar extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                isRecording ? '● RECORDING' : '○ STANDBY',
+                !isRecording
+                    ? '○ STANDBY'
+                    : (unconfirmed ? '● RECORDING (unconfirmed)' : '● RECORDING'),
                 style: TextStyle(
-                    color: isRecording ? Colors.redAccent : Colors.white38,
+                    color: !isRecording
+                        ? Colors.white38
+                        : (unconfirmed ? Colors.amber : Colors.redAccent),
                     fontWeight: FontWeight.bold,
                     fontSize: 12),
               ),
+              if (isRecording && unconfirmed)
+                WebSocketClient().lastStateAt != null
+                    ? Text(
+                        'No confirmation from backend for '
+                        '${DateTime.now().difference(WebSocketClient().lastStateAt!).inSeconds}s',
+                        style: const TextStyle(color: Colors.amber, fontSize: 10),
+                      )
+                    : const Text('No confirmation from backend yet',
+                        style: TextStyle(color: Colors.amber, fontSize: 10)),
+              if (serverState != null && !(isRecording && unconfirmed))
+                Text('Backend: $serverState',
+                    style: const TextStyle(color: Colors.white24, fontSize: 10)),
               if (sessionId != null)
                 Text('Session: ${sessionId!.substring(0, 8)}…',
                     style: const TextStyle(

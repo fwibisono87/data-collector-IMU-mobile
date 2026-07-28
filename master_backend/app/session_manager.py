@@ -26,6 +26,20 @@ _DEVICE_OFFLINE_SEC = 8.0   # matches Flutter _pongTimeoutSec in websocket_clien
 _COORDINATED_START_LEAD_MS = 500   # ms ahead of now for scheduled_start
 
 
+def _open_offline_interval(dev: "DeviceInfo", source: str) -> None:
+    """Open an offline interval unless one is already open.
+
+    A single physical drop used to append up to three intervals (unregister_device +
+    _monitor_offline + note_telemetry_disconnect), inflating the '⚠ N gap(s)' badge and
+    the integrity report (plan D6).
+    """
+    if dev.offline_intervals and dev.offline_intervals[-1]["end_ms"] is None:
+        return
+    dev.offline_intervals.append(
+        {"start_ms": int(time.time() * 1000), "end_ms": None, "source": source}
+    )
+
+
 class SessionState(str, Enum):
     IDLE = "IDLE"
     PREFLIGHT = "PREFLIGHT"
@@ -124,10 +138,7 @@ class SessionManager:
             dev.substate = DeviceSubstate.DISCONNECTED
             # Record offline interval if session was recording
             if self.state == SessionState.RECORDING:
-                dev.offline_intervals.append({
-                    "start_ms": int(time.time() * 1000),
-                    "end_ms": None,
-                })
+                _open_offline_interval(dev, "control_disconnect")
 
     def note_telemetry_disconnect(self, device_id: str) -> None:
         """Record a telemetry-channel drop for the integrity report.
@@ -135,14 +146,8 @@ class SessionManager:
         if device_id not in self._devices:
             return
         dev = self._devices[device_id]
-        if self.state == SessionState.RECORDING and not (
-            dev.offline_intervals and dev.offline_intervals[-1]["end_ms"] is None
-        ):
-            dev.offline_intervals.append({
-                "start_ms": int(time.time() * 1000),
-                "end_ms": None,
-                "source": "telemetry_disconnect",
-            })
+        if self.state == SessionState.RECORDING:
+            _open_offline_interval(dev, "telemetry_disconnect")
 
     def mark_ping(self, device_id: str) -> None:
         if device_id in self._devices:
@@ -268,6 +273,10 @@ class SessionManager:
         await self._transition(SessionState.IDLE)
         await self._clear_state()
         dedup.clear()
+
+        # Re-assert state for anyone who reconnected during finalisation (plan D1).
+        from .ws_handler import _state_pong
+        await self.broadcast_control(_state_pong())
         return report
 
     async def abort(self, reason: str = "error") -> None:
@@ -289,12 +298,20 @@ class SessionManager:
     # ── Broadcast helpers ────────────────────────────────────────────────────
 
     async def broadcast_control(self, data: bytes) -> None:
+        """Send to every device whose control socket is still open.
+
+        `is_online` is a liveness HEURISTIC (pinged within _DEVICE_OFFLINE_SEC), not
+        socket state. Gating on it meant STOP_SESSION was withheld from phones whose
+        socket was perfectly alive but whose last PING was 9 s old — the phone then
+        stayed stuck in RECORDING forever (plan D1).
+        """
         for device in self._devices.values():
-            if device.control_ws and device.is_online:
-                try:
-                    await device.control_ws.send_bytes(data)
-                except Exception:
-                    device.is_online = False
+            if device.control_ws is None:
+                continue
+            try:
+                await device.control_ws.send_bytes(data)
+            except Exception:
+                device.is_online = False
 
     async def send_to_device(self, device_id: str, data: bytes) -> None:
         dev = self._devices.get(device_id)
@@ -361,11 +378,7 @@ class SessionManager:
                         "device_offline",
                         {"device_id": dev.device_id, "role": dev.device_role},
                     )
-                    # Mark offline interval start
-                    dev.offline_intervals.append({
-                        "start_ms": int(time.time() * 1000),
-                        "end_ms": None,
-                    })
+                    _open_offline_interval(dev, "ping_timeout")
             if changed:
                 await broadcast_to_frontends(_state_snapshot())
 

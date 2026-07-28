@@ -85,6 +85,17 @@ class IoManager:
         self._active_label_id = label_id
         self._active_label_name = label_name
 
+    @property
+    def late_session_id(self) -> str:
+        """Session still accepting late telemetry, or '' — advertised to phones on PONG.
+
+        Stubbed to a constant here; T5 (plan C2) replaces the body with the real
+        late-delivery window logic. Declared as a property from the start (not an
+        __init__ attribute) to avoid an AttributeError when T5 turns it into a real
+        property (plan R1).
+        """
+        return ""
+
     async def open_session(
         self,
         session_id: str,

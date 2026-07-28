@@ -2,6 +2,7 @@
 Hand-written protobuf parser/builder matching shared_contracts/commands.proto.
 Replace with protoc-generated output after running `make proto-python`.
 """
+import json
 import struct
 import time
 from dataclasses import dataclass, field
@@ -99,24 +100,37 @@ class Command:
         return out
 
 
-def make_pong(command_id: str = "") -> bytes:
-    return Command(type=CommandType.PONG, command_id=command_id).to_bytes()
+def make_pong(
+    command_id: str = "",
+    state: str = "",
+    session_id: str = "",
+    late_sid: str = "",
+) -> bytes:
+    """PONG doubles as the authoritative session-state heartbeat (1 Hz).
+
+    The payload is additive and optional: an older mobile build ignores it and
+    behaves exactly as before. `late_sid` is non-empty only while the backend is
+    still accepting late telemetry for a session that has already stopped.
+    """
+    payload = ""
+    if state:
+        payload = json.dumps(
+            {"state": state, "session_id": session_id, "late_sid": late_sid}
+        )
+    return Command(type=CommandType.PONG, payload=payload, command_id=command_id).to_bytes()
 
 
 def make_ack(command_id: str, status: str = "ok", detail: str = "") -> bytes:
-    import json
     payload = json.dumps({"command_id": command_id, "status": status, "detail": detail})
     return Command(type=CommandType.ACK, payload=payload, command_id=command_id).to_bytes()
 
 
 def make_error_alert(code: str, detail: str = "") -> bytes:
-    import json
     payload = json.dumps({"code": code, "detail": detail})
     return Command(type=CommandType.ERROR_ALERT, payload=payload).to_bytes()
 
 
 def make_clock_sync_response(command_id: str, t0_ms: int, t1_ms: int, t2_ms: int) -> bytes:
-    import json
     payload = json.dumps({"t0_ms": t0_ms, "t1_ms": t1_ms, "t2_ms": t2_ms})
     return Command(
         type=CommandType.CLOCK_SYNC,
