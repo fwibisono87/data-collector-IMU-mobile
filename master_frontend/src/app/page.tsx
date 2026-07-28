@@ -3,12 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 import { wsClient, type SessionState, type DeviceInfo, type StateUpdate } from "@/lib/ws_client";
+import { armAudio } from "@/lib/alert_sound";
 import StatusBanner from "@/components/StatusBanner";
 import SessionForm from "@/components/SessionForm";
 import PreflightPanel from "@/components/PreflightPanel";
 import LabelingPanel from "@/components/LabelingPanel";
 import IntegrityReport from "@/components/IntegrityReport";
 import DevicePanel from "@/components/DevicePanel";
+import AlertCenter from "@/components/AlertCenter";
 // Direct import — dynamic() breaks forwardRef so camRef.current would be null.
 import MultiCameraRecorder, {
   type MultiCameraRecorderHandle,
@@ -91,6 +93,16 @@ export default function Home() {
             camRef.current?.startRecording(su.session_id || String(Date.now()));
           }, Math.max(0, delay));
         }
+      } else if (msg.type === "LATE_DELIVERY") {
+        // A phone flushed its buffered tail after STOP, into a *_late.csv sidecar
+        // (plan DD-4). Not an error — but the operator must know it exists and needs
+        // to be merged before analysis.
+        const s = msg as unknown as { session_id: string; devices: Record<string, { rows_appended: number }> };
+        const total = Object.values(s.devices ?? {}).reduce((a, d) => a + (d.rows_appended ?? 0), 0);
+        alert(
+          `Late delivery received for session ${s.session_id}: ${total.toLocaleString()} rows ` +
+          `written to *_sensor_data_late.csv. Merge with the main CSV before analysis.`
+        );
       }
     });
     const unsubLive = wsClient.onLive((samples) => setLiveSamples({ ...samples }));
@@ -125,6 +137,7 @@ export default function Home() {
 
   // ── Connect ────────────────────────────────────────────────────────────────
   const handleConnect = () => {
+    armAudio();   // the click is the required user gesture before browser audio can play
     setConnectError("");
     wsClient.connect(backendIp);
 
@@ -266,6 +279,17 @@ export default function Home() {
       <div className="relative z-10 flex flex-col h-screen overflow-hidden">
         <StatusBanner state={sessionState} sessionId={sessionId} devices={devices} isWsConnected={isWsConnected} backendIp={backendIp} />
 
+        {isRecording && devices.some(d => !d.is_online) && (
+          <div className="shrink-0 bg-red-600/25 border-y border-red-500/50 px-4 py-2 text-sm
+                          text-red-200 font-bold flex items-center gap-3 animate-pulse">
+            <span>⚠</span>
+            <span>
+              {devices.filter(d => !d.is_online).map(d => d.role).join(", ")} OFFLINE — data is
+              buffering on the phone and will be re-sent on reconnect. Do not stop the session yet.
+            </span>
+          </div>
+        )}
+
         <div className="flex flex-1 gap-0 overflow-hidden min-h-0">
           {/* Left panel */}
           <aside className="glass-rail w-64 shrink-0 border-r border-white/10 flex flex-col gap-4 p-4 overflow-y-auto">
@@ -281,6 +305,9 @@ export default function Home() {
               liveSamples={liveSamples}
               isRecording={isRecording}
             />
+            <div className="glass-panel p-3">
+              <AlertCenter devices={devices} state={sessionState} isWsConnected={isWsConnected} />
+            </div>
             <PreflightPanel
               isWsConnected={isWsConnected}
               devices={devices}

@@ -385,6 +385,8 @@ def _state_snapshot() -> dict:
                 "substate": d.substate,
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),
+                "rate_hz": round(d.rate_hz, 1),
+                "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }
             for d in session_manager._devices.values()
         ],

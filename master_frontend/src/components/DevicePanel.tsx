@@ -104,7 +104,9 @@ export default function DevicePanel({ devices, quorum, liveSamples, isRecording 
               <MiniSparkline deviceId={d.device_id} samples={liveSamples} />
 
               <div className="flex justify-between mt-1 text-xs text-gray-500">
-                <span>{d.packets?.toLocaleString() ?? 0} pkts</span>
+                <span className={d.streaming ? "text-green-400" : "text-gray-500"}>
+                  {d.packets?.toLocaleString() ?? 0} pkts · {(d.rate_hz ?? 0).toFixed(0)} Hz
+                </span>
                 {(d.offline_intervals ?? 0) > 0 && (
                   <span className="text-orange-400">⚠ {d.offline_intervals} gap(s)</span>
                 )}
@@ -112,6 +114,9 @@ export default function DevicePanel({ devices, quorum, liveSamples, isRecording 
                   <span className="text-green-400">● live</span>
                 )}
               </div>
+              {isRecording && d.is_online && d.streaming === false && (
+                <div className="mt-1 text-xs text-red-400 font-bold">⚠ no data</div>
+              )}
             </div>
           );
         })}

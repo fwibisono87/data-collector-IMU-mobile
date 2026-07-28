@@ -226,6 +226,7 @@ class FallbackBufferManager {
     _isActive = false;
     _sessionId = null;
     _fsyncTimer?.cancel();
+    await _pruneOrphans();
     return moved;
   }
 
@@ -245,5 +246,20 @@ class FallbackBufferManager {
   Future<List<FileSystemEntity>> listOrphans() async {
     final dir = await getApplicationDocumentsDirectory();
     return dir.listSync().where((e) => e.path.contains('/orphan_')).toList();
+  }
+
+  /// Orphan files are forensics, not the recovery path — the phone-local CSV (T12) is
+  /// already the complete, analysis-ready copy of the same bytes. Keep the 10 most
+  /// recent so a run of drops doesn't fill storage with duplicate data (plan T19/D16).
+  static const int _maxOrphansKept = 10;
+
+  Future<void> _pruneOrphans() async {
+    final orphans = await listOrphans();
+    orphans.sort((a, b) => b.path.compareTo(a.path));   // filenames are epoch-stamped
+    for (final f in orphans.skip(_maxOrphansKept)) {
+      try {
+        await f.delete();
+      } catch (_) {}
+    }
   }
 }

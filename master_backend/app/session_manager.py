@@ -70,6 +70,9 @@ class DeviceInfo:
     substate: DeviceSubstate = DeviceSubstate.CONNECTED
     first_packet_ts: int | None = None      # epoch ms of first packet (for start drift)
     offline_intervals: list = field(default_factory=list)  # [{start_ms, end_ms}]
+    last_packet_at: float = 0.0             # time.monotonic() of the last accepted packet
+    _packets_prev_tick: int = 0
+    rate_hz: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -167,7 +170,9 @@ class SessionManager:
 
     def increment_packets(self, device_id: str) -> None:
         if device_id in self._devices:
-            self._devices[device_id].packets_received += 1
+            dev = self._devices[device_id]
+            dev.packets_received += 1
+            dev.last_packet_at = time.monotonic()
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         return self._devices.get(device_id)
@@ -367,20 +372,24 @@ class SessionManager:
         from .ws_handler import broadcast_to_frontends, _state_snapshot
         while self.state == SessionState.RECORDING:
             await asyncio.sleep(1)
-            changed = False
             for dev in self._devices.values():
                 was_online = dev.is_online
                 dev.is_online = dev.is_alive
+                dev.rate_hz = float(dev.packets_received - dev._packets_prev_tick)
+                dev._packets_prev_tick = dev.packets_received
                 if was_online and not dev.is_online:
-                    changed = True
                     await audit.log(
                         "WARN",
                         "device_offline",
                         {"device_id": dev.device_id, "role": dev.device_role},
                     )
                     _open_offline_interval(dev, "ping_timeout")
-            if changed:
-                await broadcast_to_frontends(_state_snapshot())
+            # Broadcast unconditionally: the packet counters, the rate, and the substate
+            # all change every second, and nothing else pushes them. Without this the
+            # dashboard shows "0 pkts" and no "live" badge for the entire recording,
+            # which is a large part of why a healthy session looks like nothing is
+            # happening (plan D17).
+            await broadcast_to_frontends(_state_snapshot())
 
     # ── Idle reaper ──────────────────────────────────────────────────────────
 

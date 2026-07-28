@@ -94,6 +94,16 @@ Note: the phone-local CSV's `label_id`/`label_name` reflect the last label the p
 received over the network. If the phone was offline when the operator changed the label,
 those columns may be stale — the backend's primary CSV is authoritative for labels.
 
+### About `orphan_*.bin` files
+
+If the app's own "Local files" list ever shows an `orphan_*.bin` file, it means the
+network-buffer flush could not confirm which session those bytes belonged to and
+quarantined them rather than deleting them. **The phone-local CSV above is already the
+recovery path** — orphan files hold the same packets, so you normally don't need them.
+They exist for forensics, and for the rare case of a phone that recorded before this
+local-CSV feature was deployed. To read one, use `tools/decode_fallback_buffer.py
+<file> --device-role <role> -o out.csv` from the repo root.
+
 ## Related
 
 See `connectivity_ops_fixes_plan.md` §5 for the full analysis (why this is ~80% phone /

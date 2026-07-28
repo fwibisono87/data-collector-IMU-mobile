@@ -5,10 +5,12 @@ Run from repo root: python tools/device_simulator.py
 Sends: DeviceRegister, PING every 1s, SensorPacket at --rate Hz on telemetry channel.
 Can simulate a mid-session drop (--drop-at/--drop-for/--drops — closes BOTH the
 control and telemetry sockets, so the backend's is_online heuristic actually flips),
-a late join (--join-late), buffering-while-dark (--buffer-while-dark, replayed on
-reconnect before live streaming resumes — emulates FallbackBufferManager), and a
-sequence-counter restart after a drop (--seq-restart, reproduces D5).
-See connectivity_robustness_plan.md §T0 for the scenarios this drives.
+a telemetry-only drop that leaves control/PING alive (--drop-telemetry-only, reproduces
+D15 — online but sending no data), a late join (--join-late), buffering-while-dark
+(--buffer-while-dark, replayed on reconnect before live streaming resumes — emulates
+FallbackBufferManager), and a sequence-counter restart after a drop (--seq-restart,
+reproduces D5).
+See connectivity_robustness_plan.md §T0/§T18 for the scenarios this drives.
 
 Press Ctrl+C to disconnect.
 """
@@ -147,6 +149,39 @@ async def run(args: argparse.Namespace) -> None:
     total_drops = args.drops if args.drop_at is not None else 0
     pending_replay: list[bytes] = []
 
+    if args.drop_telemetry_only:
+        # Control channel (and its PING/PONG) never drops — only telemetry does. This
+        # reproduces D15: the device stays "online" (green) on the dashboard the whole
+        # time while silently sending no data.
+        ctrl = await websockets.connect(f"ws://{args.host}:8000/ws/control")
+        await ctrl.send(build_device_register(device_id, args.role))
+        print("  DeviceRegister sent — control channel stays up for the whole run")
+        stop_event = asyncio.Event()
+        ctrl_task = asyncio.create_task(control_loop(ctrl, stop_event))
+        try:
+            for cycle in range(total_drops + 1):
+                tel = await websockets.connect(f"ws://{args.host}:8000/ws/telemetry")
+                is_last_cycle = cycle == total_drops
+                duration = None if is_last_cycle else args.drop_at
+                if is_last_cycle:
+                    print(f"  Streaming at {args.rate} Hz. Press Ctrl+C to disconnect.\n")
+                try:
+                    await _stream_telemetry(tel, seq_holder, device_id, args.rate, duration, stats, None)
+                finally:
+                    await tel.close()
+                if is_last_cycle:
+                    break
+                print(f"  [drop {cycle + 1}/{total_drops}] telemetry only closed "
+                      f"(control still alive) — dark for {args.drop_for}s")
+                await asyncio.sleep(args.drop_for)
+                print(f"  [drop {cycle + 1}/{total_drops}] reconnecting telemetry")
+        finally:
+            stop_event.set()
+            ctrl_task.cancel()
+            await ctrl.close()
+        print(f"\nsent={stats.sent} buffered={stats.buffered} replayed={stats.replayed}")
+        return
+
     for cycle in range(total_drops + 1):
         ctrl = await websockets.connect(f"ws://{args.host}:8000/ws/control")
         await ctrl.send(build_device_register(device_id, args.role))
@@ -207,6 +242,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--join-late", type=float, default=0, help="wait N seconds before connecting at all")
     p.add_argument("--seq-restart", action="store_true",
                     help="after a drop, restart sequence numbers at 0 (reproduces D5)")
+    p.add_argument("--drop-telemetry-only", action="store_true",
+                    help="only drop the telemetry socket, keep control/PING alive (reproduces D15)")
     return p.parse_args()
 
 

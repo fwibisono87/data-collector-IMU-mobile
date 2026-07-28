@@ -13,6 +13,8 @@ export interface DeviceInfo {
   substate?: string;
   first_packet_ts?: number;
   offline_intervals?: number;
+  rate_hz?: number;
+  streaming?: boolean;
 }
 
 export interface StateUpdate {
