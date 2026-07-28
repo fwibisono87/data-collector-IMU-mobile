@@ -169,6 +169,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 'On Xiaomi/Redmi also enable Autostart + set Battery to No restrictions (see setup card).',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white24, fontSize: 11),
+              ),
 
               // Third-party open-source license attribution (MIT/BSD compliance).
               TextButton.icon(
