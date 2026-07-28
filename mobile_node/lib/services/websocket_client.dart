@@ -6,6 +6,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/sensor_packet.dart';
 import '../models/proto/sensor_packet.pb.dart';
 import '../models/proto/commands.pb.dart';
+import 'alert_service.dart';
 import 'clock_sync_service.dart';
 import 'device_id_service.dart';
 import 'fallback_buffer_manager.dart';
@@ -402,6 +403,9 @@ class WebSocketClient {
     _offlineSince = DateTime.now();
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
+    if (_activeSessionId != null) {
+      ForegroundServiceHandler().updateStatus('⚠ DISCONNECTED — buffering locally');
+    }
     _scheduleReconnect();
   }
 
@@ -580,7 +584,17 @@ class WebSocketClient {
   }
 
   void _setState(WsState s) {
+    final prev = _state;
     _state = s;
+    // Alarm only matters while a session is running — a disconnect on the connect screen
+    // is already visible and self-explanatory (plan T13).
+    if (_activeSessionId != null) {
+      if (prev == WsState.connected && s != WsState.connected) {
+        AlertService().startAlarm();
+      } else if (prev != WsState.connected && s == WsState.connected) {
+        AlertService().stopAlarm();
+      }
+    }
     _stateController.add(s);
   }
 

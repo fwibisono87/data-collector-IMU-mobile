@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../services/alert_service.dart';
 import '../services/internal_sensor_manager.dart';
 import '../services/local_session_recorder.dart';
 import '../services/websocket_client.dart';
@@ -112,6 +113,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
       body: Column(
         children: [
+          if (_wsState != WsState.connected && _isRecording) _DisconnectBanner(_packetsBuffered),
           _StatusBar(
             role: _deviceRole,
             isRecording: _isRecording,
@@ -267,6 +269,64 @@ class _WsStatusDot extends StatelessWidget {
             style: TextStyle(
                 color: color, fontSize: 11, fontWeight: FontWeight.bold)),
       ],
+    );
+  }
+}
+
+/// Full-width alarm banner shown while offline mid-recording — the antidote to a
+/// coloured dot nobody notices while the phone is strapped to a subject several metres
+/// away (plan T13 / peer complaint #2).
+class _DisconnectBanner extends StatelessWidget {
+  final int buffered;
+  const _DisconnectBanner(this.buffered);
+
+  String _elapsed() {
+    final since = WebSocketClient().offlineSince;
+    if (since == null) return '00:00';
+    final s = DateTime.now().difference(since).inSeconds;
+    final m = (s ~/ 60).toString().padLeft(2, '0');
+    final r = (s % 60).toString().padLeft(2, '0');
+    return '$m:$r';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final localOk = LocalSessionRecorder().isOpen && LocalSessionRecorder().lastError == null;
+    return Material(
+      color: Colors.red.shade900,
+      child: InkWell(
+        onTap: () => AlertService().silence(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 16),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'DISCONNECTED  ·  ${_elapsed()}  ·  '
+                  '${buffered.toString()} packets buffered  ·  '
+                  'local backup ${localOk ? 'OK' : 'FAILED'}',
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                ),
+              ),
+              TextButton(
+                onPressed: () => AlertService().silence(),
+                style: TextButton.styleFrom(
+                  minimumSize: Size.zero,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                ),
+                child: Text(
+                  AlertService().isSilenced ? 'SILENCED' : 'SILENCE',
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
