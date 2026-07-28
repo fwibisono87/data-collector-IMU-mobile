@@ -5,6 +5,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
     <!-- Sensors -->
+    <!-- Required on Android 12+ (API 31) to read accelerometer/gyroscope above 200 Hz.
+         Without it, fastestInterval requests throw SecurityException and deliver no data. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <!-- Kept as harmless defense-in-depth. We now register IMU streams at the

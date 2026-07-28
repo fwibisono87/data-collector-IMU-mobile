@@ -169,6 +169,19 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 'On Xiaomi/Redmi also enable Autostart + set Battery to No restrictions (see setup card).',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white24, fontSize: 11),
+
+              // Third-party open-source license attribution (MIT/BSD compliance).
+              TextButton.icon(
+                onPressed: () => showLicensePage(
+                  context: context,
+                  applicationName: 'IMU Telemetry Node',
+                  applicationVersion: 'v2.0.0',
+                  applicationLegalese: '© 2026 IMU Telemetry Team',
+                ),
+                icon: const Icon(Icons.description_outlined,
+                    size: 16, color: Colors.white38),
+                label: const Text('Lisensi Pihak Ketiga',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
               ),
             ],
           ),

@@ -40,9 +40,6 @@ dependencies:
   # Utilities
   intl: ^0.19.0
 
-  # Legacy CSV logger (kept for file reference only, not imported by new code)
-  csv: ^6.0.0
-
   # Connectivity alarm sound (5.x keeps minSdkVersion 21 — do not jump to 6.x)
   audioplayers: ^5.2.1
 
