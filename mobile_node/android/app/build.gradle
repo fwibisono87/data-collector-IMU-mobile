@@ -25,7 +25,10 @@ if (flutterVersionName == null) {
 android {
     namespace "com.example.sensors_app" 
     compileSdkVersion 34
-    ndkVersion flutter.ndkVersion
+    // Audio/battery/foreground/foreground/media plugins (audioplayers, battery_plus,
+    // flutter_foreground_task, path_provider, permission_handler, sensors_plus,
+    // shared_preferences) require NDK 25.1.8937393, not the Flutter default (23.x).
+    ndkVersion "25.1.8937393"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

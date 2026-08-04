@@ -66,7 +66,7 @@ class RecoveryUploader {
   Future<Map<String, String>?> _parseMeta(File f) async {
     final raf = await f.open();
     try {
-      final first = await raf.readString(512);
+      final first = utf8.decode(await raf.read(512), allowMalformed: true);
       if (first.startsWith('#')) {
         final m = <String, String>{};
         final id = RegExp(r'(\w+)=([^,\s]+)').allMatches(first);
@@ -99,15 +99,15 @@ class RecoveryUploader {
       final total = bytes.length;
 
       while (offset < total) {
-        final end = (offset + _chunkBytes).clamp(offset, total);
+        // clamp() returns num; force int for sublist()/sublist boundaries.
+        final end = (offset + _chunkBytes).clamp(offset, total) as int;
         final chunk = bytes.sublist(offset, end);
         final response = await _postChunk(
           client, deviceId, sessionId, meta, chunk, offset, total,
           last: end >= total, sha: sha,
         );
         final statusCode = response.statusCode;
-        await response.drain<void>();
-        response.close();
+        await response.drain<void>(); // consume/discard the response body
         if (statusCode != 200) return false;
         offset = end;
         if (end >= total) break;
@@ -165,7 +165,8 @@ class RecoveryUploader {
           return (json['received_bytes'] as num?)?.toInt() ?? 0;
         }
       } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 400 * (i + 1)));
+      final delayMs = 400 * (i + 1);
+      await Future.delayed(Duration(milliseconds: delayMs));
     }
     return 0;
   }
@@ -179,7 +180,7 @@ class RecoveryUploader {
 
   Future<bool> _isMarked(String sessionId) async {
     try {
-      return await _markerFile(sessionId).exists();
+      return await (await _markerFile(sessionId)).exists();
     } catch (_) {
       return false;
     }
@@ -187,7 +188,7 @@ class RecoveryUploader {
 
   Future<void> _markDone(String sessionId, File src, String sha) async {
     try {
-      await _markerFile(sessionId).writeAsString(jsonEncode({
+      await (await _markerFile(sessionId)).writeAsString(jsonEncode({
         'session_id': sessionId,
         'file': src.path,
         'sha256': sha,
