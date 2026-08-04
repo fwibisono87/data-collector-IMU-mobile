@@ -39,6 +39,7 @@ dependencies:
 
   # Utilities
   intl: ^0.19.0
+  crypto: ^3.0.3
 
   # Connectivity alarm sound (5.x keeps minSdkVersion 21 — do not jump to 6.x)
   audioplayers: ^5.2.1

@@ -57,17 +57,32 @@ class LocalSessionRecorder {
     required String role,
     required String deviceId,
     required String subject,
+    String sessionTag = '',
+    String operator = '',
   }) async {
     if (_sessionId == sessionId && _sink != null) return;   // idempotent on resync
     await stop();
     try {
       final d = await _dir();
-      _file = File('${d.path}/${sessionId}_$role.csv');
+      // Describe the file in a human-readable, nameable way: subject, tag, role, device and
+      // the wall-clock start stamp. Falls back gracefully to session_id when metadata is
+      // unknown (resume/resync adoption). The backend stores the same session under
+      // SSD_PATH/Data_Riset_IMU/<subject>_<tag>/, so this name is directly greppable there.
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      final who = <String>[
+        if (subject.isNotEmpty) subject,
+        if (sessionTag.isNotEmpty) sessionTag,
+        role,
+        deviceId,
+        '$stamp',
+      ].map(_sanitize).join('_');
+      _file = File('${d.path}/${who}_rescue.csv');
       final exists = await _file!.exists() && await _file!.length() > 0;
       _sink = _file!.openWrite(mode: exists ? FileMode.append : FileMode.write);
       if (!exists) {
         _sink!.write('# session_id=$sessionId,role=$role,device_id=$deviceId,'
-                     'subject=$subject,source=local_node,schema_version=1\n');
+                     'subject=$subject,session_tag=$sessionTag,operator=$operator,'
+                     'start_epoch_ms=$stamp,source=local_node,schema_version=1\n');
         _sink!.write(_header);
       }
       _sessionId = sessionId;
@@ -81,6 +96,9 @@ class LocalSessionRecorder {
       debugPrint('LocalSessionRecorder: open failed: $e');
     }
   }
+
+  static String _sanitize(String s) =>
+      s.replaceAll(RegExp(r'[^\w.-]+'), '_').replaceAll(RegExp(r'_+'), '_');
 
   /// Synchronous and cheap — IOSink buffers internally. Safe on the 100 Hz hot path.
   void write(SensorPacket p, {

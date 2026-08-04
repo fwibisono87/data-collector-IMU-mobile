@@ -11,6 +11,7 @@ import 'clock_sync_service.dart';
 import 'device_id_service.dart';
 import 'fallback_buffer_manager.dart';
 import 'local_session_recorder.dart';
+import 'recovery_uploader.dart';
 import 'session_persistence.dart';
 import 'foreground_service_handler.dart';
 
@@ -45,12 +46,20 @@ class WebSocketClient {
   String? _activeSessionId;
   String? _lastConnectError;
   String? get lastConnectError => _lastConnectError;
+  String get serverIp => _serverIp;
 
   // Last label this phone was told about, applied to LocalSessionRecorder rows. May be
   // stale if the phone was offline when the operator changed it — the backend CSV is
   // authoritative for labels; this is the local rescue copy's best effort.
   int _activeLabelId = 0;
   String _activeLabelName = '0';
+
+  // Session metadata from the latest START_SESSION, used to name & header the phone-local
+  // rescue CSV (e.g. "<subject>_<tag>_<role>_<deviceId>_<epoch>.csv"). Unknown for a
+  // resume/resync adoption, in which case the recorder falls back to session_id alone.
+  String _sessionSubject = '';
+  String _sessionTag = '';
+  String _sessionOperator = '';
 
   String? _serverState;          // authoritative backend session state, from PONG
   String? _serverLateSid;        // session still accepting late telemetry, or null
@@ -92,6 +101,7 @@ class WebSocketClient {
     }
     _serverIp = serverIp;
     _lastConnectError = null;
+    RecoveryUploader().configure(_serverIp);
     _setState(WsState.connecting);
 
     // Cancel any stale subscriptions from a previous (now-dead) connection so their
@@ -288,6 +298,9 @@ class WebSocketClient {
         try {
           final payload = jsonDecode(cmd.payload) as Map<String, dynamic>;
           final sid = payload['session_id']?.toString();
+          _sessionSubject = payload['subject']?.toString() ?? _sessionSubject;
+          _sessionTag = payload['session_tag']?.toString() ?? _sessionTag;
+          _sessionOperator = payload['operator']?.toString() ?? _sessionOperator;
           _sequence = 0;   // Reset sequence counter for new session
           await _setActiveSession(sid);
 
@@ -305,9 +318,13 @@ class WebSocketClient {
         ForegroundServiceHandler().updateNotification(_packetsSent, 0);
 
       case CommandType.STOP_SESSION:
+        final ended = _activeSessionId;
         await _setActiveSession(null);
         _emitEvent({'type': 'stop_session'});
         SessionPersistence().clear();
+        if (ended != null) {
+          unawaited(RecoveryUploader().uploadPending(onlySessionId: ended));
+        }
 
       case CommandType.SET_LABEL:
         try {
@@ -378,7 +395,8 @@ class WebSocketClient {
       await LocalSessionRecorder().stop();
     } else {
       await LocalSessionRecorder().start(
-        sessionId: sid, role: _deviceRole, deviceId: _deviceId, subject: subject);
+        sessionId: sid, role: _deviceRole, deviceId: _deviceId, subject: _sessionSubject,
+        sessionTag: _sessionTag, operator: _sessionOperator);
     }
   }
 
@@ -421,6 +439,9 @@ class WebSocketClient {
   Future<void> _afterConnectReconcile() async {
     await _waitForServerState(const Duration(seconds: 3));
     await _flushFallbackBuffer();
+    // Also push any finished, not-yet-uploaded local rescue CSVs to the backend so the
+    // desktop can pull them (resumable HTTP, no adb).
+    unawaited(RecoveryUploader().uploadPending());
   }
 
   Future<void> _flushFallbackBuffer() async {

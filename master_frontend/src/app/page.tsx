@@ -17,6 +17,7 @@ import MultiCameraRecorder, {
   type CameraStatus,
 } from "@/components/MultiCameraRecorder";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
+import RecoveryPanel from "@/components/RecoveryPanel";
 
 // ECharts uses browser APIs — dynamic import keeps SSR safe.
 const RealtimeChart = dynamic(() => import("@/components/RealtimeChart"), { ssr: false });
@@ -308,6 +309,7 @@ export default function Home() {
             <div className="glass-panel p-3">
               <AlertCenter devices={devices} state={sessionState} isWsConnected={isWsConnected} />
             </div>
+            <RecoveryPanel backendIp={backendIp} />
             <PreflightPanel
               isWsConnected={isWsConnected}
               devices={devices}

@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
 import { saveChunk, loadChunks, clearAllChunks } from "@/lib/video_backup";
-import { fixWebmDuration } from "@/lib/webm_duration";
+import { finalizeWebm } from "@/lib/webm_seekable";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
 export interface CameraResult { camId: string; deviceId: string; label: string; blob: Blob; mime: string; }
@@ -52,7 +52,6 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
   const mediaRef = useRef<MediaRecorder | null>(null);
   const sessionRef = useRef<string>("");
   const chunkIndexRef = useRef(0);
-  const recordStartRef = useRef(0);            // wall-clock ms at recorder.start() → real duration
   const pendingSavesRef = useRef<Promise<void>[]>([]); // in-flight chunk writes to await on stop
   const liveRef = useRef(false); // true while this slot has a working stream (gates re-acquire)
   const [isRecording, setIsRecording] = useState(false);
@@ -129,7 +128,6 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     sessionRef.current = sessionId;
     chunkIndexRef.current = 0;
     pendingSavesRef.current = [];
-    recordStartRef.current = Date.now();
     const mime = CODEC_PRIORITY.find(m => MediaRecorder.isTypeSupported(m)) ?? "";
     const recorder = new MediaRecorder(streamRef.current, mime ? { mimeType: mime } : {});
     mediaRef.current = recorder;
@@ -148,7 +146,6 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
   const stopFn = async (): Promise<CameraResult | null> => {
     const recorder = mediaRef.current;
     if (!recorder || recorder.state === "inactive") return null;
-    const durationMs = Date.now() - recordStartRef.current;
     await new Promise<void>(resolve => { recorder.onstop = () => resolve(); recorder.stop(); });
     setIsRecording(false);
     // stop() fires a final dataavailable before onstop; wait for every chunk write to commit
@@ -156,13 +153,15 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     await Promise.all(pendingSavesRef.current);
     const chunks = await loadChunks(sessionRef.current, camId);
     if (chunks.length === 0) return null;
-    let blob = new Blob(chunks, { type: chunks[0].type || "video/webm" });
-    // MediaRecorder writes WebM as a live stream with no header duration → players show no
-    // length and can't seek. Patch the real duration in (lossless, no re-encode). No-op/pass-
-    // through for the MP4 fallback or on any parse failure, so footage is never lost.
-    if (blob.type.includes("webm") && durationMs > 0) {
-      blob = await fixWebmDuration(blob, durationMs);
-    }
+    // MediaRecorder writes WebM as a live stream with no header duration/seek info → players
+    // can't determine length and the tail is often misreported as broken. Rewrite the metadata
+    // (SeekHead/Info/Cues) via the battle-tested ts-ebml finalizer so the file is fully playable
+    // and seekable, preserving every cluster byte. MP4 fallback (Safari) is left untouched. The
+    // finalizer always falls back to the raw concatenation rather than losing footage.
+    const isWebm = (chunks[0].type || "video/webm").includes("webm");
+    const blob = isWebm
+      ? (await finalizeWebm(chunks)).blob
+      : new Blob(chunks, { type: chunks[0].type || "video/webm" });
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted
     // download. They are GC'd at the start of the NEXT session (see startRecording). [Finding A]
     return { camId, deviceId, label, blob, mime: blob.type };

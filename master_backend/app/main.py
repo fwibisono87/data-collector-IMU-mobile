@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 from .audit_logger import audit
 from .session_manager import SessionState, session_manager
+from .upload import router as recovery_router
 from .ws_handler import router as ws_router, _live_broadcaster_loop
 
 
@@ -83,6 +84,7 @@ app.add_middleware(
 )
 
 app.include_router(ws_router)
+app.include_router(recovery_router)
 
 
 @app.get("/health")
@@ -125,7 +127,7 @@ async def session_info():
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _ensure_dirs():
-    for env_key in ("SSD_PATH", "RESCUE_PATH"):
+    for env_key in ("SSD_PATH", "RESCUE_PATH", "RECOVERY_PATH"):
         p = Path(os.getenv(env_key, f"./{env_key.lower()}"))
         p.mkdir(parents=True, exist_ok=True)
 

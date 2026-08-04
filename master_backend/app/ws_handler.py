@@ -235,10 +235,17 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
             await ws.send_bytes(make_ack(cmd.command_id, "ok" if ok else "fail", "" if ok else detail))
             if ok:
                 await audit.log("INFO", "session_start", {"initiated_by": device_id[:8]})
-                # Broadcast START to all other connected devices.
+                # Broadcast START to all other connected devices, carrying the metadata the
+                # phones need to name their local rescue CSVs (subject/tag/operator) and embed
+                # in the CSV header.
                 start_cmd = Command(
                     type=CommandType.START_SESSION,
-                    payload=json.dumps({"session_id": session_manager.session_id}),
+                    payload=json.dumps({
+                        "session_id": session_manager.session_id,
+                        "subject": session_manager.subject_name,
+                        "session_tag": session_manager.session_tag,
+                        "operator": session_manager.operator,
+                    }),
                     command_id=cmd.command_id,
                 ).to_bytes()
                 await session_manager.broadcast_control(start_cmd)
