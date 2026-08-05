@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
@@ -7,20 +8,16 @@ import '../models/sensor_packet.dart';
 /// Writes every packet of a session to phone-local storage, from START to STOP,
 /// REGARDLESS of network state.
 ///
-/// This is the system's data guarantee. Backend CSVs, the fallback buffer, dedup and
-/// late delivery are all network-dependent optimisations layered on top; this file is
-/// not. If Wi-Fi dies for an entire session, the operator still has a complete recording
-/// and only needs to pull it over USB.
+/// This is the system's data guarantee. Backend CSVs, the fallback buffer, dedup
+/// and late delivery are all network-dependent optimisations layered on top; this
+/// file is not.
 ///
-/// Location: getExternalStorageDirectory()/imu_sessions/<session_id>_<role>.csv
-///   -> /sdcard/Android/data/<package>/files/imu_sessions/
-///   App-private external storage: no runtime permission needed, visible over MTP/adb.
+/// The CSV columns are byte-identical to the backend CSV (io_manager._CSV_HEADER)
+/// and are NEVER changed by data-integrity bookkeeping. Integrity markers and
+/// sampling statistics go into a sidecar `*.events.jsonl` file instead, keeping
+/// the analysis CSV clean for generic consumers.
 ///
-/// Schema is byte-identical to the backend CSV (io_manager._CSV_HEADER) so the two can be
-/// diffed or merged directly. NOTE: label_id/label_name reflect the last SET_LABEL this
-/// phone received; if the phone was offline when the operator changed the label, the
-/// backend CSV is authoritative for labels. The local file is a data rescue, not a
-/// replacement for the synchronised capture.
+/// Location: getExternalStorageDirectory()/imu_sessions/<who>_rescue.csv (+.events.jsonl)
 class LocalSessionRecorder {
   static final LocalSessionRecorder _i = LocalSessionRecorder._();
   factory LocalSessionRecorder() => _i;
@@ -33,6 +30,7 @@ class LocalSessionRecorder {
   static const int _maxSessionsKept = 20;
 
   IOSink? _sink;
+  IOSink? _events;
   File? _file;
   Timer? _flushTimer;
   String? _sessionId;
@@ -64,10 +62,6 @@ class LocalSessionRecorder {
     await stop();
     try {
       final d = await _dir();
-      // Describe the file in a human-readable, nameable way: subject, tag, role, device and
-      // the wall-clock start stamp. Falls back gracefully to session_id when metadata is
-      // unknown (resume/resync adoption). The backend stores the same session under
-      // SSD_PATH/Data_Riset_IMU/<subject>_<tag>/, so this name is directly greppable there.
       final stamp = DateTime.now().millisecondsSinceEpoch;
       final who = <String>[
         if (subject.isNotEmpty) subject,
@@ -76,8 +70,10 @@ class LocalSessionRecorder {
         deviceId,
         '$stamp',
       ].map(_sanitize).join('_');
-      _file = File('${d.path}/${who}_rescue.csv');
+      final csvPath = '${d.path}/${who}_rescue.csv';
+      _file = File(csvPath);
       final exists = await _file!.exists() && await _file!.length() > 0;
+      if (exists) await _trimIncompleteLine(_file!);
       _sink = _file!.openWrite(mode: exists ? FileMode.append : FileMode.write);
       if (!exists) {
         _sink!.write('# session_id=$sessionId,role=$role,device_id=$deviceId,'
@@ -85,10 +81,17 @@ class LocalSessionRecorder {
                      'start_epoch_ms=$stamp,source=local_node,schema_version=1\n');
         _sink!.write(_header);
       }
+      // Sidecar for integrity markers / sampling stats (JSONL).
+      final eventsFile = File('$csvPath.events.jsonl');
+      final eventsExists = await eventsFile.exists() && await eventsFile.length() > 0;
+      _events = eventsFile.openWrite(mode: eventsExists ? FileMode.append : FileMode.write);
       _sessionId = sessionId;
       _rows = 0;
       _lastError = null;
-      _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) => _sink?.flush());
+      _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        _sink?.flush();
+        _events?.flush();
+      });
       await _prune();
     } catch (e) {
       _lastError = '$e';
@@ -99,6 +102,21 @@ class LocalSessionRecorder {
 
   static String _sanitize(String s) =>
       s.replaceAll(RegExp(r'[^\w.-]+'), '_').replaceAll(RegExp(r'_+'), '_');
+
+  /// A killed process can leave a partial final CSV line (no trailing newline).
+  /// Trim it on reopen so the merged dataset has no malformed row. Keeping
+  /// everything after the last `\n` would be a partial row — drop it.
+  Future<void> _trimIncompleteLine(File f) async {
+    try {
+      final bytes = await f.readAsBytes();
+      final lastNl = bytes.lastIndexOf(0x0A);
+      if (lastNl >= 0 && lastNl + 1 < bytes.length) {
+        await f.writeAsBytes(bytes.sublist(0, lastNl + 1), mode: FileMode.write);
+      }
+    } catch (_) {
+      // Best effort only.
+    }
+  }
 
   /// Synchronous and cheap — IOSink buffers internally. Safe on the 100 Hz hot path.
   void write(SensorPacket p, {
@@ -117,16 +135,28 @@ class LocalSessionRecorder {
     _rows++;
   }
 
+  /// Append one integrity/sampling marker to the JSONL sidecar. Never touches the CSV.
+  void logEvent(Map<String, dynamic> event) {
+    final e = _events;
+    if (e == null) return;
+    e.writeln(jsonEncode(event));
+  }
+
   Future<void> stop() async {
     _flushTimer?.cancel();
     _flushTimer = null;
     final s = _sink;
+    final ev = _events;
     _sink = null;
+    _events = null;
     _sessionId = null;
-    if (s == null) return;
     try {
-      await s.flush();
-      await s.close();
+      await ev?.flush();
+      await ev?.close();
+      if (s != null) {
+        await s.flush();
+        await s.close();
+      }
     } catch (e) {
       debugPrint('LocalSessionRecorder: close failed: $e');
     }
@@ -135,6 +165,7 @@ class LocalSessionRecorder {
   Future<List<File>> listSessions() async {
     final d = await _dir();
     final files = d.listSync().whereType<File>().toList()
+      ..removeWhere((f) => f.path.endsWith('.events.jsonl'))
       ..sort((a, b) => b.path.compareTo(a.path));
     return files;
   }
@@ -143,6 +174,8 @@ class LocalSessionRecorder {
     final files = await listSessions();
     for (final f in files.skip(_maxSessionsKept)) {
       try {
+        final sidecar = File('${f.path}.events.jsonl');
+        if (await sidecar.exists()) await sidecar.delete();
         await f.delete();
       } catch (_) {}
     }

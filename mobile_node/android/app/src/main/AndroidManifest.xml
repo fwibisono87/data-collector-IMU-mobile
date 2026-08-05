@@ -5,28 +5,21 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
     <!-- Sensors -->
-    <!-- Required on Android 12+ (API 31) to read accelerometer/gyroscope above 200 Hz.
-         Without it, fastestInterval requests throw SecurityException and deliver no data. -->
+    <!-- We register IMU streams at the output rate (~100 Hz, <= 200 Hz), which is BELOW
+         the Android 12+ high-rate gate, so HIGH_SAMPLING_RATE_SENSORS is not strictly
+         required for that rate. It is kept because it also satisfies one of the runtime
+         prerequisites of the "health" foreground-service type. -->
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <!-- Kept as harmless defense-in-depth. We now register IMU streams at the
-         output rate (~100 Hz, <= 200 Hz), which is BELOW the Android 12+
-         high-rate gate, so this permission is not strictly required. It only
-         matters if a future build requests > 200 Hz. -->
-    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
 
     <!-- Foreground service + wake locks (CLAUDE.md §9.3) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <!-- Allow the app to prompt the user to exempt it from battery optimization (MIUI kills otherwise) -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
-
-    <!-- Storage (legacy, for CsvLogger fallback) -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
 
     <application
         android:label="IMU Node"
@@ -53,7 +46,8 @@
         <!-- flutter_foreground_task service -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="dataSync"
+            android:exported="false"
+            android:foregroundServiceType="health"
             android:stopWithTask="false"/>
 
         <!-- Auto-restart service on boot -->

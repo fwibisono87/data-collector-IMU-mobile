@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../services/device_id_service.dart';
 import '../services/foreground_service_handler.dart';
-import '../services/websocket_client.dart';
+import '../services/task_bridge.dart';
 import 'preflight_screen.dart';
 
 const List<String> _roles = [
@@ -53,7 +53,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     });
 
     await DeviceIdService().setDeviceRole(_selectedRole);
-    final ok = await WebSocketClient().connect(ip);
+    final ok = await TaskBridge().connect(ip);
 
     if (!mounted) return;
     if (ok) {
@@ -64,7 +64,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     } else {
       setState(() {
         _connecting = false;
-        _error = WebSocketClient().lastConnectError ?? 'Could not connect to $ip:8000';
+        _error = TaskBridge().lastConnectError ?? 'Could not connect to $ip:8000';
       });
     }
   }

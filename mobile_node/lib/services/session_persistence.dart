@@ -2,17 +2,36 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
-// Persists recording session state to survive process death (CLAUDE.md §9.2).
+/// Persists recording-session state so a restarted foreground-service engine
+/// can recover WITHOUT waiting for the UI to re-issue commands.
+///
+/// File-based (not shared_preferences), so it is safe across isolates/engines
+/// — the stale-cache problem that plagues SharedPreferences across multiple
+/// engines does not apply. Writes are atomic (temp file + rename) so a crash
+/// mid-write cannot corrupt the record.
 class SessionPersistence {
   static final SessionPersistence _instance = SessionPersistence._internal();
   factory SessionPersistence() => _instance;
   SessionPersistence._internal();
 
   static const _fileName = 'session_state.json';
+  static const _desiredFileName = 'desired_state.json';
 
-  Future<File> _file() async {
+  Future<File> _file(String name) async {
     final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/$_fileName');
+    return File('${dir.path}/$name');
+  }
+
+  // Atomic write: write to a temp sibling then rename over the target. Rename is
+  // atomic on the same filesystem, so a reader never observes a torn JSON blob.
+  Future<void> _atomicWrite(File target, String content) async {
+    final tmp = File('${target.path}.tmp');
+    await tmp.writeAsString(content, flush: true);
+    // Windows rename-over-existing needs the target removed first; Unix is fine.
+    if (Platform.isWindows && await target.exists()) {
+      await target.delete();
+    }
+    await tmp.rename(target.path);
   }
 
   Future<void> save({
@@ -23,7 +42,6 @@ class SessionPersistence {
     required int lastSequenceNumber,
     required String deviceRole,
   }) async {
-    final f = await _file();
     final data = {
       'session_id': sessionId,
       'device_id': deviceId,
@@ -34,15 +52,14 @@ class SessionPersistence {
       'state': 'RECORDING',
       'saved_at_ms': DateTime.now().millisecondsSinceEpoch,
     };
-    await f.writeAsString(jsonEncode(data));
+    await _atomicWrite(await _file(_fileName), jsonEncode(data));
   }
 
   Future<Map<String, dynamic>?> loadInterrupted() async {
     try {
-      final f = await _file();
+      final f = await _file(_fileName);
       if (!await f.exists()) return null;
-      final raw = await f.readAsString();
-      final data = jsonDecode(raw) as Map<String, dynamic>;
+      final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       if (data['state'] == 'RECORDING') return data;
       return null;
     } catch (_) {
@@ -51,11 +68,35 @@ class SessionPersistence {
   }
 
   Future<void> clear() async {
-    final f = await _file();
-    if (await f.exists()) {
+    try {
+      final f = await _file(_fileName);
+      if (!await f.exists()) return;
       final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       data['state'] = 'IDLE';
-      await f.writeAsString(jsonEncode(data));
+      await _atomicWrite(f, jsonEncode(data));
+    } catch (_) {}
+  }
+
+  /// Persist the desired endpoint + role independently of any active recording,
+  /// so a restarted engine knows WHERE to reconnect without the UI.
+  Future<void> saveDesired({required String serverIp, required String deviceRole}) async {
+    await _atomicWrite(
+      await _file(_desiredFileName),
+      jsonEncode({
+        'server_ip': serverIp,
+        'device_role': deviceRole,
+        'saved_at_ms': DateTime.now().millisecondsSinceEpoch,
+      }),
+    );
+  }
+
+  Future<Map<String, dynamic>?> loadDesired() async {
+    try {
+      final f = await _file(_desiredFileName);
+      if (!await f.exists()) return null;
+      return jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
     }
   }
 }

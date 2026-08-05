@@ -1,11 +1,15 @@
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'pipeline_controller.dart';
 
-// Keeps the process alive during background recording (CLAUDE.md §9.3).
+// Owns the foreground service and keeps its notification alive.
+//
+// The actual IMU acquisition + telemetry pipeline runs inside the task engine
+// isolate via [PipelineController] — NOT in the UI. The UI facade ([TaskBridge])
+// only forwards commands (connect/disconnect) and renders mirrored state.
 //
 // OEM NOTE: On Xiaomi / OPPO / Samsung, Android battery optimization can kill
 // foreground services regardless of this declaration. Each phone must have
 // battery optimization disabled for this app manually before first use.
-// Document this step in the operator SOP.
 class ForegroundServiceHandler {
   static final ForegroundServiceHandler _instance =
       ForegroundServiceHandler._internal();
@@ -77,14 +81,27 @@ void _startCallback() {
 }
 
 class _ImuTaskHandler extends TaskHandler {
-  @override
-  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {}
+  final PipelineController _controller = PipelineController();
 
   @override
-  void onRepeatEvent(DateTime timestamp) {
-    // Notification text is updated via ForegroundServiceHandler.updateNotification().
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    // Subscribes to the pipeline, advertises task_ready, and auto-reconnects
+    // from persisted state so a restarted engine recovers without the UI.
+    await _controller.init();
   }
 
   @override
-  Future<void> onDestroy(DateTime timestamp) async {}
+  void onRepeatEvent(DateTime timestamp) {
+    _controller.onTick();
+  }
+
+  @override
+  void onReceiveData(Object data) {
+    _controller.onCommand(data);
+  }
+
+  @override
+  Future<void> onDestroy(DateTime timestamp) async {
+    await _controller.shutdown();
+  }
 }

@@ -4,9 +4,8 @@ import 'dart:math' show sqrt;
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import '../services/clock_sync_service.dart';
 import '../services/internal_sensor_manager.dart';
-import '../services/websocket_client.dart';
+import '../services/task_bridge.dart';
 import 'dashboard_screen.dart';
 
 enum _Status { pending, running, pass, fail }
@@ -92,7 +91,6 @@ class _PreflightScreenState extends State<PreflightScreen> {
     _setRunning(1);
     try {
       final dir = await getApplicationDocumentsDirectory();
-      final stat = await FileStat.stat(dir.path);
       // Write a 1 MB test file to verify writable and estimate free space.
       final testFile = File('${dir.path}/.preflight_test');
       await testFile.writeAsBytes(List.filled(1024 * 1024, 0));
@@ -106,13 +104,13 @@ class _PreflightScreenState extends State<PreflightScreen> {
 
   Future<void> _checkClockSync() async {
     _setRunning(2);
-    // Give clock sync service up to 3 seconds to complete.
+    // Give the pipeline (running in the task engine) up to 3 s to complete sync.
     for (int i = 0; i < 15; i++) {
-      if (ClockSyncService().isSynced) break;
+      if (TaskBridge().clockSynced) break;
       await Future.delayed(const Duration(milliseconds: 200));
     }
-    if (ClockSyncService().isSynced) {
-      final offset = ClockSyncService().clockOffsetMs;
+    if (TaskBridge().clockSynced) {
+      final offset = TaskBridge().clockOffsetMs;
       if (offset.abs() > 30000) {
         _setFail(2, 'Offset ${offset}ms — check phone NTP');
       } else {
@@ -125,7 +123,7 @@ class _PreflightScreenState extends State<PreflightScreen> {
 
   Future<void> _checkRtt() async {
     _setRunning(3);
-    final rtt = ClockSyncService().lastRttMs;
+    final rtt = TaskBridge().lastRttMs;
     if (rtt == 0) {
       _setFail(3, 'No RTT measured yet');
     } else if (rtt < 500) {

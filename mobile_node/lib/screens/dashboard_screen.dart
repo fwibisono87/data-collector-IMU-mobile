@@ -3,11 +3,16 @@ import 'package:flutter/material.dart';
 import '../services/alert_service.dart';
 import '../services/internal_sensor_manager.dart';
 import '../services/local_session_recorder.dart';
-import '../services/websocket_client.dart';
+import '../services/task_bridge.dart';
+import '../services/websocket_client.dart' show WsState;
 import '../widgets/graph_widget.dart';
 import '../models/sensor_packet.dart';
 import 'connection_screen.dart';
 
+// NOTE: The dashboard's InternalSensorManager instance is a DISPLAY-ONLY preview
+// of live accelerometer/gyroscope data for the graphs. Recording acquisition is
+// owned by the foreground-task engine (task isolate) and is gated to an active
+// session; this preview can be torn down with the UI without affecting recording.
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -28,26 +33,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _sessionId;
   String? _serverState;
   int _activeLabel = 0;
-  String _deviceRole = WebSocketClient().deviceRole;
 
   @override
   void initState() {
     super.initState();
+    // Live graph preview (display only). Recording acquisition lives in the task engine.
     InternalSensorManager().start(frequency: 100);
     _sensorStream = InternalSensorManager().dataStream;
-    WebSocketClient().attachSensorStream(_sensorStream!);
 
-    _stateSub = WebSocketClient().stateStream.listen((s) {
+    _stateSub = TaskBridge().stateStream.listen((s) {
       setState(() => _wsState = s);
     });
 
-    _eventSub = WebSocketClient().eventStream.listen(_onEvent);
+    _eventSub = TaskBridge().eventStream.listen(_onEvent);
 
     // Reflect current state immediately.
-    _wsState = WebSocketClient().state;
+    _wsState = TaskBridge().state;
 
     // Drives time-based UI (unconfirmed-recording badge, offline timer) that would
-    // otherwise only refresh when a new WebSocketClient event arrives.
+    // otherwise only refresh when a new bridge event arrives.
     _tickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
@@ -56,10 +60,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _onEvent(Map<String, dynamic> e) {
     final type = e['type'] as String?;
     setState(() {
-      _packetsSent = WebSocketClient().packetsSent;
-      _packetsBuffered = WebSocketClient().packetsBuffered;
-      _sessionId = WebSocketClient().activeSessionId;
-      _serverState = WebSocketClient().serverState;
+      _packetsSent = TaskBridge().packetsSent;
+      _packetsBuffered = TaskBridge().packetsBuffered;
+      _sessionId = TaskBridge().activeSessionId;
+      _serverState = TaskBridge().serverState;
       if (type == 'start_session') _isRecording = true;
       if (type == 'stop_session') {
         _isRecording = false;
@@ -68,7 +72,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (type == 'set_label') {
         try {
           final payload = e['payload'] as String;
-          // payload JSON: {"label_id": N, ...}
           final match = RegExp(r'"label_id"\s*:\s*(\d+)').firstMatch(payload);
           if (match != null) _activeLabel = int.parse(match.group(1)!);
         } catch (_) {}
@@ -81,8 +84,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _stateSub?.cancel();
     _eventSub?.cancel();
     _tickTimer?.cancel();
-    InternalSensorManager().stop();
-    WebSocketClient().detachSensorStream();
+    InternalSensorManager().stop(); // preview only; recording is task-owned
     super.dispose();
   }
 
@@ -93,7 +95,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         backgroundColor: _isRecording ? Colors.red.shade900 : const Color(0xFF16213E),
         title: Text(
-          'IMU Node · ${WebSocketClient().deviceRole.toUpperCase()}',
+          'IMU Node · ${TaskBridge().deviceRole.toUpperCase()}',
           style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -115,17 +117,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           if (_wsState != WsState.connected && _isRecording) _DisconnectBanner(_packetsBuffered),
           _StatusBar(
-            role: _deviceRole,
+            role: TaskBridge().deviceRole,
             isRecording: _isRecording,
-            unconfirmed: WebSocketClient().isRecordingUnconfirmed,
+            unconfirmed: TaskBridge().isRecordingUnconfirmed,
             serverState: _serverState,
             sessionId: _sessionId,
             sent: _packetsSent,
             buffered: _packetsBuffered,
             activeLabel: _activeLabel,
-            localRows: LocalSessionRecorder().rows,
-            localOpen: LocalSessionRecorder().isOpen,
-            localError: LocalSessionRecorder().lastError,
+            localRows: TaskBridge().localRows,
+            localOpen: TaskBridge().localOpen,
+            localError: TaskBridge().localError,
           ),
           Expanded(
             child: ListView(
@@ -188,7 +190,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
 
   Future<void> _disconnect() async {
-    await WebSocketClient().disconnect();
+    await TaskBridge().disconnect();
     if (!mounted) return;
     Navigator.pushReplacement(
       context,
@@ -273,15 +275,13 @@ class _WsStatusDot extends StatelessWidget {
   }
 }
 
-/// Full-width alarm banner shown while offline mid-recording — the antidote to a
-/// coloured dot nobody notices while the phone is strapped to a subject several metres
-/// away (plan T13 / peer complaint #2).
+/// Full-width alarm banner shown while offline mid-recording.
 class _DisconnectBanner extends StatelessWidget {
   final int buffered;
   const _DisconnectBanner(this.buffered);
 
   String _elapsed() {
-    final since = WebSocketClient().offlineSince;
+    final since = TaskBridge().offlineSince;
     if (since == null) return '00:00';
     final s = DateTime.now().difference(since).inSeconds;
     final m = (s ~/ 60).toString().padLeft(2, '0');
@@ -291,7 +291,7 @@ class _DisconnectBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final localOk = LocalSessionRecorder().isOpen && LocalSessionRecorder().lastError == null;
+    final localOk = TaskBridge().localOpen && TaskBridge().localError == null;
     return Material(
       color: Colors.red.shade900,
       child: InkWell(
@@ -397,10 +397,10 @@ class _StatusBar extends StatelessWidget {
                     fontSize: 12),
               ),
               if (isRecording && unconfirmed)
-                WebSocketClient().lastStateAt != null
+                TaskBridge().lastStateAt != null
                     ? Text(
                         'No confirmation from backend for '
-                        '${DateTime.now().difference(WebSocketClient().lastStateAt!).inSeconds}s',
+                        '${DateTime.now().difference(TaskBridge().lastStateAt!).inSeconds}s',
                         style: const TextStyle(color: Colors.amber, fontSize: 10),
                       )
                     : const Text('No confirmation from backend yet',

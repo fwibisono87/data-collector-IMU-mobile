@@ -9,6 +9,7 @@ import '../models/proto/commands.pb.dart';
 import 'alert_service.dart';
 import 'clock_sync_service.dart';
 import 'device_id_service.dart';
+import 'internal_sensor_manager.dart';
 import 'fallback_buffer_manager.dart';
 import 'local_session_recorder.dart';
 import 'recovery_uploader.dart';
@@ -65,6 +66,7 @@ class WebSocketClient {
   String? _serverLateSid;        // session still accepting late telemetry, or null
   DateTime? _lastStateAtMs;      // when we last heard authoritative state
   DateTime? _offlineSince;       // for the UI's "offline for 00:24" timer
+  DateTime? _lostAtMs;           // when the last connection gap began (sidecar)
 
   String? get serverState => _serverState;
   String? get serverLateSid => _serverLateSid;
@@ -114,6 +116,9 @@ class WebSocketClient {
     _deviceId = await DeviceIdService().getDeviceId();
     _deviceRole = await DeviceIdService().getDeviceRole();
     await DeviceIdService().saveServerIp(serverIp);
+    // Persist the desired endpoint so a restarted foreground-task engine can
+    // reconnect without the UI re-issuing a connect command.
+    await SessionPersistence().saveDesired(serverIp: serverIp, deviceRole: _deviceRole);
     await _restoreSequenceIfInterrupted();
 
     try {
@@ -392,11 +397,20 @@ class WebSocketClient {
     if (_activeSessionId == sid) return;
     _activeSessionId = sid;
     if (sid == null) {
+      // Stop accepting sensor samples before closing the recorder so the file
+      // drains on a clean boundary (task-engine lifecycle, plan T23).
+      InternalSensorManager().stop();
       await LocalSessionRecorder().stop();
     } else {
       await LocalSessionRecorder().start(
         sessionId: sid, role: _deviceRole, deviceId: _deviceId, subject: _sessionSubject,
         sessionTag: _sessionTag, operator: _sessionOperator);
+      // Sensors are acquired here — owned by the running isolate (the task
+      // engine), gated to an active session, not by any widget lifecycle.
+      InternalSensorManager().start(frequency: 100);
+      // Checkpoint the active-session flag immediately (before any ack/read) so
+      // a process kill right after START still resumes this recording.
+      unawaited(_persistSequence(0));
     }
   }
 
@@ -458,6 +472,11 @@ class WebSocketClient {
     if (target == null || buf.sessionId == null || buf.sessionId != target) {
       final moved = await buf.quarantine();
       _packetsBuffered = 0;
+      LocalSessionRecorder().logEvent({
+        'type': 'buffer_drop',
+        'time_ms': DateTime.now().millisecondsSinceEpoch,
+        'count': moved.length,
+      });
       _emitEvent({'type': 'buffer_orphaned', 'files': moved, 'session_id': buf.sessionId});
       return;
     }
@@ -610,10 +629,22 @@ class WebSocketClient {
     // Alarm only matters while a session is running — a disconnect on the connect screen
     // is already visible and self-explanatory (plan T13).
     if (_activeSessionId != null) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (prev == WsState.connected && s != WsState.connected) {
         AlertService().startAlarm();
+        _lostAtMs = DateTime.now();
+        LocalSessionRecorder().logEvent({'type': 'connection_lost', 'time_ms': nowMs});
       } else if (prev != WsState.connected && s == WsState.connected) {
         AlertService().stopAlarm();
+        final dur = _lostAtMs != null
+            ? DateTime.now().difference(_lostAtMs!).inMilliseconds
+            : null;
+        _lostAtMs = null;
+        LocalSessionRecorder().logEvent({
+          'type': 'connection_restored',
+          'time_ms': nowMs,
+          if (dur != null) 'duration_ms': dur,
+        });
       }
     }
     _stateController.add(s);

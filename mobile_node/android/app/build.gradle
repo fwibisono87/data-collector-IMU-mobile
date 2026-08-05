@@ -28,7 +28,7 @@ android {
     // Audio/battery/foreground/foreground/media plugins (audioplayers, battery_plus,
     // flutter_foreground_task, path_provider, permission_handler, sensors_plus,
     // shared_preferences) require NDK 25.1.8937393, not the Flutter default (23.x).
-    ndkVersion "25.1.8937393"
+    ndkVersion "28.2.13676358"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -45,7 +45,7 @@ android {
 
     defaultConfig {
         applicationId "com.example.sensors_app"
-        minSdkVersion 21 
+        minSdkVersion flutter.minSdkVersion 
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName

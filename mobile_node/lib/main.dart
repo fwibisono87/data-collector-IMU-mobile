@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'services/foreground_service_handler.dart';
 import 'services/session_persistence.dart';
-import 'services/websocket_client.dart';
+import 'services/task_bridge.dart';
 import 'screens/connection_screen.dart';
 import 'screens/dashboard_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   ForegroundServiceHandler.initOptions();
+  TaskBridge().init();
   runApp(const ImuTelemetryApp());
 }
 
@@ -29,14 +30,19 @@ class _ImuTelemetryAppState extends State<ImuTelemetryApp> {
   }
 
   // If there was an interrupted RECORDING session, try to resume it (CLAUDE.md §9.2).
+  // Resume runs in the task engine: starting the foreground service makes the
+  // engine auto-reconnect from the persisted endpoint. The UI just waits for the
+  // engine to report it is connected.
   Future<void> _checkResumeSession() async {
     final interrupted = await SessionPersistence().loadInterrupted();
     if (interrupted != null) {
       final serverIp = interrupted['server_ip'] as String? ?? '';
 
       if (serverIp.isNotEmpty) {
-        final ok = await WebSocketClient().connect(serverIp);
-        if (ok) {
+        await ForegroundServiceHandler().start();
+        final ok = await TaskBridge().waitUntilConnected(
+            const Duration(seconds: 12));
+        if (ok && mounted) {
           setState(() => _home = const DashboardScreen());
         }
       }
