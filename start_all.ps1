@@ -2,7 +2,8 @@
 # Starts the backend and frontend in this console, waits until the frontend is
 # responding, opens it in the default browser, and prints the backend LAN IP that
 # the phones connect to. Close the window (or Ctrl+C) to stop both.
-$ErrorActionPreference = 'Stop'
+# NOTE: do not set $ErrorActionPreference='Stop' globally — native commands writing
+# to stderr (e.g. a failed `import fastapi` probe) would abort the whole script.
 $root = $PSScriptRoot
 
 $backendPort = 8000
