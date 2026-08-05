@@ -28,7 +28,7 @@ function Check-Env {
         $found = $false
         foreach ($line in $content) {
             if ($line -match '^\s*#') { continue }
-            if ($line -match "^\s*$key\s*=\s*(.+?)\s*$" -and $Matches[1] -ne '') {
+            if ($line -match "^\s*${key}\s*=\s*(.+?)\s*$" -and $Matches[1] -ne '') {
                 $found = $true
                 break
             }
@@ -36,7 +36,7 @@ function Check-Env {
         if (-not $found) { $missing += $key }
     }
     if ($missing.Count -gt 0) {
-        Write-Host "FAIL: missing required env vars in $envFile:" -ForegroundColor Red
+        Write-Host "FAIL: missing required env vars in ${envFile}:" -ForegroundColor Red
         $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
         Write-Host "Fill them in (from .env.example), then re-run." -ForegroundColor Red
         exit 1
@@ -55,7 +55,7 @@ if (-not $lanIp) {
         Select-Object -First 1).IPAddress
 }
 if (-not $lanIp) { $lanIp = '127.0.0.1' }
-Write-Host "Backend IP : $lanIp  (ws://$lanIp`:$backendPort/ ...)" -ForegroundColor Yellow
+Write-Host "Backend IP : $lanIp  (ws://${lanIp}:$backendPort/ ...)" -ForegroundColor Yellow
 
 # --- backend ---
 $venvPy = Join-Path $root 'master_backend\venv\Scripts\python.exe'
