@@ -100,7 +100,7 @@ $fe = Join-Path $root 'master_frontend'
 $nextPkg = Join-Path $fe 'node_modules\next'
 if (-not (Test-Path $nextPkg)) {
     # node_modules absent OR broken (e.g. a failed install left it corrupt) -> clean reinstall.
-    Write-Host "Frontend   : installing frontend dependencies (npm ci) ..." -ForegroundColor Cyan
+    Write-Host "Frontend   : installing frontend dependencies (npm install) ..." -ForegroundColor Cyan
 
     # Stop any leftover dev-server node for THIS project that could be holding file
     # locks on node_modules (targeted — does not touch unrelated node processes).
@@ -118,18 +118,30 @@ if (-not (Test-Path $nextPkg)) {
     if (Test-Path $nm) { Remove-Item -Recurse -Force $nm -ErrorAction SilentlyContinue }
 
     Push-Location $fe
-    npm ci
+    npm install
     $npmExit = $LASTEXITCODE
     Pop-Location
     if ($npmExit -ne 0) {
-        Write-Host "FAIL: npm ci failed (a lingering node process may be locking node_modules)." -ForegroundColor Red
+        Write-Host "FAIL: npm install failed (a lingering node process may be locking node_modules)." -ForegroundColor Red
         exit 1
     }
 } else {
     Write-Host "Frontend   : dependencies already installed." -ForegroundColor Cyan
 }
-Write-Host "Frontend   : starting (npm run dev) on :$frontendPort" -ForegroundColor Cyan
-$frontend = Start-Process -FilePath 'npm.cmd' -ArgumentList 'run', 'dev' `
+
+# Always build then serve (production), never dev.
+Write-Host "Frontend   : building (npm run build) ..." -ForegroundColor Cyan
+Push-Location $fe
+npm run build
+$buildExit = $LASTEXITCODE
+Pop-Location
+if ($buildExit -ne 0) {
+    Write-Host "FAIL: npm run build failed." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Frontend   : starting (npm run start) on :$frontendPort" -ForegroundColor Cyan
+$frontend = Start-Process -FilePath 'npm.cmd' -ArgumentList 'run', 'start' `
     -WorkingDirectory $fe -PassThru -NoNewWindow
 
 # --- wait for the frontend, then open it in the default browser ---

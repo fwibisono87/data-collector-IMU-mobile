@@ -83,18 +83,22 @@ BACKEND_PID=$!
 # --- frontend ---
 if [ ! -d "$FRONTEND_DIR/node_modules/next" ] || [ ! -e "$FRONTEND_DIR/node_modules/.bin/next" ]; then
   # node_modules absent OR broken (e.g. a failed install left it corrupt) -> clean reinstall.
-  echo "Frontend   : installing frontend dependencies (npm ci) ..."
-  # Kill any leftover next dev for THIS project before removing the tree.
+  echo "Frontend   : installing frontend dependencies (npm install) ..."
+  # Kill any leftover next process for THIS project before removing the tree.
   pkill -f "$FRONTEND_DIR/node_modules.*/next" 2>/dev/null || true
   rm -rf "$FRONTEND_DIR/node_modules"
-  ( cd "$FRONTEND_DIR" && npm ci ) || { echo "FAIL: npm ci failed — delete master_frontend/node_modules and retry." >&2; exit 1; }
+  ( cd "$FRONTEND_DIR" && npm install ) || { echo "FAIL: npm install failed — delete master_frontend/node_modules and retry." >&2; exit 1; }
 else
   echo "Frontend   : dependencies already installed."
 fi
-echo "Frontend   : starting (npm run dev) on :$FRONTEND_PORT"
+
+# Always build then serve (production), never dev.
+echo "Frontend   : building (npm run build) ..."
+( cd "$FRONTEND_DIR" && npm run build ) || { echo "FAIL: npm run build failed." >&2; exit 1; }
+echo "Frontend   : starting (npm run start) on :$FRONTEND_PORT"
 (
   cd "$FRONTEND_DIR"
-  exec npm run dev
+  exec npm run start
 ) &
 FRONTEND_PID=$!
 
