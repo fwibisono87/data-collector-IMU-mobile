@@ -326,6 +326,28 @@ class SessionManager:
             except Exception:
                 dev.is_online = False
 
+    async def reset_all(self) -> None:
+        """Operator reset: close every device control connection, then drop all
+        per-device state (offline intervals / gap badges, packet counts, cached
+        samples) so stale cards and connectivity warnings clear without a backend
+        restart. Only meaningful while NOT recording (guarded by the caller)."""
+        for dev in self._devices.values():
+            if dev.control_ws is not None:
+                try:
+                    await dev.control_ws.close(code=4000, reason="operator_reset")
+                except Exception:
+                    pass
+        self._devices.clear()
+        self.session_id = ""
+        self.subject_name = ""
+        self.session_tag = ""
+        self.operator = ""
+        self.scheduled_start_ms = 0
+        if self.state != SessionState.IDLE:
+            await self._transition(SessionState.IDLE)
+        dedup.clear()
+        await self._clear_state()
+
     # ── Persistence ──────────────────────────────────────────────────────────
 
     async def _save_state(self) -> None:

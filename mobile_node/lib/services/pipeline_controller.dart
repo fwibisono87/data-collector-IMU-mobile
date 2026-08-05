@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'clock_sync_service.dart';
+import 'conn_debug.dart';
 import 'internal_sensor_manager.dart';
 import 'local_session_recorder.dart';
 import 'session_persistence.dart';
@@ -35,6 +36,15 @@ class PipelineController {
     _stateSub = WebSocketClient().stateStream.listen((_) => _sendSnapshot());
     _eventSub =
         WebSocketClient().eventStream.listen(_onPipelineEvent, onError: (_) {});
+
+    // Route the sensor stream into the pipeline. Without this the pipeline's
+    // WebSocketClient never receives SensorPackets — the dashboard/preflight listen
+    // to InternalSensorManager.dataStream only for UI preview, so the local recorder
+    // writes and telemetry sends were both dead (sensors ran, but no packets flowed).
+    // The stream is broadcast and outlives start()/stop(), so this single persistent
+    // subscription covers every session.
+    WebSocketClient().attachSensorStream(InternalSensorManager().dataStream);
+    ConnDebug.log('pipeline: sensor stream attached');
 
     // Horizontally: whenever the UI attaches late it must see current state.
     _sendSnapshot();
@@ -83,7 +93,9 @@ class PipelineController {
   }
 
   Future<void> _connectAndReport(String ip) async {
+    ConnDebug.log('task: connect command -> $ip');
     final ok = await WebSocketClient().connect(ip);
+    ConnDebug.log('task: connect($ip) ok=$ok err=${WebSocketClient().lastConnectError}');
     FlutterForegroundTask.sendDataToMain({
       'k': 'connect_result',
       'ok': ok,

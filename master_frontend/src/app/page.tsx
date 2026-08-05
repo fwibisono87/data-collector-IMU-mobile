@@ -59,6 +59,13 @@ export default function Home() {
   // Guards a second STOP click from re-entering stop_recording ("Not recording" throw).
   const [isStopping, setIsStopping] = useState(false);
 
+  // Reset-connections flow. Confirm modal is gated on !isRecording; a successful reset
+  // remounts AlertCenter (clears its local connectivity events) and clears the report.
+  const [showReset, setShowReset] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [alertResetKey, setAlertResetKey] = useState(0);
+  const [resetError, setResetError] = useState("");
+
   const isRecording = sessionState === "RECORDING";
   // Derive online count directly from devices — single source of truth.
   const onlineCount = devices.filter(d => d.is_online).length;
@@ -234,6 +241,22 @@ export default function Home() {
     }
   };
 
+  const handleReset = async () => {
+    setResetError("");
+    setIsResetting(true);
+    try {
+      await wsClient.resetConnections();
+      setIntegrityReport(null);
+      setLiveSamples({});
+      setAlertResetKey(k => k + 1);   // remount AlertCenter → clears its event log
+      setShowReset(false);
+    } catch (e) {
+      setResetError(`Reset failed: ${e}`);
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   // ── Render: connect screen ─────────────────────────────────────────────────
   if (view === "connect") {
     return (
@@ -307,7 +330,7 @@ export default function Home() {
               isRecording={isRecording}
             />
             <div className="glass-panel p-3">
-              <AlertCenter devices={devices} state={sessionState} isWsConnected={isWsConnected} />
+              <AlertCenter key={alertResetKey} devices={devices} state={sessionState} isWsConnected={isWsConnected} />
             </div>
             <RecoveryPanel backendIp={backendIp} />
             <PreflightPanel
@@ -347,6 +370,17 @@ export default function Home() {
               className="text-xs text-gray-600 hover:text-gray-400 underline text-center disabled:opacity-30 disabled:cursor-not-allowed disabled:no-underline"
             >
               Disconnect
+            </button>
+
+            {/* Reset connections — clears devices + connectivity history. Locked during
+                RECORDING; confirm-gated so it can't be triggered accidentally. */}
+            <button
+              onClick={() => { setResetError(""); setShowReset(true); }}
+              disabled={isRecording || isResetting}
+              title={isRecording ? "Stop the session first" : "Close all device connections and clear connectivity warnings"}
+              className="text-xs text-red-500/70 hover:text-red-400 underline text-center disabled:opacity-30 disabled:cursor-not-allowed disabled:no-underline"
+            >
+              {isResetting ? "Resetting…" : "Reset connections"}
             </button>
           </aside>
 
@@ -406,6 +440,43 @@ export default function Home() {
           </aside>
         </div>
       </div>
+
+      {/* Reset connections — confirm modal, only reachable when not recording */}
+      {showReset && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={() => setShowReset(false)}>
+          <div
+            className="max-w-sm w-full glass-panel p-5 space-y-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 className="text-base font-bold text-red-400">Reset all connections?</h2>
+            <p className="text-xs text-gray-300 leading-relaxed">
+              This will forcibly close every connected device and clear all previous
+              connectivity warnings (offline gaps and “no data” flags, plus the event log).
+            </p>
+            <p className="text-xs text-gray-500">
+              Not available while a session is recording. Devices will need to reconnect
+              to resume streaming.
+            </p>
+            {resetError && <p className="text-xs text-red-400">{resetError}</p>}
+            <div className="flex gap-2 justify-end pt-1">
+              <button
+                onClick={() => setShowReset(false)}
+                disabled={isResetting}
+                className="btn-glass px-3 py-1.5 text-xs text-gray-300 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReset}
+                disabled={isResetting}
+                className="btn-danger px-3 py-1.5 text-xs font-bold disabled:opacity-50"
+              >
+                {isResetting ? "Resetting…" : "Reset now"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

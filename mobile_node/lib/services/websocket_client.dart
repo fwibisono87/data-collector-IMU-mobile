@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:uuid/uuid.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'conn_debug.dart';
 import '../models/sensor_packet.dart';
 import '../models/proto/sensor_packet.pb.dart';
 import '../models/proto/commands.pb.dart';
@@ -99,12 +100,14 @@ class WebSocketClient {
 
   Future<bool> connect(String serverIp) async {
     if (_state == WsState.connecting || _state == WsState.connected) {
+      ConnDebug.log('connect($serverIp) early-return: state=$_state');
       return true;
     }
     _serverIp = serverIp;
     _lastConnectError = null;
     RecoveryUploader().configure(_serverIp);
     _setState(WsState.connecting);
+    ConnDebug.log('connect begin -> $serverIp, state=connecting');
 
     // Cancel any stale subscriptions from a previous (now-dead) connection so their
     // onDone/onError cannot fire against the new connection (Defect D).
@@ -129,6 +132,7 @@ class WebSocketClient {
       // optimistically reporting "connected" (Defect B). 6 s tolerates a slow handshake;
       // a dead network errors out well before that.
       await _control!.ready.timeout(const Duration(seconds: 6));
+      ConnDebug.log('control socket open (ws/control)');
 
       _controlSub = _control!.stream.listen(
         (raw) => _handleControlMessage(raw),
@@ -138,11 +142,13 @@ class WebSocketClient {
 
       // Send DeviceRegister only after the control socket is confirmed open.
       await _sendDeviceRegister();
+      ConnDebug.log('DeviceRegister sent -> $_deviceId');
 
       _telemetry = WebSocketChannel.connect(
         Uri.parse('ws://$serverIp:8000/ws/telemetry'),
       );
       await _telemetry!.ready.timeout(const Duration(seconds: 6));
+      ConnDebug.log('telemetry socket open (ws/telemetry)');
 
       // Detect server-side drops on the telemetry channel. Stored so it can be cancelled
       // on the next reconnect (Defect D).
@@ -167,12 +173,14 @@ class WebSocketClient {
       // This must run for EVERY connect path (first connect, reconnect, resume-after-kill),
       // not just the reconnect timer (plan R3).
       unawaited(_afterConnectReconcile());
+      ConnDebug.log('connect OK -> $serverIp');
       return true;
     } catch (e) {
       // Real failure (network still down, handshake timed out). Go offline and let the
       // reconnect loop retry — do NOT report success, so the buffer is never flushed/cleared
       // against a dead socket (Defect B).
       _lastConnectError = _describeConnectError(e);
+      ConnDebug.log('connect FAILED -> $serverIp: $_lastConnectError | raw=$e');
       _setState(WsState.offline);
       _scheduleReconnect();
       return false;

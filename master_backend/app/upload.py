@@ -68,6 +68,7 @@ def _default_info(session_id: str, device_id: str) -> dict:
         "received_bytes": 0,
         "sha256": "",
         "complete": False,
+        "done": False,
         "start_epoch_ms": int(time.time() * 1000),
         "updated_at_ms": int(time.time() * 1000),
     }
@@ -172,7 +173,12 @@ def _int_header(request: Request, name: str, default: int) -> int:
 
 
 @router.get("/recovery/sessions")
-async def recovery_sessions():
+async def recovery_sessions(include_done: bool = False):
+    """List recovery upload sessions.
+
+    By default hides sessions whose files were all marked done (operator "Done"
+    button). Pass `include_done=true` to see them again.
+    """
     out = []
     if RECOVERY_PATH.exists():
         for d in sorted(RECOVERY_PATH.iterdir()):
@@ -180,11 +186,55 @@ async def recovery_sessions():
                 continue
             infos = [json.loads(p.read_text(encoding="utf-8"))
                      for p in d.glob("*.info.json")]
+            if not infos:
+                continue
+            all_done = all(i.get("done", False) for i in infos)
+            if all_done and not include_done:
+                continue
             out.append({
                 "session_id": d.name,
                 "files": infos,
+                "done": all_done,
             })
     return out
+
+
+def _set_done(session_id: str, done: bool) -> list[dict]:
+    """Flip the operator `done` flag on every file of a recovery session."""
+    d = _session_dir(session_id)
+    updated = []
+    for p in d.glob("*.info.json"):
+        try:
+            info = dict(json.loads(p.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+        info["done"] = done
+        info["updated_at_ms"] = int(time.time() * 1000)
+        p.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        updated.append(info.get("device_id"))
+    return updated
+
+
+@router.post("/recovery/{session_id}/dismiss")
+async def recovery_dismiss(session_id: str):
+    """Mark a recovery session as done so it stops cluttering the dashboard.
+
+    Non-destructive: the CSVs remain on disk and can be restored / re-shown.
+    """
+    updated = _set_done(session_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="no recovery files for session")
+    await audit.log("INFO", "recovery_dismissed", {"session_id": session_id, "devices": updated})
+    return {"session_id": session_id, "done": True, "devices": updated}
+
+
+@router.post("/recovery/{session_id}/restore")
+async def recovery_restore(session_id: str):
+    """Undo dismiss — bring a done recovery session back to the active list."""
+    updated = _set_done(session_id, False)
+    if not updated:
+        raise HTTPException(status_code=404, detail="no recovery files for session")
+    return {"session_id": session_id, "done": False, "devices": updated}
 
 
 @router.get("/recovery/{session_id}/files")

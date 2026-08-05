@@ -105,6 +105,10 @@ class WsClient {
     return this._sendWithAck("SET_LABEL", { label_id: labelId, label_name: String(labelId) });
   }
 
+  async resetConnections(): Promise<AckMsg> {
+    return this._sendWithAck("RESET", {});
+  }
+
   getState(): void {
     this._send("GET_STATE", {});
   }

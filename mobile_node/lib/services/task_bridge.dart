@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'conn_debug.dart';
 import 'foreground_service_handler.dart';
 import 'websocket_client.dart';
 
@@ -67,6 +68,13 @@ class TaskBridge {
   void init() {
     if (_listening) return;
     _listening = true;
+    // Register the main-isolate receive port that the task engine's sendDataToMain()
+    // delivers into. Without this, every task->UI message (task_ready, snapshot,
+    // connect_result) is silently dropped: sendDataToMain() does an IsolateNameServer
+    // lookup that returns null and is a no-op. This is required by flutter_foreground_task
+    // (README §6) and was the root cause of connect() never resolving despite the phone
+    // being fully connected server-side.
+    FlutterForegroundTask.initCommunicationPort();
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
   }
 
@@ -86,9 +94,18 @@ class TaskBridge {
       return;
     }
     if (kind == 'connect_result') {
+      // Carry the real failure reason into the mirrored state — previously the error
+      // on connect_result was dropped and the UI fell back to a misleading generic
+      // "Could not connect to IP:8000" whenever the snapshot hadn't yet propagated.
+      final err = m['error'];
+      if (err is String && err.isNotEmpty) _lastConnectError = err;
       final c = _pendingConnect;
       _pendingConnect = null;
-      if (c != null) c.complete(m['ok'] == true);
+      final ok = m['ok'] == true;
+      if (!ok && _lastConnectError == null) {
+        _lastConnectError = 'Connection failed — see conn_debug.log on this phone.';
+      }
+      if (c != null) c.complete(ok);
       return;
     }
   }
@@ -123,7 +140,20 @@ class TaskBridge {
         final pc = _pendingConnected;
         _pendingConnected = null;
         pc?.complete(true);
+        // The task reaching "connected" is authoritative proof the sockets are up.
+        // Also resolve any in-flight connect() so a lost/raced connect_result ack can
+        // never turn a real, healthy connection into a false "Could not connect" error.
+        final pend = _pendingConnect;
+        _pendingConnect = null;
+        pend?.complete(true);
+      } else if (newState == WsState.offline) {
+        final pend = _pendingConnect;
+        if (pend != null && !pend.isCompleted) {
+          _pendingConnect = null;
+          pend.complete(false);
+        }
       }
+      ConnDebug.log('UI state -> ${newState.name} (${m['state']})');
       if (!_stateController.isClosed) _stateController.add(newState);
     }
 
@@ -147,9 +177,16 @@ class TaskBridge {
     await _waitForTaskReady();
     final c = Completer<bool>();
     _pendingConnect = c;
+    ConnDebug.log('UI -> sendDataToTask connect $ip');
     FlutterForegroundTask.sendDataToTask({'cmd': 'connect', 'ip': ip});
-    return c.future
+    final ok = await c.future
         .timeout(const Duration(seconds: 15), onTimeout: () => false);
+    if (!ok && _lastConnectError == null) {
+      _lastConnectError =
+          'No reply from task engine in 15s — check conn_debug.log on the phone.';
+    }
+    ConnDebug.log('UI connect($ip) resolved ok=$ok');
+    return ok;
   }
 
   Future<void> disconnect() async {

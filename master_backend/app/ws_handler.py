@@ -373,6 +373,25 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
         case "GET_STATE":
             await ws.send_text(json.dumps(_state_snapshot()))
 
+        case "RESET":
+            if session_manager.state == SessionState.RECORDING:
+                await ws.send_text(json.dumps({
+                    "type": "ACK",
+                    "command_id": command_id,
+                    "status": "fail",
+                    "detail": "Cannot reset connections while a session is recording",
+                }))
+                return
+            await session_manager.reset_all()
+            _latest_samples.clear()   # stop /ws/live re-broadcasting stale device samples
+            await ws.send_text(json.dumps({
+                "type": "ACK",
+                "command_id": command_id,
+                "status": "ok",
+            }))
+            await audit.log("INFO", "operator_reset", {})
+            await broadcast_to_frontends(_state_snapshot())
+
 
 def _state_snapshot() -> dict:
     return {
