@@ -97,14 +97,32 @@ $backend = Start-Process -FilePath $venvPy -ArgumentList 'master_backend/run.py'
 
 # --- frontend ---
 $fe = Join-Path $root 'master_frontend'
-if (-not (Test-Path (Join-Path $fe 'node_modules'))) {
-    Write-Host "Frontend   : installing frontend dependencies (npm install) ..." -ForegroundColor Cyan
+$nextPkg = Join-Path $fe 'node_modules\next'
+if (-not (Test-Path $nextPkg)) {
+    # node_modules absent OR broken (e.g. a failed install left it corrupt) -> clean reinstall.
+    Write-Host "Frontend   : installing frontend dependencies (npm ci) ..." -ForegroundColor Cyan
+
+    # Stop any leftover dev-server node for THIS project that could be holding file
+    # locks on node_modules (targeted — does not touch unrelated node processes).
+    $proj = $root.ToLowerInvariant()
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object {
+        if ($_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($proj)) {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Milliseconds 300
+
+    # Remove the broken/partial tree ourselves (cleaner than npm's own cleanup,
+    # which was the source of the earlier EPERM).
+    $nm = Join-Path $fe 'node_modules'
+    if (Test-Path $nm) { Remove-Item -Recurse -Force $nm -ErrorAction SilentlyContinue }
+
     Push-Location $fe
-    npm install
+    npm ci
     $npmExit = $LASTEXITCODE
     Pop-Location
     if ($npmExit -ne 0) {
-        Write-Host "FAIL: npm install failed." -ForegroundColor Red
+        Write-Host "FAIL: npm ci failed (a lingering node process may be locking node_modules)." -ForegroundColor Red
         exit 1
     }
 } else {

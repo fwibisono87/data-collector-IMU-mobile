@@ -81,9 +81,13 @@ echo "Backend    : starting ($VENV_PY master_backend/run.py) on :$BACKEND_PORT"
 BACKEND_PID=$!
 
 # --- frontend ---
-if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-  echo "Frontend   : installing frontend dependencies (npm install) ..."
-  ( cd "$FRONTEND_DIR" && npm install ) || { echo "FAIL: npm install failed." >&2; exit 1; }
+if [ ! -d "$FRONTEND_DIR/node_modules/next" ] || [ ! -e "$FRONTEND_DIR/node_modules/.bin/next" ]; then
+  # node_modules absent OR broken (e.g. a failed install left it corrupt) -> clean reinstall.
+  echo "Frontend   : installing frontend dependencies (npm ci) ..."
+  # Kill any leftover next dev for THIS project before removing the tree.
+  pkill -f "$FRONTEND_DIR/node_modules.*/next" 2>/dev/null || true
+  rm -rf "$FRONTEND_DIR/node_modules"
+  ( cd "$FRONTEND_DIR" && npm ci ) || { echo "FAIL: npm ci failed — delete master_frontend/node_modules and retry." >&2; exit 1; }
 else
   echo "Frontend   : dependencies already installed."
 fi
