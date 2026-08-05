@@ -1,22 +1,12 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
+import {
+  fetchRecoverySessions,
+  type RecoverySessionEntry,
+} from "@/lib/export_client";
 
-interface RecoveryFile {
-  device_id: string;
-  role: string;
-  subject: string;
-  session_tag: string;
-  size: number;
-  complete: boolean;
-  sha256_verified?: boolean | null;
-  updated_at_ms: number;
-}
-
-interface RecoverySession {
-  session_id: string;
-  files: RecoveryFile[];
-  done?: boolean;
-}
+// Recovery list entries carry the upstream info.json fields (csv_size received_bytes), not
+// the size/shae256_verified added by /recovery/{sid}/files — both are handled here.
 
 interface Props {
   backendIp: string;
@@ -28,7 +18,7 @@ interface Props {
 // the operator download or merge them into the main session CSV. Data lands on the backend
 // via the phone's resumable HTTP upload (see master_backend/app/upload.py).
 export default function RecoveryModal({ backendIp, open, onClose }: Props) {
-  const [sessions, setSessions] = useState<RecoverySession[]>([]);
+  const [sessions, setSessions] = useState<RecoverySessionEntry[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [merging, setMerging] = useState<string>("");
@@ -40,14 +30,12 @@ export default function RecoveryModal({ backendIp, open, onClose }: Props) {
   const refresh = useCallback(async () => {
     setError("");
     try {
-      const res = await fetch(`${base}/recovery/sessions${showDone ? "?include_done=1" : ""}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as RecoverySession[];
+      const data = await fetchRecoverySessions(backendIp, showDone);
       setSessions(data.filter(s => s.files.length > 0));
     } catch (e) {
       setError(`Could not reach backend for recovery list: ${e}`);
     }
-  }, [base, showDone]);
+  }, [backendIp, showDone]);
 
   useEffect(() => { if (open) refresh(); }, [open, refresh]);
 
@@ -184,7 +172,7 @@ export default function RecoveryModal({ backendIp, open, onClose }: Props) {
                 <div key={f.device_id} className="flex items-center justify-between text-[11px]">
                   <span className="text-gray-300 truncate max-w-[140px]">{f.role || f.device_id}</span>
                   <div className="flex items-center gap-2">
-                    <span className="text-gray-500 tabular-nums">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                    <span className="text-gray-500 tabular-nums">{((f.csv_size ?? f.size ?? 0) / 1024 / 1024).toFixed(1)} MB</span>
                     <span className={f.complete ? "text-green-400" : "text-amber-400"}>
                       {f.complete ? (f.sha256_verified === false ? "bad" : "✓") : "…"}
                     </span>

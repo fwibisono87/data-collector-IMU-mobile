@@ -18,6 +18,11 @@ import MultiCameraRecorder, {
 } from "@/components/MultiCameraRecorder";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
 import RecoveryModal from "@/components/RecoveryModal";
+import { clearChunks } from "@/lib/video_backup";
+import EndSessionModal, {
+  type EndSessionInfo,
+  type EndSessionVideoResult,
+} from "@/components/EndSessionModal";
 
 // ECharts uses browser APIs — dynamic import keeps SSR safe.
 const RealtimeChart = dynamic(() => import("@/components/RealtimeChart"), { ssr: false });
@@ -67,6 +72,14 @@ export default function Home() {
   const [resetError, setResetError] = useState("");
   const [showRecovery, setShowRecovery] = useState(false);
 
+  // End-of-session export modal — replaces the immediate per-camera downloads.
+  const [endSession, setEndSession] = useState<EndSessionInfo | null>(null);
+  const [endVideoResults, setEndVideoResults] = useState<EndSessionVideoResult[]>([]);
+  const [endMissed, setEndMissed] = useState<string[]>([]);
+  const [endRecheckTick, setEndRecheckTick] = useState(0);
+  const endSessionOpenRef = useRef(false);
+  useEffect(() => { endSessionOpenRef.current = endSession !== null; }, [endSession]);
+
   const isRecording = sessionState === "RECORDING";
   // Derive online count directly from devices — single source of truth.
   const onlineCount = devices.filter(d => d.is_online).length;
@@ -104,14 +117,18 @@ export default function Home() {
         }
       } else if (msg.type === "LATE_DELIVERY") {
         // A phone flushed its buffered tail after STOP, into a *_late.csv sidecar
-        // (plan DD-4). Not an error — but the operator must know it exists and needs
-        // to be merged before analysis.
+        // (plan DD-4). If the export modal is open it re-checks itself; otherwise the
+        // operator must know the sidecar exists and needs merging before analysis.
         const s = msg as unknown as { session_id: string; devices: Record<string, { rows_appended: number }> };
         const total = Object.values(s.devices ?? {}).reduce((a, d) => a + (d.rows_appended ?? 0), 0);
-        alert(
-          `Late delivery received for session ${s.session_id}: ${total.toLocaleString()} rows ` +
-          `written to *_sensor_data_late.csv. Merge with the main CSV before analysis.`
-        );
+        if (endSessionOpenRef.current) {
+          setEndRecheckTick(t => t + 1);
+        } else {
+          alert(
+            `Late delivery received for session ${s.session_id}: ${total.toLocaleString()} rows ` +
+            `written to *_sensor_data_late.csv. Merge with the main CSV before analysis.`
+          );
+        }
       }
     });
     const unsubLive = wsClient.onLive((samples) => setLiveSamples({ ...samples }));
@@ -196,35 +213,19 @@ export default function Home() {
   const handleStop = async () => {
     if (isStopping) return;          // guard double-click → no spurious "Not recording" alert
     setIsStopping(true);
+    // Capture identity BEFORE the stop call — a late STATE_UPDATE broadcast after the ACK
+    // could otherwise describe the session differently than the one we just ended.
+    const ended = { sessionId, subject, sessionTag, operator };
     try {
       const { results, missed } = (await camRef.current?.stopRecording()) ?? { results: [], missed: [] };
-      // Release backend before downloads — a throw/hang in the download loop can no longer
+      // Release backend before the export modal opens — a throw/hang here can no longer
       // leave the session stuck in RECORDING. [Finding B]
       await wsClient.stopSession("operator_stop");
-      // One download per camera; extension matches each camera's actual container.
-      for (const r of results) {
-        const ext = r.mime.includes("mp4") ? "mp4" : "webm";
-        _downloadBlob(r.blob, `${sessionId}_${r.camId}_video_sync.${ext}`);
-        // Stagger so the browser doesn't drop concurrent downloads (one-time
-        // "Allow multiple downloads" prompt the first time).
-        await new Promise(res => setTimeout(res, 350));
-      }
-      if (results.length > 0) {
-        const manifest = {
-          session_id: sessionId,
-          cameras: results.map(r => ({
-            cam_id: r.camId,
-            device_id: r.deviceId,
-            browser_label: r.label,
-            mime: r.mime,
-            file: `${sessionId}_${r.camId}_video_sync.${r.mime.includes("mp4") ? "mp4" : "webm"}`,
-          })),
-        };
-        const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" });
-        _downloadBlob(blob, `${sessionId}_cameras.json`);
-      }
-      // [Finding C] Surface cameras that produced no footage so the operator knows an angle is missing.
-      if (missed.length > 0) alert(`Warning: ${missed.join(", ")} captured no footage and was not saved.`);
+      // No immediate downloads — the end-of-session modal handles artifacts+video as one
+      // zip, and cannot be dismissed until a download has completed.
+      setEndSession(ended);
+      setEndVideoResults(results);
+      setEndMissed(missed);
     } catch (e) {
       alert(`Stop failed: ${e}`);
     } finally {
@@ -494,17 +495,22 @@ export default function Home() {
         open={showRecovery}
         onClose={() => setShowRecovery(false)}
       />
+
+      {/* End-of-session export — non-dismissible until a .zip download has completed.
+          The cleared video backup only happens AFTER a successful download so footage
+          survives a failed/aborted download until the next session anyway (see
+          video_backup.ts clearAllChunks). */}
+      <EndSessionModal
+        session={endSession}
+        videoResults={endVideoResults}
+        missed={endMissed}
+        backendIp={backendIp}
+        recheckTick={endRecheckTick}
+        onClose={() => setEndSession(null)}
+        onDownloadComplete={(sid) => { void clearChunks(sid); }}
+      />
     </>
   );
-}
-
-function _downloadBlob(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 async function probeBackend(ip: string): Promise<

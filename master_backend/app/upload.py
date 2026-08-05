@@ -169,6 +169,73 @@ def _int_header(request: Request, name: str, default: int) -> int:
         return default
 
 
+_CSV_HEADER = (
+    "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,"
+    "gyro_x_degs,gyro_y_degs,gyro_z_degs,"
+    "label_id,label_name,sequence_number,device_id\n"
+)
+
+
+def merge_csv_sources(
+    sources: list[tuple[str, Path]],
+    output: Path,
+    *,
+    metadata_prefix: str = "",
+) -> dict:
+    """Merge CSVs sharing the sensor schema into one file.
+
+    Dedups rows on (device_id, sequence_number) — the same physical sample can arrive
+    through several paths (live WS writes, late delivery sidecars, phone rescue
+    uploads), all of which share the backend sequence numbers. Rows are then
+    re-sorted by timestamp so the downstream segmentation sees a monotonic series.
+
+    `sources` is a list of (source_label, path). The metadata prefix (when given) is
+    written above the header so the merged file stays self-describing.
+    """
+    seen: set[str] = set()
+    rows: list[list[str]] = []
+    src_rows: dict[str, int] = {}
+    read_total = 0
+    header_no_nl = _CSV_HEADER.rstrip("\n")
+
+    for label, path in sources:
+        if path is None or not path.exists():
+            continue
+        count = 0
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("#") or line == "":
+                continue
+            if line.rstrip("\n") == header_no_nl:
+                continue
+            parts = line.split(",")
+            if len(parts) < 11:
+                continue
+            read_total += 1
+            key = f"{parts[10]}\t{parts[9]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(parts)
+            count += 1
+        src_rows[label] = count
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows.sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
+    with open(output, "w", encoding="utf-8", newline="") as f:
+        if metadata_prefix:
+            f.write(f"# {metadata_prefix}\n")
+        f.write(_CSV_HEADER)
+        for p in rows:
+            f.write(",".join(p) + "\n")
+
+    return {
+        "path": str(output),
+        "rows": len(rows),
+        "sources": src_rows,
+        "duplicates_dropped": read_total - len(rows),
+    }
+
+
 # ── Desktop pull ─────────────────────────────────────────────────────────────
 
 
@@ -269,68 +336,38 @@ async def recovery_merge(session_id: str):
     to <subject>_<tag>/<session_id>_merged.csv. Returns the merged file path and row counts.
     """
     d = _session_dir(session_id)
-    infos = []
+    sources: list[tuple[str, Path]] = []
     for p in d.glob("*.info.json"):
         info = json.loads(p.read_text(encoding="utf-8"))
         csv = d / f"{_slug(info['device_id'])}.csv"
         if csv.exists() and info.get("complete"):
-            infos.append((info, csv))
-    if not infos:
+            sources.append((info["device_id"], csv))
+    if not sources:
         raise HTTPException(status_code=404, detail="no complete recovery files to merge")
 
-    subject = infos[0][0].get("subject", "Unknown")
-    tag = infos[0][0].get("session_tag", "Session")
-
-    header = (
-        "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,"
-        "gyro_x_degs,gyro_y_degs,gyro_z_degs,"
-        "label_id,label_name,sequence_number,device_id\n"
-    )
-    seen = set()
-    rows = []
-    sources = {}
-    read_total = 0
-    for info, csv in infos:
-        lines = csv.read_text(encoding="utf-8", errors="replace").splitlines()
-        src_rows = 0
-        for line in lines:
-            if line.startswith("#") or line == "":
-                continue
-            if line.rstrip("\n") == header.rstrip("\n"):
-                continue
-            parts = line.split(",")
-            if len(parts) < 11:
-                continue
-            read_total += 1
-            seq = parts[9]
-            dev = parts[10]
-            key = f"{dev}\t{seq}"
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(parts)
-            src_rows += 1
-        sources[info["device_id"]] = src_rows
-    duplicates_dropped = read_total - len(rows)
-
-    rows.sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
+    infos = [
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in d.glob("*.info.json")
+    ]
+    subject = infos[0].get("subject", "Unknown") if infos else "Unknown"
+    tag = infos[0].get("session_tag", "Session") if infos else "Session"
 
     ssd = Path(os.getenv("SSD_PATH", "./data")) / "Data_Riset_IMU" / f"{subject}_{tag}".replace(" ", "_")
-    ssd.mkdir(parents=True, exist_ok=True)
     out_path = ssd / f"{session_id}_merged.csv"
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        f.write(f"# session_id={session_id},subject={subject},session_tag={tag},source=recovery_merge\n")
-        f.write(header)
-        for p in rows:
-            f.write(",".join(p) + "\n")
+    result = merge_csv_sources(
+        sources,
+        out_path,
+        metadata_prefix=f"session_id={session_id},subject={subject},session_tag={tag},source=recovery_merge",
+    )
 
     await audit.log("INFO", "recovery_merged", {
-        "session_id": session_id, "devices": sources, "rows": len(rows), "path": str(out_path),
+        "session_id": session_id, "devices": result["sources"], "rows": result["rows"],
+        "path": result["path"],
     })
     return {
         "session_id": session_id,
-        "path": str(out_path),
-        "rows": len(rows),
-        "devices": sources,
-        "duplicates_dropped": duplicates_dropped,
+        "path": result["path"],
+        "rows": result["rows"],
+        "devices": result["sources"],
+        "duplicates_dropped": result["duplicates_dropped"],
     }
