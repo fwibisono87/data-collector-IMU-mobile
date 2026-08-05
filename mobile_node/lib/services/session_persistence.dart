@@ -99,4 +99,13 @@ class SessionPersistence {
       return null;
     }
   }
+
+  /// In-app recovery: remove the persisted desired endpoint so a task-engine
+  /// auto-reconnect can no longer re-dial a stale server IP after a reset.
+  Future<void> clearDesired() async {
+    try {
+      final f = await _file(_desiredFileName);
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+  }
 }

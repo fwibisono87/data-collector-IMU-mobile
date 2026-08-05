@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../services/device_id_service.dart';
 import '../services/foreground_service_handler.dart';
+import '../services/session_persistence.dart';
 import '../services/task_bridge.dart';
 import 'preflight_screen.dart';
 
@@ -57,7 +58,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
     if (!mounted) return;
     if (ok) {
-      Navigator.pushReplacement(
+      Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const PreflightScreen()),
       );
@@ -67,6 +68,44 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         _error = TaskBridge().lastConnectError ?? 'Could not connect to $ip:8000';
       });
     }
+  }
+
+  // In-app recovery for a phone stuck on a bad/colliding role or stale identity:
+  // wipes device_config + desired endpoint so it reconnects fresh, without needing
+  // to clear app data via the OS.
+  Future<void> _resetDevice() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset device?',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'This clears this phone\'s device identity and role so it reconnects fresh. '
+          'A new device ID will be generated. Select a role and connect again afterwards.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        backgroundColor: const Color(0xFF16213E),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('RESET', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await DeviceIdService().resetConfig();
+    await SessionPersistence().clearDesired();
+    setState(() {
+      _selectedRole = 'chest';
+      _ipController.text = '';
+      _error = null;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Device reset — pick a role and connect again.')),
+    );
   }
 
   @override
@@ -113,7 +152,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     .toList(),
                 onChanged: _connecting
                     ? null
-                    : (v) => setState(() => _selectedRole = v!),
+                    : (v) {
+                        if (v == null) return;
+                        setState(() => _selectedRole = v);
+                        // Persist immediately so the choice survives an app stop before
+                        // CONNECT (previously only saved on connect — lost if the app was
+                        // killed in between, sending the phone back to its old role).
+                        DeviceIdService().setDeviceRole(v);
+                      },
               ),
               const SizedBox(height: 16),
 
@@ -169,6 +215,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                 'On Xiaomi/Redmi also enable Autostart + set Battery to No restrictions (see setup card).',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white24, fontSize: 11),
+              ),
+
+              TextButton(
+                onPressed: _resetDevice,
+                child: const Text(
+                  'Stuck or wrong role? Reset device',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white38, fontSize: 12),
+                ),
               ),
 
               // Third-party open-source license attribution (MIT/BSD compliance).

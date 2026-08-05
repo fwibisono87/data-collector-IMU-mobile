@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/internal_sensor_manager.dart';
 import '../services/task_bridge.dart';
+import '../services/websocket_client.dart' show WsState;
 import 'dashboard_screen.dart';
 
 enum _Status { pending, running, pass, fail }
@@ -35,6 +36,12 @@ class _PreflightScreenState extends State<PreflightScreen> {
   bool _allPassed = false;
   bool _running = false;
 
+  // Surfaces a backend rejection (e.g. role collision) that otherwise left the
+  // checks stuck at "No sync yet" / "WS RTT not measured" with no explanation.
+  String? _fatalMsg;
+  StreamSubscription? _evtSub;
+  StreamSubscription<WsState>? _stateSub;
+
   @override
   void initState() {
     super.initState();
@@ -46,7 +53,35 @@ class _PreflightScreenState extends State<PreflightScreen> {
       _Check('Accelerometer Sanity'),
       _Check('Gyroscope Sanity'),
     ];
+    _watchConnection();
     _runChecks();
+  }
+
+  @override
+  void dispose() {
+    _evtSub?.cancel();
+    _stateSub?.cancel();
+    super.dispose();
+  }
+
+  // A successful-looking connect that then gets dropped (backend closed the link,
+  // e.g. ROLE_COLLISION) never syncs the clock — so instead of a silent "no sync",
+  // tell the operator what happened and how to recover.
+  void _watchConnection() {
+    _evtSub = TaskBridge().eventStream.listen((e) {
+      if (e['type'] == 'error_alert') {
+        final p = e['payload']?.toString() ?? 'unknown';
+        setState(() => _fatalMsg =
+            'Backend rejected this device ($p). Go back, change the Device Role, and reconnect.');
+      }
+    });
+    _stateSub = TaskBridge().stateStream.listen((s) {
+      if (s == WsState.offline && _fatalMsg == null) {
+        setState(() => _fatalMsg =
+            'Connection was lost — the backend may have rejected this phone (role conflict?). '
+            'Go back (←), change the Device Role, and reconnect.');
+      }
+    });
   }
 
   Future<void> _runChecks() async {
@@ -228,6 +263,29 @@ class _PreflightScreenState extends State<PreflightScreen> {
       ),
       body: Column(
         children: [
+          if (_fatalMsg != null)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.red.shade900.withOpacity(0.85),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.redAccent),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.redAccent),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_fatalMsg!,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13, height: 1.3)),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: ListView.separated(
               padding: const EdgeInsets.all(16),
