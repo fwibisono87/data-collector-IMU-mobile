@@ -50,14 +50,32 @@ BACKEND_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "Backend IP : $BACKEND_IP  (ws://$BACKEND_IP:$BACKEND_PORT/ ...)"
 
 # --- backend ---
-PY="$BACKEND_DIR/venv/bin/python"
-[ -x "$PY" ] || PY="$(command -v python || true)"
-[ -n "${PY:-}" ] || PY="python"
-echo "Backend    : starting ($PY master_backend/run.py) on :$BACKEND_PORT"
-"$PY" "$BACKEND_DIR/run.py" &
+VENV_DIR="$BACKEND_DIR/venv"
+VENV_PY="$VENV_DIR/bin/python"
+setup_backend() {
+  if [ ! -x "$VENV_PY" ]; then
+    echo "Backend    : creating venv at $VENV_DIR ..."
+    python3 -m venv "$VENV_DIR" || { echo "FAIL: could not create venv (install python3-venv)." >&2; exit 1; }
+  fi
+  if ! "$VENV_PY" -c "import fastapi" >/dev/null 2>&1; then
+    echo "Backend    : installing dependencies from requirements.txt ..."
+    "$VENV_PY" -m pip install -r "$BACKEND_DIR/requirements.txt" || { echo "FAIL: pip install failed." >&2; exit 1; }
+  else
+    echo "Backend    : dependencies already installed."
+  fi
+}
+setup_backend
+echo "Backend    : starting ($VENV_PY master_backend/run.py) on :$BACKEND_PORT"
+"$VENV_PY" "$BACKEND_DIR/run.py" &
 BACKEND_PID=$!
 
 # --- frontend ---
+if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+  echo "Frontend   : installing frontend dependencies (npm install) ..."
+  ( cd "$FRONTEND_DIR" && npm install ) || { echo "FAIL: npm install failed." >&2; exit 1; }
+else
+  echo "Frontend   : dependencies already installed."
+fi
 echo "Frontend   : starting (npm run dev) on :$FRONTEND_PORT"
 (
   cd "$FRONTEND_DIR"

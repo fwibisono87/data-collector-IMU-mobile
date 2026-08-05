@@ -58,14 +58,49 @@ if (-not $lanIp) { $lanIp = '127.0.0.1' }
 Write-Host "Backend IP : $lanIp  (ws://${lanIp}:$backendPort/ ...)" -ForegroundColor Yellow
 
 # --- backend ---
-$venvPy = Join-Path $root 'master_backend\venv\Scripts\python.exe'
-$py = if (Test-Path $venvPy) { $venvPy } else { 'python' }
-Write-Host "Backend    : starting ($py master_backend/run.py) on :$backendPort" -ForegroundColor Cyan
-$backend = Start-Process -FilePath $py -ArgumentList 'master_backend/run.py' `
+$venvDir = Join-Path $root 'master_backend\venv'
+$venvPy = Join-Path $venvDir 'Scripts\python.exe'
+$requirements = Join-Path $root 'master_backend\requirements.txt'
+
+if (-not (Test-Path $venvPy)) {
+    Write-Host "Backend    : creating venv at $venvDir ..." -ForegroundColor Cyan
+    python -m venv $venvDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL: could not create venv (install Python from python.org first)." -ForegroundColor Red
+        exit 1
+    }
+}
+& $venvPy -c 'import fastapi' 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Backend    : installing dependencies from requirements.txt ..." -ForegroundColor Cyan
+    & $venvPy -m pip install -r $requirements
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL: pip install failed." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "Backend    : dependencies already installed." -ForegroundColor Cyan
+}
+
+Write-Host "Backend    : starting ($venvPy master_backend/run.py) on :$backendPort" -ForegroundColor Cyan
+$backend = Start-Process -FilePath $venvPy -ArgumentList 'master_backend/run.py' `
     -WorkingDirectory $root -PassThru -NoNewWindow
 
 # --- frontend ---
 $fe = Join-Path $root 'master_frontend'
+if (-not (Test-Path (Join-Path $fe 'node_modules'))) {
+    Write-Host "Frontend   : installing frontend dependencies (npm install) ..." -ForegroundColor Cyan
+    Push-Location $fe
+    npm install
+    $npmExit = $LASTEXITCODE
+    Pop-Location
+    if ($npmExit -ne 0) {
+        Write-Host "FAIL: npm install failed." -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "Frontend   : dependencies already installed." -ForegroundColor Cyan
+}
 Write-Host "Frontend   : starting (npm run dev) on :$frontendPort" -ForegroundColor Cyan
 $frontend = Start-Process -FilePath 'npm.cmd' -ArgumentList 'run', 'dev' `
     -WorkingDirectory $fe -PassThru -NoNewWindow
