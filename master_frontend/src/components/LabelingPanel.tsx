@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useState } from "react";
 
 interface Props {
   activeLabel: number;
@@ -9,11 +10,29 @@ interface Props {
 // Label 0 = baseline (name "0"). Labels 1–50 per MIGRATION_PLAN.md open decision #3.
 const LABELS = Array.from({ length: 51 }, (_, i) => i);   // [0, 1, ..., 50]
 
+function _fmt(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 export default function LabelingPanel({ activeLabel, onLabel, disabled }: Props) {
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    setElapsed(0);
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [activeLabel]);
+
   return (
     <div>
       <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">
-        Labels <span className="text-accent normal-case">— active: {activeLabel}</span>
+        Labels{" "}
+        <span className="text-accent normal-case">— active: {activeLabel}</span>
+        <span className="ml-2 text-cyan-300 normal-case font-semibold tabular-nums">
+          {_fmt(elapsed)}
+        </span>
       </h3>
       <div className="grid grid-cols-10 gap-1">
         {LABELS.map(id => (

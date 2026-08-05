@@ -146,8 +146,14 @@ export default function EndSessionModal({
       const bySource = Object.entries(res.sources)
         .map(([k, n]) => `${k}:${n.toLocaleString()}`)
         .join(", ");
+      const perRole = res.per_role
+        ? Object.entries(res.per_role)
+            .map(([role, st]) => `${role}: ${st.rows.toLocaleString()} rows`)
+            .join(" · ")
+        : "";
       setConsolidateResult(
-        `Consolidated ${res.rows.toLocaleString()} rows — ${bySource} — ${res.duplicates_dropped} duplicates dropped`,
+        `Consolidated ${res.rows.toLocaleString()} rows — ${bySource} — ${res.duplicates_dropped} duplicates dropped` +
+          (perRole ? ` — Per-role: ${perRole}` : ""),
       );
       setManifest(await fetchManifest(backendIp, session.sessionId));
     } catch (e) {

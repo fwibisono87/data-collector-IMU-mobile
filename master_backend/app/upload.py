@@ -236,6 +236,80 @@ def merge_csv_sources(
     }
 
 
+def merge_csv_sources_per_role(
+    sources: list[tuple[str, str, Path]],
+    output_dir: Path,
+    session_id: str,
+    *,
+    metadata_prefix: str = "",
+) -> dict:
+    """Merge CSVs into one <session_id>_<role>_consolidated.csv per role bucket.
+
+    Per-role counterpart of merge_csv_sources: `sources` are (role_key, label, path)
+    triples. Roles are bucketed independently, each deduped on (device_id, sequence_number)
+    and re-sorted by timestamp, then written next to the session-wide consolidated file so
+    operators can hand one device's full series (live + late + rescue + recovery) to a
+    subject without the other devices' rows mixed in.
+    """
+    buckets: dict[str, dict] = {}
+    read_total = 0
+    header_no_nl = _CSV_HEADER.rstrip("\n")
+    for role_key, label, path in sources:
+        if path is None or not path.exists():
+            continue
+        b = buckets.setdefault(role_key, {
+            "seen": set(),
+            "rows": [],
+            "src_rows": {},
+            "read_total": 0,
+        })
+        count = 0
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("#") or line == "":
+                continue
+            if line.rstrip("\n") == header_no_nl:
+                continue
+            parts = line.split(",")
+            if len(parts) < 11:
+                continue
+            b["read_total"] += 1
+            read_total += 1
+            key = f"{parts[10]}\t{parts[9]}"
+            if key in b["seen"]:
+                continue
+            b["seen"].add(key)
+            b["rows"].append(parts)
+            count += 1
+        b["src_rows"][label] = count
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    per_role: dict[str, dict] = {}
+    written: list[str] = []
+    for role_key, b in sorted(buckets.items()):
+        b["rows"].sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
+        out_path = output_dir / f"{session_id}_{role_key}_consolidated.csv"
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            if metadata_prefix:
+                f.write(f"# {metadata_prefix}\n")
+            f.write(_CSV_HEADER)
+            for p in b["rows"]:
+                f.write(",".join(p) + "\n")
+        per_role[role_key] = {
+            "path": str(out_path),
+            "rows": len(b["rows"]),
+            "sources": b["src_rows"],
+            "duplicates_dropped": b["read_total"] - len(b["rows"]),
+        }
+        written.append(str(out_path))
+
+    return {
+        "files": written,
+        "roles": len(per_role),
+        "rows": sum(p["rows"] for p in per_role.values()),
+        "per_role": per_role,
+    }
+
+
 # ── Desktop pull ─────────────────────────────────────────────────────────────
 
 

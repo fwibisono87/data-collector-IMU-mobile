@@ -10,10 +10,13 @@ single .zip on the client. This router is the backend contract behind that modal
   GET  /export/{session_id}/manifest   -> authoritative snapshot from disk
   GET  /export/{session_id}/file?name= -> stream one session artifact
   POST /export/{session_id}/consolidate-> merge main + rescue + late + recovery into
-                                          <session_id>_consolidated.csv
+                                          <session_id>_consolidated.csv plus one
+                                          <session_id>_<role>_consolidated.csv per role
 
 The modal's "whole" verdict is strict: every sample source must be either absent or
-already folded into the consolidated output, plus the integrity report must PASS.
+already folded into the consolidated output, plus the integrity report must PASS. Once
+per-role consolidated files exist they take primacy for that verdict (per-role coverage
+is checked first, session-wide mtime is the fallback).
 """
 import json
 import logging
@@ -24,7 +27,13 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .audit_logger import audit
-from .upload import _CSV_HEADER, _session_dir as _recovery_dir, _slug, merge_csv_sources
+from .upload import (
+    _CSV_HEADER,
+    _session_dir as _recovery_dir,
+    _slug,
+    merge_csv_sources,
+    merge_csv_sources_per_role,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +94,51 @@ def _classify(name: str) -> str:
     if name.endswith(".csv"):
         return "csv"
     return "other"
+
+
+def _role_from_name(name: str, session_id: str) -> str:
+    """Recover the role from an on-disk source filename.
+
+    Sources are written role-keyed (<sid>_<role>_sensor_data[_(late|rescue)]?.csv); the
+    role is whatever is left after stripping the session prefix and known suffix.
+    """
+    if not name.startswith(f"{session_id}_"):
+        return ""
+    stem = name[len(session_id) + 1:]
+    for suffix in (
+        "_sensor_data_late.csv",
+        "_sensor_data_rescue.csv",
+        "_sensor_data.csv",
+        "_late.csv",
+        "_rescue.csv",
+        ".csv",
+    ):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem[:-4] if stem.endswith(".csv") else stem
+
+
+def _recovery_role(info: dict) -> str:
+    """Role for a phone rescue upload. Falls back to slugged device_id so a recovery
+    file without a role (backend default "") still lands in a dedicated bucket."""
+    role = (info.get("role") or "").strip()
+    return role or (_slug(info.get("device_id", "")) or "unknown")
+
+
+def _per_role_consolidated(files: list[dict], session_id: str) -> dict[str, list[Path]]:
+    """Map role_key -> consolidated file paths for that role (per-role primacy)."""
+    out: dict[str, list[Path]] = {}
+    for f in files:
+        if f["kind"] != "consolidated":
+            continue
+        name = f["name"]
+        if not name.startswith(f"{session_id}_"):
+            continue
+        stem = name[len(session_id) + 1:]
+        if not stem.endswith("_consolidated.csv") or stem == "_consolidated.csv":
+            continue
+        out.setdefault(_slug(stem[: -len("_consolidated.csv")]), []).append(Path(f["path"]))
+    return out
 
 
 def _session_files(session_id: str) -> list[dict]:
@@ -221,23 +275,46 @@ async def export_manifest(session_id: str):
             continue
 
     recovery = _recovery_manifest(session_id)
-    late_sources = [Path(f["path"]) for f in files if f["kind"] in ("late", "late_summary")]
-    consolidated = next((Path(f["path"]) for f in files if f["kind"] == "consolidated"), None)
-    consolidated_mtime = _mtime(consolidated)
+    late_sources = [f for f in files if f["kind"] in ("late", "late_summary")]
+    consolidated_files = [Path(f["path"]) for f in files if f["kind"] == "consolidated"]
+    session_mtime = max((_mtime(p) for p in consolidated_files), default=0.0)
+
+    # Per-role primacy: once per-role consolidated files exist, a source is only *pending*
+    # when its own role's consolidated file is missing or older than the source. Without
+    # per-role files we fall back to the old session-wide mtime comparison.
+    per_role = _per_role_consolidated(files, session_id)
+    has_per_role = bool(per_role)
+
+    def _role_covered(role_key: str, src: Path) -> bool:
+        return any(_mtime(p) >= _mtime(src) for p in per_role.get(role_key, []))
 
     late_has_rows = bool(late_summary and late_summary.get("devices")) or any(
         f["kind"] == "late" for f in files
     )
-    late_pending = bool(late_sources) and late_has_rows and (
-        consolidated is None or max(_mtime(p) for p in late_sources) > consolidated_mtime
-    )
+    if late_has_rows and has_per_role:
+        late_pending = any(
+            f["kind"] == "late"
+            and not _role_covered(_slug(_role_from_name(f["name"], session_id)), Path(f["path"]))
+            for f in files
+        )
+    else:
+        late_pending = bool(late_sources) and late_has_rows and (
+            not consolidated_files
+            or max(_mtime(Path(f["path"])) for f in late_sources) > session_mtime
+        )
 
     recovery_sources = [
-        Path(r["csv_path"]) for r in recovery if r.get("complete") and r.get("csv_exists")
+        (r, Path(r["csv_path"])) for r in recovery if r.get("complete") and r.get("csv_exists")
     ]
-    recovery_pending = bool(recovery_sources) and (
-        consolidated is None or max(_mtime(p) for p in recovery_sources) > consolidated_mtime
-    )
+    if recovery_sources and has_per_role:
+        recovery_pending = any(
+            not _role_covered(_slug(_recovery_role(r)), csv) for r, csv in recovery_sources
+        )
+    else:
+        recovery_pending = bool(recovery_sources) and (
+            not consolidated_files
+            or max(_mtime(csv) for _, csv in recovery_sources) > session_mtime
+        )
 
     status = (integrity or {}).get("status", "") or ("NONE" if not folders else "UNKNOWN")
 
@@ -267,6 +344,7 @@ async def export_manifest(session_id: str):
         "reasons": reasons,
         "late_pending": late_pending,
         "recovery_pending": recovery_pending,
+        "per_roles": sorted(per_role.keys()),
         "labels_used": labels,
         "data_rows": data_rows,
         "integrity": integrity,
@@ -306,13 +384,14 @@ async def export_consolidate(session_id: str):
     if not folders:
         raise HTTPException(status_code=404, detail="session data not found")
 
-    sources: list[tuple[str, Path]] = []
+    sources: list[tuple[str, str, Path]] = []
     for f in _session_files(session_id):
         if f["kind"] in _ORIGINAL_KINDS:
-            sources.append((f["kind"], Path(f["path"])))
+            role_key = _slug(_role_from_name(f["name"], session_id)) or "unknown"
+            sources.append((role_key, f["kind"], Path(f["path"])))
     for r in _recovery_manifest(session_id):
         if r.get("complete") and r.get("csv_exists"):
-            sources.append(("recovery", Path(r["csv_path"])))
+            sources.append((_slug(_recovery_role(r)), "recovery", Path(r["csv_path"])))
 
     if not sources:
         raise HTTPException(status_code=404, detail="no data files to consolidate")
@@ -320,8 +399,14 @@ async def export_consolidate(session_id: str):
     primary_folder = folders[0]
     out_path = primary_folder / f"{session_id}_consolidated.csv"
     result = merge_csv_sources(
-        sources,
+        [(label, path) for _, label, path in sources],
         out_path,
+        metadata_prefix=f"session_id={session_id},source=consolidate",
+    )
+    per_role = merge_csv_sources_per_role(
+        sources,
+        primary_folder,
+        session_id,
         metadata_prefix=f"session_id={session_id},source=consolidate",
     )
 
@@ -329,12 +414,17 @@ async def export_consolidate(session_id: str):
     summary = {
         "session_id": session_id,
         "consolidated_at_ms": __import__("time").time() * 1000,
+        "per_role": per_role["per_role"],
+        "per_role_files": per_role["files"],
         **result,
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     await audit.log("INFO", "session_consolidated", {
-        "session_id": session_id, "rows": result["rows"],
-        "path": result["path"], "sources": result["sources"],
+        "session_id": session_id,
+        "rows": result["rows"],
+        "path": result["path"],
+        "sources": result["sources"],
+        "per_role_files": per_role["files"],
     })
-    return {"session_id": session_id, **result}
+    return {"session_id": session_id, **result, "per_role": per_role["per_role"]}

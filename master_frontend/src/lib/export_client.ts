@@ -45,6 +45,7 @@ export interface ExportManifest {
   reasons: string[];
   late_pending: boolean;
   recovery_pending: boolean;
+  per_roles: string[];
   labels_used: LabelStat[];
   data_rows: number;
   integrity: Record<string, unknown> | null;
@@ -54,12 +55,20 @@ export interface ExportManifest {
   recovery: RecoveryFileInfo[];
 }
 
+export interface PerRoleStat {
+  path: string;
+  rows: number;
+  sources: Record<string, number>;
+  duplicates_dropped: number;
+}
+
 export interface ConsolidateResult {
   session_id: string;
   path: string;
   rows: number;
   sources: Record<string, number>;
   duplicates_dropped: number;
+  per_role: Record<string, PerRoleStat>;
 }
 
 export interface RecoverySessionEntry {
