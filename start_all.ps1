@@ -58,6 +58,14 @@ if (-not $lanIp) {
 if (-not $lanIp) { $lanIp = '127.0.0.1' }
 Write-Host "Backend IP : $lanIp  (ws://${lanIp}:$backendPort/ ...)" -ForegroundColor Yellow
 
+# --- stop any stale instance on the app ports (avoids port conflicts and node_modules
+#     file locks from orphaned processes, which otherwise break `npm install`) ---
+foreach ($p in $backendPort, $frontendPort) {
+    $conns = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+    foreach ($c in $conns) { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 300
+}
+
 # --- backend ---
 $venvDir = Join-Path $root 'master_backend\venv'
 $venvPy = Join-Path $venvDir 'Scripts\python.exe'

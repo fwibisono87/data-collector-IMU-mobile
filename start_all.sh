@@ -49,6 +49,17 @@ BACKEND_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "${BACKEND_IP:-}" ] || BACKEND_IP="127.0.0.1"
 echo "Backend IP : $BACKEND_IP  (ws://$BACKEND_IP:$BACKEND_PORT/ ...)"
 
+# --- stop any stale instance on the app ports (avoids port conflicts and node_modules
+#     file locks from orphaned processes, which otherwise break `npm install`) ---
+stop_port() {
+  local port="$1" pids
+  pids="$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+  [ -n "$pids" ] && kill $pids 2>/dev/null || true
+  sleep 0.3
+}
+stop_port "$BACKEND_PORT"
+stop_port "$FRONTEND_PORT"
+
 # --- backend ---
 VENV_DIR="$BACKEND_DIR/venv"
 VENV_PY="$VENV_DIR/bin/python"
