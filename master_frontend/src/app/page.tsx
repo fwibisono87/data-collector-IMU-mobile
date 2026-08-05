@@ -17,7 +17,7 @@ import MultiCameraRecorder, {
   type CameraStatus,
 } from "@/components/MultiCameraRecorder";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
-import RecoveryPanel from "@/components/RecoveryPanel";
+import RecoveryModal from "@/components/RecoveryModal";
 
 // ECharts uses browser APIs — dynamic import keeps SSR safe.
 const RealtimeChart = dynamic(() => import("@/components/RealtimeChart"), { ssr: false });
@@ -65,6 +65,7 @@ export default function Home() {
   const [isResetting, setIsResetting] = useState(false);
   const [alertResetKey, setAlertResetKey] = useState(0);
   const [resetError, setResetError] = useState("");
+  const [showRecovery, setShowRecovery] = useState(false);
 
   const isRecording = sessionState === "RECORDING";
   // Derive online count directly from devices — single source of truth.
@@ -332,7 +333,6 @@ export default function Home() {
             <div className="glass-panel p-3">
               <AlertCenter key={alertResetKey} devices={devices} state={sessionState} isWsConnected={isWsConnected} />
             </div>
-            <RecoveryPanel backendIp={backendIp} />
             <PreflightPanel
               isWsConnected={isWsConnected}
               devices={devices}
@@ -341,6 +341,14 @@ export default function Home() {
               operator={operator}
               camStatus={camStatus}
             />
+
+            {/* Open the recover-from-devices modal */}
+            <button
+              onClick={() => setShowRecovery(true)}
+              className="btn-glass w-full py-2 text-xs text-gray-300"
+            >
+              Download / merge phone rescue files
+            </button>
 
             {/* Start / Stop button */}
             {!isRecording ? (
@@ -480,6 +488,12 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <RecoveryModal
+        backendIp={backendIp}
+        open={showRecovery}
+        onClose={() => setShowRecovery(false)}
+      />
     </>
   );
 }
