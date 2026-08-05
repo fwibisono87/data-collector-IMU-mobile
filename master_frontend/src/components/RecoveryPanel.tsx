@@ -31,6 +31,7 @@ export default function RecoveryPanel({ backendIp }: Props) {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [merging, setMerging] = useState<string>("");
   const [showDone, setShowDone] = useState(false);
+  const [busyAll, setBusyAll] = useState(false);
 
   const base = `http://${backendIp}:8000`;
 
@@ -48,21 +49,6 @@ export default function RecoveryPanel({ backendIp }: Props) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const dismiss = async (sid: string) => {
-    setBusy(b => ({ ...b, [sid]: true }));
-    setError("");
-    try {
-      const res = await fetch(`${base}/recovery/${encodeURIComponent(sid)}/dismiss`, { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setError("");
-      await refresh();
-    } catch (e) {
-      setError(`Dismiss failed: ${e}`);
-    } finally {
-      setBusy(b => ({ ...b, [sid]: false }));
-    }
-  };
-
   const restore = async (sid: string) => {
     setBusy(b => ({ ...b, [sid]: true }));
     setError("");
@@ -74,6 +60,24 @@ export default function RecoveryPanel({ backendIp }: Props) {
       setError(`Restore failed: ${e}`);
     } finally {
       setBusy(b => ({ ...b, [sid]: false }));
+    }
+  };
+
+  // Hide every currently-listed session in one click (non-destructive; the Finished
+  // toggle restores them). Only shows when there's something to clear.
+  const dismissAll = async () => {
+    setBusyAll(true);
+    setError("");
+    try {
+      for (const s of sessions) {
+        const res = await fetch(`${base}/recovery/${encodeURIComponent(s.session_id)}/dismiss`, { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      }
+      await refresh();
+    } catch (e) {
+      setError(`Clear all failed: ${e}`);
+    } finally {
+      setBusyAll(false);
     }
   };
 
@@ -104,7 +108,17 @@ export default function RecoveryPanel({ backendIp }: Props) {
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Recovery from phones</h3>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none">
+          {sessions.length > 0 && !showDone && (
+            <button
+              onClick={dismissAll}
+              disabled={busyAll}
+              className="btn-glass text-[11px] px-2 py-0.5 text-red-300 disabled:opacity-40"
+              title="Hide all rescue files from this list (restorable via Finished)"
+            >
+              {busyAll ? "Clearing…" : "Clear"}
+            </button>
+          )}
+          <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none" title="Show hidden/finished sessions">
             <input
               type="checkbox"
               checked={showDone}
@@ -118,6 +132,13 @@ export default function RecoveryPanel({ backendIp }: Props) {
           </button>
         </div>
       </div>
+
+      {sessions.length > 0 && !showDone && (
+        <p className="text-[10px] text-gray-600">
+          <span className="text-red-300">Clear</span> hides these rescue files; tick
+          “Finished” to see or restore them.
+        </p>
+      )}
 
       {error && <p className="text-xs text-red-400">{error}</p>}
       {sessions.length === 0 && !error && (
@@ -136,17 +157,20 @@ export default function RecoveryPanel({ backendIp }: Props) {
                   onClick={() => merge(s.session_id)}
                   disabled={merging === s.session_id || s.done || s.files.some(f => !f.complete)}
                   className="btn-glass text-[11px] px-2 py-0.5 disabled:opacity-30"
-                  title={s.done ? "Not available for finished sessions" : (s.files.some(f => !f.complete) ? "Wait for all phones to finish uploading" : "")}
+                  title={s.done ? "Not available for hidden sessions" : (s.files.some(f => !f.complete) ? "Wait for all phones to finish uploading" : "")}
                 >
                   {merging === s.session_id ? "Merging…" : "Merge"}
                 </button>
-                <button
-                  onClick={() => (s.done ? restore(s.session_id) : dismiss(s.session_id))}
-                  disabled={busy[s.session_id]}
-                  className="btn-glass text-[11px] px-2 py-0.5 disabled:opacity-30"
-                >
-                  {busy[s.session_id] ? "…" : (s.done ? "Restore" : "Done")}
-                </button>
+                {showDone && (
+                  <button
+                    onClick={() => restore(s.session_id)}
+                    disabled={busy[s.session_id]}
+                    className="btn-glass text-[11px] px-2 py-0.5 disabled:opacity-30"
+                    title="Put this session back in the main list"
+                  >
+                    {busy[s.session_id] ? "…" : "Restore"}
+                  </button>
+                )}
               </div>
             </div>
             {s.files.map(f => (

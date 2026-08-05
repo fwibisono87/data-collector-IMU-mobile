@@ -377,10 +377,10 @@ export default function Home() {
             <button
               onClick={() => { setResetError(""); setShowReset(true); }}
               disabled={isRecording || isResetting}
-              title={isRecording ? "Stop the session first" : "Close all device connections and clear connectivity warnings"}
+              title={isRecording ? "Stop the session first" : "Close all device connections and clear connectivity warnings (does NOT touch recovery files)"}
               className="text-xs text-red-500/70 hover:text-red-400 underline text-center disabled:opacity-30 disabled:cursor-not-allowed disabled:no-underline"
             >
-              {isResetting ? "Resetting…" : "Reset connections"}
+              {isResetting ? "Resetting…" : "Reset device connections"}
             </button>
           </aside>
 
@@ -452,6 +452,9 @@ export default function Home() {
             <p className="text-xs text-gray-300 leading-relaxed">
               This will forcibly close every connected device and clear all previous
               connectivity warnings (offline gaps and “no data” flags, plus the event log).
+            </p>
+            <p className="text-xs text-gray-500">
+              Only affects live device connections — recovery/rescue files are not touched.
             </p>
             <p className="text-xs text-gray-500">
               Not available while a session is recording. Devices will need to reconnect
