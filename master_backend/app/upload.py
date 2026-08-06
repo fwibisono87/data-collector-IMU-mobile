@@ -30,6 +30,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 from .audit_logger import audit
+from .csv_schema import (
+    COL_DEVICE_ID,
+    COL_SEQUENCE,
+    CSV_HEADER as _CSV_HEADER,
+    is_header_line,
+    parse_row,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +176,6 @@ def _int_header(request: Request, name: str, default: int) -> int:
         return default
 
 
-_CSV_HEADER = (
-    "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,"
-    "gyro_x_degs,gyro_y_degs,gyro_z_degs,"
-    "label_id,label_name,sequence_number,device_id\n"
-)
-
-
 def merge_csv_sources(
     sources: list[tuple[str, Path]],
     output: Path,
@@ -195,29 +195,26 @@ def merge_csv_sources(
     seen: set[str] = set()
     rows: list[list[str]] = []
     src_rows: dict[str, int] = {}
+    source_files: list[dict] = []
     read_total = 0
-    header_no_nl = _CSV_HEADER.rstrip("\n")
 
     for label, path in sources:
         if path is None or not path.exists():
             continue
         count = 0
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("#") or line == "":
-                continue
-            if line.rstrip("\n") == header_no_nl:
-                continue
-            parts = line.split(",")
-            if len(parts) < 11:
+            fields = parse_row(line)
+            if fields is None:
                 continue
             read_total += 1
-            key = f"{parts[10]}\t{parts[9]}"
+            key = f"{fields[COL_DEVICE_ID]}\t{fields[COL_SEQUENCE]}"
             if key in seen:
                 continue
             seen.add(key)
-            rows.append(parts)
+            rows.append(fields)
             count += 1
-        src_rows[label] = count
+        src_rows[label] = src_rows.get(label, 0) + count
+        source_files.append({"path": str(path), "label": label, "rows": count})
 
     output.parent.mkdir(parents=True, exist_ok=True)
     rows.sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
@@ -232,6 +229,7 @@ def merge_csv_sources(
         "path": str(output),
         "rows": len(rows),
         "sources": src_rows,
+        "source_files": source_files,
         "duplicates_dropped": read_total - len(rows),
     }
 
@@ -253,7 +251,6 @@ def merge_csv_sources_per_role(
     """
     buckets: dict[str, dict] = {}
     read_total = 0
-    header_no_nl = _CSV_HEADER.rstrip("\n")
     for role_key, label, path in sources:
         if path is None or not path.exists():
             continue
@@ -261,26 +258,24 @@ def merge_csv_sources_per_role(
             "seen": set(),
             "rows": [],
             "src_rows": {},
+            "source_files": [],
             "read_total": 0,
         })
         count = 0
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if line.startswith("#") or line == "":
-                continue
-            if line.rstrip("\n") == header_no_nl:
-                continue
-            parts = line.split(",")
-            if len(parts) < 11:
+            fields = parse_row(line)
+            if fields is None:
                 continue
             b["read_total"] += 1
             read_total += 1
-            key = f"{parts[10]}\t{parts[9]}"
+            key = f"{fields[COL_DEVICE_ID]}\t{fields[COL_SEQUENCE]}"
             if key in b["seen"]:
                 continue
             b["seen"].add(key)
-            b["rows"].append(parts)
+            b["rows"].append(fields)
             count += 1
-        b["src_rows"][label] = count
+        b["src_rows"][label] = b["src_rows"].get(label, 0) + count
+        b["source_files"].append({"path": str(path), "label": label, "rows": count})
 
     output_dir.mkdir(parents=True, exist_ok=True)
     per_role: dict[str, dict] = {}
@@ -298,6 +293,7 @@ def merge_csv_sources_per_role(
             "path": str(out_path),
             "rows": len(b["rows"]),
             "sources": b["src_rows"],
+            "source_files": b["source_files"],
             "duplicates_dropped": b["read_total"] - len(b["rows"]),
         }
         written.append(str(out_path))

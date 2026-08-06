@@ -413,7 +413,7 @@ async def export_consolidate(session_id: str):
     summary_path = primary_folder / f"{session_id}_consolidation.json"
     summary = {
         "session_id": session_id,
-        "consolidated_at_ms": __import__("time").time() * 1000,
+        "consolidated_at_ms": int(__import__("time").time() * 1000),
         "per_role": per_role["per_role"],
         "per_role_files": per_role["files"],
         **result,
