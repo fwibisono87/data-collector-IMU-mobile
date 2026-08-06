@@ -308,3 +308,34 @@ def test_merge_dedup_still_works(tmp_path: Path):
     assert result["rows"] == 4
     assert result["duplicates_dropped"] == 2
     assert result["sources"]["main"] == 4
+
+
+def test_scan_rows_ignores_v1_header(tmp_path: Path):
+    """A v1 header must not be counted as a data row once CSV_HEADER is v2.
+
+    _scan_rows feeds the export manifest's row_count — the number the operator reads to
+    decide whether a session is whole. An exact-match header test against the (now v2)
+    constant let every v1 file's header through as a data row, inflating that count.
+    """
+    from master_backend.app.export import _scan_rows
+
+    v1 = tmp_path / "v1.csv"
+    v1.write_text(
+        "# session_id=abc,schema_version=1\n"
+        + CSV_HEADER_V1
+        + "\n".join(_row(1000 + i, i, "DEV") for i in range(3))
+        + "\n",
+        encoding="utf-8",
+    )
+    v2 = tmp_path / "v2.csv"
+    v2.write_text(
+        "# session_id=abc,schema_version=2\n"
+        + CSV_HEADER_V2
+        + "\n".join(_row2(2000 + i, i, "DEV2") for i in range(4))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    row_count, _labels = _scan_rows([v1, v2])
+
+    assert row_count == 7, "header lines of either schema version must not be counted"

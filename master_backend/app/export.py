@@ -27,8 +27,8 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .audit_logger import audit
+from .csv_schema import parse_row
 from .upload import (
-    _CSV_HEADER,
     _session_dir as _recovery_dir,
     _slug,
     merge_csv_sources,
@@ -188,19 +188,17 @@ def _scan_rows(csv_paths: list[Path]) -> tuple[int, list[dict]]:
     seen: set[str] = set()
     counts: dict[tuple[int, str], int] = {}
     row_count = 0
-    header_no_nl = _CSV_HEADER.rstrip("\n")
     for p in csv_paths:
         if not p.exists():
             continue
         try:
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
-                    if line.startswith("#") or line == "":
-                        continue
-                    if line.rstrip("\n") == header_no_nl:
-                        continue
-                    parts = line.split(",")
-                    if len(parts) <= _DEV_COL:
+                    # Version-agnostic: an exact-match test against one header constant
+                    # let an older file's header through as a data row once the schema
+                    # gained columns, inflating row_count by one per v1 file.
+                    parts = parse_row(line)
+                    if parts is None:
                         continue
                     key = f"{parts[_DEV_COL]}\t{parts[_SEQ_COL]}"
                     if key in seen:
