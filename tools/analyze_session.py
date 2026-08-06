@@ -248,9 +248,22 @@ def _print_footer(result: dict) -> None:
     if not affected:
         return
     affected.sort(key=lambda d: d["held_row_pct"], reverse=True)
+    # One line per PHYSICAL device, not per entry. A device appears once per file it
+    # occurs in (its per-role CSV, its per-role consolidated, and the session-wide
+    # consolidated), which would otherwise name the same handset three times — and under
+    # two different labels, since only the per-role files carry a role in their metadata.
     parts = []
+    seen: set = set()
     for d in affected:
-        label = d.get("role") or d["device_id"] or d["file"]
+        key = d["device_id"] or d["file"]
+        if key in seen:
+            continue
+        seen.add(key)
+        # Prefer a human role label from any entry for this same device.
+        label = d.get("role") or next(
+            (o["role"] for o in affected if o["device_id"] == d["device_id"] and o.get("role")),
+            d["device_id"] or d["file"],
+        )
         parts.append(f"{label} {d['true_sensor_hz']:.1f} Hz of {d['nominal_hz']:.2f} "
                      f"nominal ({d['held_row_pct']:.1f}% held)")
     print()
