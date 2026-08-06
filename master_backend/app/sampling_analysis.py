@@ -65,15 +65,17 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
 
     timestamps = []
     seqs = []
+    # Parsed independently: a row with a readable timestamp but an unreadable sequence
+    # (or vice versa) must not silently drop the other value, which `continue` did.
     for row in rows:
         try:
             timestamps.append(int(row[0]))
         except (ValueError, IndexError):
-            continue
+            pass
         try:
             seqs.append(int(row[COL_SEQUENCE]))
         except (ValueError, IndexError):
-            continue
+            pass
 
     usable = len(timestamps)
     if usable < 2:
@@ -127,7 +129,9 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
         if six == prev_six:
             held_count += 1
         prev_six = six
-    stats["held_row_pct"] = 100.0 * held_count / usable if usable else 0.0
+    # Denominator is len(rows), matching the loop above — `usable` counts only rows with a
+    # parseable timestamp, so using it here would mix two different row populations.
+    stats["held_row_pct"] = 100.0 * held_count / len(rows) if rows else 0.0
 
     present = len(set(seqs))
     if seqs:
