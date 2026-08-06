@@ -17,6 +17,9 @@ class SensorPacketProto {
   String deviceId;
   int schemaVersion;
   int rawTimestampMs;
+  int accTsMs;
+  int gyroTsMs;
+  int sampleKind;
 
   SensorPacketProto({
     this.accX = 0.0,
@@ -28,8 +31,11 @@ class SensorPacketProto {
     this.timestampMs = 0,
     this.sequenceNumber = 0,
     this.deviceId = '',
-    this.schemaVersion = 1,
+    this.schemaVersion = 2,
     this.rawTimestampMs = 0,
+    this.accTsMs = 0,
+    this.gyroTsMs = 0,
+    this.sampleKind = 0,
   });
 
   Uint8List toBytes() {
@@ -45,6 +51,9 @@ class SensorPacketProto {
     w.writeString(9, deviceId);
     w.writeVarint(10, schemaVersion);
     w.writeInt64(11, rawTimestampMs);
+    w.writeInt64(12, accTsMs);
+    w.writeInt64(13, gyroTsMs);
+    w.writeVarint(14, sampleKind);
     return w.build();
   }
 }

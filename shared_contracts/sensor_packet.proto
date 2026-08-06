@@ -11,8 +11,11 @@ message SensorPacket {
   int64  timestamp_ms     = 7;   // Unix epoch ms, clock-offset corrected
   uint64 sequence_number  = 8;   // Monotonic per (device_id, session_id)
   string device_id        = 9;   // Stable UUID, stored in SharedPreferences
-  uint32 schema_version   = 10;  // Current = 1
+  uint32 schema_version   = 10;  // Current = 2
   int64  raw_timestamp_ms = 11;  // HP clock before offset correction (audit)
+  int64  acc_ts_ms        = 12;  // hardware accel event time, epoch ms (0 = unknown)
+  int64  gyro_ts_ms       = 13;  // hardware gyro event time, epoch ms (0 = unknown)
+  uint32 sample_kind      = 14;  // 0 = fresh reading, 1 = held (zero-order hold repeat)
 }
 
 message DeviceRegister {
