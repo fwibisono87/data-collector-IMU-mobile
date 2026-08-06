@@ -55,9 +55,16 @@ class InternalSensorManager {
   Timer? _ticker;
   bool isRunning = false;
   int _currentFrequency = 100;
+  DateTime? _prevEmittedAccTs;
+  DateTime? _prevEmittedGyroTs;
 
   static const double _gravity = 9.80665;
   static const double _radToDeg = 180.0 / pi;
+
+  /// Sampling period requested from the platform sensor, in ms. The OS treats this as a HINT:
+  /// some handsets clamp to a slower supported rate, which is what produces held samples.
+  /// Lower this (e.g. 5) to probe a device's true maximum rate.
+  static const int kSensorSamplingPeriodMs = 10;
 
   void start({int frequency = 100}) {
     if (isRunning && _currentFrequency == frequency) return;
@@ -65,9 +72,7 @@ class InternalSensorManager {
 
     _currentFrequency = frequency;
     final intervalMs = (1000 / frequency).round();
-    // Register at exactly the output rate (e.g. 100 Hz ≤ 200 Hz), which stays
-    // below the Android 12+ high-rate gate.
-    final samplingPeriod = Duration(milliseconds: intervalMs);
+    final samplingPeriod = Duration(milliseconds: kSensorSamplingPeriodMs);
 
     _accSub = _source.accelerometer(samplingPeriod: samplingPeriod).listen(
       (e) {
@@ -123,6 +128,8 @@ class InternalSensorManager {
     _gyroWindowCount = 0;
     _accObservedHz = 0;
     _gyroObservedHz = 0;
+    _prevEmittedAccTs = null;
+    _prevEmittedGyroTs = null;
   }
 
   // Computes observed Hz from the accumulated sensor-event deltas, so the
@@ -173,6 +180,9 @@ class InternalSensorManager {
   double get currentFrequency => _currentFrequency.toDouble();
 
   void _emitPacket() {
+    final held = _lastAccTs == _prevEmittedAccTs && _lastGyroTs == _prevEmittedGyroTs;
+    _prevEmittedAccTs = _lastAccTs;
+    _prevEmittedGyroTs = _lastGyroTs;
     _streamController.add(SensorPacket(
       accX: _lastAx / _gravity,
       accY: _lastAy / _gravity,
@@ -181,6 +191,9 @@ class InternalSensorManager {
       gyroY: _lastGy * _radToDeg,
       gyroZ: _lastGz * _radToDeg,
       timestamp: DateTime.now(),
+      accTs: _lastAccTs,
+      gyroTs: _lastGyroTs,
+      isHeld: held,
     ));
   }
 }

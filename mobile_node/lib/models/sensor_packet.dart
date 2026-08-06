@@ -6,6 +6,9 @@ class SensorPacket {
   final double gyroY;
   final double gyroZ;
   final DateTime timestamp;
+  final DateTime? accTs;
+  final DateTime? gyroTs;
+  final bool isHeld;
 
   SensorPacket({
     required this.accX,
@@ -15,6 +18,9 @@ class SensorPacket {
     required this.gyroY,
     required this.gyroZ,
     required this.timestamp,
+    this.accTs,
+    this.gyroTs,
+    this.isHeld = false,
   });
 
   @override

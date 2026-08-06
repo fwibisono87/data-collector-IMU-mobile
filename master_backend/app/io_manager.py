@@ -14,6 +14,7 @@ from pathlib import Path
 import aiofiles
 
 from .audit_logger import audit
+from .csv_schema import CSV_HEADER as _CSV_HEADER, metadata_line
 from master_backend.proto.sensor_packet import SensorPacket
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,6 @@ logger = logging.getLogger(__name__)
 _FSYNC_INTERVAL = int(os.getenv("FSYNC_INTERVAL_SEC", "5"))
 _LATE_ACCEPT_SEC = int(os.getenv("LATE_ACCEPT_SEC", "600"))
 _SORT_ON_CLOSE = os.getenv("SORT_CSV_ON_CLOSE", "true").lower() == "true"
-_CSV_HEADER = (
-    "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,"
-    "gyro_x_degs,gyro_y_degs,gyro_z_degs,"
-    "label_id,label_name,sequence_number,device_id\n"
-)
 _DEFAULT_LABEL_ID = 0
 _DEFAULT_LABEL_NAME = "0"
 
@@ -86,12 +82,20 @@ class DeviceWriter:
 
 
 def _format_row(pkt: SensorPacket, label_id: int, label_name: str) -> str:
+    acc_ts = pkt.acc_ts_ms if pkt.acc_ts_ms else ""
+    gyro_ts = pkt.gyro_ts_ms if pkt.gyro_ts_ms else ""
+    # A pre-v2 phone sends no sample_kind, and the parser defaults it to 0 — which would
+    # assert "this IS a fresh hardware reading" about a packet whose provenance we do not
+    # know. Write empty instead: unknown, not fresh. This matters during a staged rollout,
+    # when some phones in a session are still on v1.
+    sample_kind = pkt.sample_kind if pkt.schema_version >= 2 else ""
     return (
         f"{pkt.timestamp_ms},"
         f"{pkt.acc_x:.6f},{pkt.acc_y:.6f},{pkt.acc_z:.6f},"
         f"{pkt.gyro_x:.6f},{pkt.gyro_y:.6f},{pkt.gyro_z:.6f},"
         f"{label_id},{label_name},"
-        f"{pkt.sequence_number},{pkt.device_id}\n"
+        f"{pkt.sequence_number},{pkt.device_id},"
+        f"{acc_ts},{gyro_ts},{sample_kind}\n"
     )
 
 
@@ -242,9 +246,8 @@ class IoManager:
         self._session_id = session_id
         folder_name = f"{subject_name}_{session_tag}".replace(" ", "_")
         self._base = self._ssd_path / "Data_Riset_IMU" / folder_name
-        self._metadata_line = (
-            f"# session_id={session_id},subject={subject_name},"
-            f"operator={operator},schema_version=1"
+        self._metadata_line = metadata_line(
+            session_id=session_id, subject=subject_name, operator=operator
         )
         self._session_open = True
         self._dropped_no_writer.clear()

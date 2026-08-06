@@ -32,6 +32,9 @@ class SensorPacket:
     device_id: str = ""
     schema_version: int = 1
     raw_timestamp_ms: int = 0
+    acc_ts_ms: int = 0
+    gyro_ts_ms: int = 0
+    sample_kind: int = 0
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "SensorPacket":
@@ -60,6 +63,9 @@ class SensorPacket:
                     case 8: pkt.sequence_number = val
                     case 10: pkt.schema_version = val
                     case 11: pkt.raw_timestamp_ms = val
+                    case 12: pkt.acc_ts_ms = val
+                    case 13: pkt.gyro_ts_ms = val
+                    case 14: pkt.sample_kind = val
 
             elif wire_type == 2:  # length-delimited
                 length, pos = _read_varint(data, pos)

@@ -226,7 +226,10 @@ class WebSocketClient {
       rawTimestampMs: rawNow,
       sequenceNumber: seq,
       deviceId: _deviceId,
-      schemaVersion: 1,
+      schemaVersion: 2,
+      accTsMs: _hwTsToCorrectedMs(raw.accTs, correctedNow),
+      gyroTsMs: _hwTsToCorrectedMs(raw.gyroTs, correctedNow),
+      sampleKind: raw.isHeld ? 1 : 0,
     );
 
     final bytes = proto.toBytes();
@@ -234,7 +237,10 @@ class WebSocketClient {
     // Local guarantee: this write happens whether or not the network exists (plan T12).
     LocalSessionRecorder().write(raw,
         timestampMs: correctedNow, sequence: seq, deviceId: _deviceId,
-        labelId: _activeLabelId, labelName: _activeLabelName);
+        labelId: _activeLabelId, labelName: _activeLabelName,
+        accTsMs: _hwTsToCorrectedMs(raw.accTs, correctedNow),
+        gyroTsMs: _hwTsToCorrectedMs(raw.gyroTs, correctedNow),
+        sampleKind: raw.isHeld ? 1 : 0);
 
     // Persist the sequence counter on BOTH the online and offline paths — persisting only
     // while connected meant a process kill during an offline stretch restored a sequence
@@ -261,6 +267,17 @@ class WebSocketClient {
       _packetsBuffered = buf.bufferedCount;
       ForegroundServiceHandler().updateNotification(_packetsSent, _packetsBuffered);
     }
+  }
+
+  /// Convert a hardware sensor event time into the same corrected-epoch domain as
+  /// timestampMs. Returns 0 when the value is missing or clearly not epoch-based
+  /// (some platforms report uptime), so downstream consumers can treat it as unknown
+  /// rather than trusting a wrong number.
+  int _hwTsToCorrectedMs(DateTime? ts, int correctedNow) {
+    if (ts == null) return 0;
+    final candidate = ts.millisecondsSinceEpoch + ClockSyncService().clockOffsetMs;
+    if ((candidate - correctedNow).abs() > 3600000) return 0;   // > 1h off => not epoch-based
+    return candidate;
   }
 
   // ── Control channel ──────────────────────────────────────────────────────

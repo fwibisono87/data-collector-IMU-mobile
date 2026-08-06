@@ -26,7 +26,8 @@ class LocalSessionRecorder {
   static const _header =
       'timestamp_ms,acc_x_g,acc_y_g,acc_z_g,'
       'gyro_x_degs,gyro_y_degs,gyro_z_degs,'
-      'label_id,label_name,sequence_number,device_id\n';
+      'label_id,label_name,sequence_number,device_id,'
+      'acc_ts_ms,gyro_ts_ms,sample_kind\n';
   static const int _maxSessionsKept = 20;
 
   IOSink? _sink;
@@ -78,7 +79,7 @@ class LocalSessionRecorder {
       if (!exists) {
         _sink!.write('# session_id=$sessionId,role=$role,device_id=$deviceId,'
                      'subject=$subject,session_tag=$sessionTag,operator=$operator,'
-                     'start_epoch_ms=$stamp,source=local_node,schema_version=1\n');
+                     'start_epoch_ms=$stamp,source=local_node,schema_version=2\n');
         _sink!.write(_header);
       }
       // Sidecar for integrity markers / sampling stats (JSONL).
@@ -125,13 +126,19 @@ class LocalSessionRecorder {
     required String deviceId,
     required int labelId,
     required String labelName,
+    required int accTsMs,
+    required int gyroTsMs,
+    required int sampleKind,
   }) {
     final s = _sink;
     if (s == null) return;
+    final accTs = accTsMs == 0 ? '' : '$accTsMs';
+    final gyroTs = gyroTsMs == 0 ? '' : '$gyroTsMs';
     s.write('$timestampMs,'
         '${p.accX.toStringAsFixed(6)},${p.accY.toStringAsFixed(6)},${p.accZ.toStringAsFixed(6)},'
         '${p.gyroX.toStringAsFixed(6)},${p.gyroY.toStringAsFixed(6)},${p.gyroZ.toStringAsFixed(6)},'
-        '$labelId,$labelName,$sequence,$deviceId\n');
+        '$labelId,$labelName,$sequence,$deviceId,'
+        '$accTs,$gyroTs,$sampleKind\n');
     _rows++;
   }
 
