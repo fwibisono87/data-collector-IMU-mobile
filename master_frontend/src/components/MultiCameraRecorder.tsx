@@ -4,7 +4,10 @@ import { saveChunk, loadChunks, clearAllChunks } from "@/lib/video_backup";
 import { finalizeWebm } from "@/lib/webm_seekable";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
-export interface CameraResult { camId: string; deviceId: string; label: string; blob: Blob; mime: string; }
+export interface CameraResult {
+  camId: string; deviceId: string; label: string; blob: Blob; mime: string;
+  startedAtMs: number; flashAtMs: number; stoppedAtMs: number;
+}
 export interface CameraStatus { ready: number; total: number; ok: boolean; }
 export interface StopOutcome { results: CameraResult[]; missed: string[]; }
 export interface MultiCameraRecorderHandle {
@@ -53,6 +56,8 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
   const sessionRef = useRef<string>("");
   const chunkIndexRef = useRef(0);
   const pendingSavesRef = useRef<Promise<void>[]>([]); // in-flight chunk writes to await on stop
+  const startedAtRef = useRef(0);
+  const flashAtRef = useRef(0);
   const liveRef = useRef(false); // true while this slot has a working stream (gates re-acquire)
   const [isRecording, setIsRecording] = useState(false);
   const [flash, setFlash] = useState(false);
@@ -139,7 +144,9 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
       }
     };
     recorder.start(TIMESLICE_MS);
+    startedAtRef.current = Date.now();
     setIsRecording(true);
+    flashAtRef.current = Date.now();
     setFlash(true);                          // operator-facing sync cue (parity with old)
     setTimeout(() => setFlash(false), 100);
   };
@@ -147,6 +154,7 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     const recorder = mediaRef.current;
     if (!recorder || recorder.state === "inactive") return null;
     await new Promise<void>(resolve => { recorder.onstop = () => resolve(); recorder.stop(); });
+    const stoppedAtMs = Date.now();
     setIsRecording(false);
     // stop() fires a final dataavailable before onstop; wait for every chunk write to commit
     // so the reassembled blob includes the tail (fixes the dropped last second).
@@ -164,7 +172,8 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
       : new Blob(chunks, { type: chunks[0].type || "video/webm" });
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted
     // download. They are GC'd at the start of the NEXT session (see startRecording). [Finding A]
-    return { camId, deviceId, label, blob, mime: blob.type };
+    return { camId, deviceId, label, blob, mime: blob.type,
+             startedAtMs: startedAtRef.current, flashAtMs: flashAtRef.current, stoppedAtMs };
   };
   const startRef = useRef(startFn); startRef.current = startFn;
   const stopRef = useRef(stopFn); stopRef.current = stopFn;

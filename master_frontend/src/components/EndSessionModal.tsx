@@ -25,6 +25,9 @@ export interface EndSessionVideoResult {
   label: string;
   blob: Blob;
   mime: string;
+  startedAtMs: number;
+  flashAtMs: number;
+  stoppedAtMs: number;
 }
 
 interface Props {
@@ -220,6 +223,9 @@ export default function EndSessionModal({
         browser_label: r.label,
         mime: r.mime,
         file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+        started_at_ms: r.startedAtMs,
+        flash_at_ms: r.flashAtMs,
+        stopped_at_ms: r.stoppedAtMs,
       }));
       zip.file("cameras.json", JSON.stringify({ session_id: sid, cameras }, null, 2));
       if (missed.length > 0) zip.file("missed_cameras.txt", missed.join("\n") + "\n");
