@@ -22,7 +22,13 @@ from master_backend.app.export import (  # noqa: E402
     export_manifest,
 )
 from master_backend.app.upload import (  # noqa: E402
+    merge_csv_sources,
     merge_csv_sources_per_role,
+)
+from master_backend.app.csv_schema import (  # noqa: E402
+    CSV_HEADER_V1,
+    CSV_HEADER_V2,
+    V2_WIDTH,
 )
 
 SESSION_ID = "1753000000000"
@@ -228,3 +234,108 @@ def test_manifest_prefers_per_role_pending(store: dict):
     assert m["late_pending"] is True
     assert m["recovery_pending"] is False
     assert m["whole"] is False
+
+
+# ── Version-tolerant merge ────────────────────────────────────────────────────
+
+
+def _row2(ts: int, seq: int, dev: str) -> str:
+    return f"{ts},0.0,0.0,0.0,0.0,0.0,0.0,0,0,{seq},{dev},100,200,stream"
+
+
+def test_merge_v1_header_not_injected_as_data_row(tmp_path: Path):
+    v1_file = tmp_path / "v1.csv"
+    v1_file.write_text(
+        "# session_id=abc\n"
+        + CSV_HEADER_V1
+        + "\n".join(_row(1000, i, "DEV") for i in range(3))
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out.csv"
+    result = merge_csv_sources([("main", v1_file)], out)
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    data_rows = [l for l in lines if l and not l.startswith("#") and not l.startswith("timestamp_ms")]
+    assert all(r.split(",")[0].isdigit() for r in data_rows)
+    assert len(data_rows) == 3
+    assert result["rows"] == 3
+    assert result["duplicates_dropped"] == 0
+    assert result["sources"] == {"main": 3}
+
+
+def test_merge_mixed_version_produces_14_fields(tmp_path: Path):
+    v1_file = tmp_path / "v1.csv"
+    v1_file.write_text(CSV_HEADER_V1 + _row(1, 1, "D1") + "\n", encoding="utf-8")
+    v2_file = tmp_path / "v2.csv"
+    v2_file.write_text(CSV_HEADER_V2 + _row2(2, 2, "D2") + "\n", encoding="utf-8")
+    out = tmp_path / "out.csv"
+
+    result = merge_csv_sources([("main", v1_file), ("main", v2_file)], out)
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    data_rows = [l for l in lines if l and not l.startswith("#") and not l.startswith("timestamp_ms")]
+    assert result["rows"] == 2
+    assert all(len(r.split(",")) == V2_WIDTH for r in data_rows)
+    v1_row = [r for r in data_rows if r.split(",")[10] == "D1"][0]
+    assert v1_row.split(",")[11:] == ["", "", ""]
+    v2_row = [r for r in data_rows if r.split(",")[10] == "D2"][0]
+    assert v2_row.split(",")[11:] == ["100", "200", "stream"]
+
+
+def test_merge_provenance_accumulates_shared_label(tmp_path: Path):
+    out = tmp_path / "out.csv"
+    f1 = tmp_path / "a.csv"; f1.write_text(CSV_HEADER_V2 + "\n".join(_row2(1, i, "D") for i in (1, 2, 3)) + "\n", encoding="utf-8")
+    f2 = tmp_path / "b.csv"; f2.write_text(CSV_HEADER_V2 + "\n".join(_row2(2, i, "D") for i in (4, 5, 6, 7, 8)) + "\n", encoding="utf-8")
+    f3 = tmp_path / "c.csv"; f3.write_text(CSV_HEADER_V2 + "\n".join(_row2(3, i, "D") for i in (9, 10, 11, 12, 13, 14, 15)) + "\n", encoding="utf-8")
+
+    result = merge_csv_sources([("main", f1), ("main", f2), ("main", f3)], out)
+
+    assert result["sources"]["main"] == 15
+    assert len(result["source_files"]) == 3
+    assert sorted(sf["rows"] for sf in result["source_files"]) == [3, 5, 7]
+    assert all(sf["label"] == "main" for sf in result["source_files"])
+    assert result["rows"] == 15
+
+
+def test_merge_dedup_still_works(tmp_path: Path):
+    out = tmp_path / "out.csv"
+    f1 = tmp_path / "a.csv"; f1.write_text(CSV_HEADER_V2 + "\n".join(_row2(1, i, "D") for i in (1, 2, 3)) + "\n", encoding="utf-8")
+    f2 = tmp_path / "b.csv"; f2.write_text(CSV_HEADER_V2 + "\n".join(_row2(2, i, "D") for i in (2, 3, 4)) + "\n", encoding="utf-8")
+
+    result = merge_csv_sources([("main", f1), ("main", f2)], out)
+
+    assert result["rows"] == 4
+    assert result["duplicates_dropped"] == 2
+    assert result["sources"]["main"] == 4
+
+
+def test_scan_rows_ignores_v1_header(tmp_path: Path):
+    """A v1 header must not be counted as a data row once CSV_HEADER is v2.
+
+    _scan_rows feeds the export manifest's row_count — the number the operator reads to
+    decide whether a session is whole. An exact-match header test against the (now v2)
+    constant let every v1 file's header through as a data row, inflating that count.
+    """
+    from master_backend.app.export import _scan_rows
+
+    v1 = tmp_path / "v1.csv"
+    v1.write_text(
+        "# session_id=abc,schema_version=1\n"
+        + CSV_HEADER_V1
+        + "\n".join(_row(1000 + i, i, "DEV") for i in range(3))
+        + "\n",
+        encoding="utf-8",
+    )
+    v2 = tmp_path / "v2.csv"
+    v2.write_text(
+        "# session_id=abc,schema_version=2\n"
+        + CSV_HEADER_V2
+        + "\n".join(_row2(2000 + i, i, "DEV2") for i in range(4))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    row_count, _labels = _scan_rows([v1, v2])
+
+    assert row_count == 7, "header lines of either schema version must not be counted"
