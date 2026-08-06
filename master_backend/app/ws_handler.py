@@ -29,6 +29,12 @@ _frontend_connections: set[WebSocket] = set()
 # Latest sensor sample per device — pushed to /ws/live at 20 fps.
 _latest_samples: dict[str, dict] = {}
 
+# Packet schema versions this backend will ingest. v2 appends acc_ts_ms/gyro_ts_ms/
+# sample_kind; v1 phones omit them and parse to 0, so both are accepted. This gate
+# `continue`s on mismatch — i.e. silently DROPS the packet — so it must be widened
+# before, never after, phones start emitting a new version.
+_ACCEPTED_SCHEMA_VERSIONS = frozenset({1, 2})
+
 
 def _state_pong(command_id: str = "") -> bytes:
     """Authoritative session state, delivered on the PONG heartbeat (plan DD-1)."""
@@ -75,11 +81,12 @@ async def telemetry_ws(websocket: WebSocket) -> None:
 
             device_id = pkt.device_id
 
-            if pkt.schema_version != 1:
+            if pkt.schema_version not in _ACCEPTED_SCHEMA_VERSIONS:
                 await audit.log(
                     "WARN",
                     "schema_mismatch",
-                    {"expected": 1, "got": pkt.schema_version, "device_id": device_id},
+                    {"expected": sorted(_ACCEPTED_SCHEMA_VERSIONS),
+                     "got": pkt.schema_version, "device_id": device_id},
                 )
                 continue
 
