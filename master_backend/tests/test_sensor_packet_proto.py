@@ -139,6 +139,8 @@ def _v2_packet(**overrides):
         gyro_z=3.0,
         sequence_number=7,
         device_id="dev",
+        schema_version=2,   # the helper is named _v2_packet; say so, or _format_row
+                            # treats it as a v1 packet with unknown sample_kind
         acc_ts_ms=0,
         gyro_ts_ms=0,
         sample_kind=0,
@@ -196,3 +198,33 @@ def test_format_row_parses_via_csv_schema():
     assert fields[11] == "1700000000100"
     assert fields[12] == "1700000000200"
     assert fields[13] == "1"
+
+
+def test_format_row_omits_sample_kind_for_v1_packets():
+    """A v1 phone's packets must not claim sample_kind=0 ("fresh").
+
+    The proto parser defaults sample_kind to 0 for packets that never carried the field.
+    Emitting that as "0" would assert the reading was a fresh hardware sample when we
+    simply don't know — the same false-confidence this schema change exists to remove.
+    Relevant during a staged rollout with mixed phone versions in one session.
+    """
+    from master_backend.app.io_manager import _format_row
+    from master_backend.app.csv_schema import parse_row, COL_SAMPLE_KIND
+
+    v1 = SensorPacket(timestamp_ms=1000, sequence_number=5, device_id="DEV",
+                      schema_version=1)
+    fields = parse_row(_format_row(v1, 0, "0"))
+    assert fields is not None
+    assert fields[COL_SAMPLE_KIND] == "", "v1 packet must leave sample_kind unknown"
+
+    v2_held = SensorPacket(timestamp_ms=1000, sequence_number=5, device_id="DEV",
+                           schema_version=2, sample_kind=1,
+                           acc_ts_ms=999, gyro_ts_ms=998)
+    fields = parse_row(_format_row(v2_held, 0, "0"))
+    assert fields[COL_SAMPLE_KIND] == "1"
+    assert fields[11] == "999" and fields[12] == "998"
+
+    v2_fresh = SensorPacket(timestamp_ms=1000, sequence_number=6, device_id="DEV",
+                            schema_version=2, sample_kind=0)
+    fields = parse_row(_format_row(v2_fresh, 0, "0"))
+    assert fields[COL_SAMPLE_KIND] == "0", "v2 packet reports fresh explicitly"

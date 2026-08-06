@@ -84,13 +84,18 @@ class DeviceWriter:
 def _format_row(pkt: SensorPacket, label_id: int, label_name: str) -> str:
     acc_ts = pkt.acc_ts_ms if pkt.acc_ts_ms else ""
     gyro_ts = pkt.gyro_ts_ms if pkt.gyro_ts_ms else ""
+    # A pre-v2 phone sends no sample_kind, and the parser defaults it to 0 — which would
+    # assert "this IS a fresh hardware reading" about a packet whose provenance we do not
+    # know. Write empty instead: unknown, not fresh. This matters during a staged rollout,
+    # when some phones in a session are still on v1.
+    sample_kind = pkt.sample_kind if pkt.schema_version >= 2 else ""
     return (
         f"{pkt.timestamp_ms},"
         f"{pkt.acc_x:.6f},{pkt.acc_y:.6f},{pkt.acc_z:.6f},"
         f"{pkt.gyro_x:.6f},{pkt.gyro_y:.6f},{pkt.gyro_z:.6f},"
         f"{label_id},{label_name},"
         f"{pkt.sequence_number},{pkt.device_id},"
-        f"{acc_ts},{gyro_ts},{pkt.sample_kind}\n"
+        f"{acc_ts},{gyro_ts},{sample_kind}\n"
     )
 
 
