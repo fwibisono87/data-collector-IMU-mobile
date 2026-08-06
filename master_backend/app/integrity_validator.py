@@ -58,6 +58,16 @@ def _worst_status(chosen: dict) -> str:
     return worst
 
 
+def _escalate(current: str, candidate: str) -> str:
+    """Raise a verdict, never lower it.
+
+    Every per-device check must escalate rather than assign: a device that is BOTH
+    half-rate (FAIL) and had offline intervals (PARTIAL) must stay FAIL. A plain
+    assignment in a later check silently downgrades an earlier, more severe verdict.
+    """
+    return candidate if _VERDICT_RANK[candidate] > _VERDICT_RANK[current] else current
+
+
 class IntegrityValidator:
     async def run(
         self,
@@ -116,7 +126,7 @@ class IntegrityValidator:
             }
 
             if rows == 0:
-                device_report["status"] = "FAIL"
+                device_report["status"] = _escalate(device_report["status"], "FAIL")
                 device_report["reasons"].append("zero rows written")
                 device_report["issue"] = "zero rows written"
 
@@ -131,11 +141,7 @@ class IntegrityValidator:
             else:
                 sampling_verdict, sampling_reasons = classify(stats, thresholds)
                 device_report["reasons"].extend(sampling_reasons)
-                if sampling_verdict == "FAIL":
-                    device_report["status"] = "FAIL"
-                elif sampling_verdict == "PARTIAL":
-                    if device_report["status"] == "PASS":
-                        device_report["status"] = "PARTIAL"
+                device_report["status"] = _escalate(device_report["status"], sampling_verdict)
 
                 device_report["sampling"] = {
                     "nominal_hz": stats["nominal_hz"],
@@ -153,13 +159,13 @@ class IntegrityValidator:
 
             # Flag sessions with offline intervals
             if dev_obj and dev_obj.offline_intervals:
-                device_report["status"] = "PARTIAL"
+                device_report["status"] = _escalate(device_report["status"], "PARTIAL")
                 device_report["reasons"].append("device had offline intervals")
 
             # Packets the operator believed were captured (the dashboard counted them)
             # but that never reached disk are a hard failure, not merely PARTIAL (plan D2).
             if device_report["packets_dropped_no_writer"] > 0:
-                device_report["status"] = "FAIL"
+                device_report["status"] = _escalate(device_report["status"], "FAIL")
                 device_report["reasons"].append(
                     f"{device_report['packets_dropped_no_writer']} packets had no open writer"
                 )

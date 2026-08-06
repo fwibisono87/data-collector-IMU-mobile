@@ -159,3 +159,24 @@ def test_env_override_lowers_fail_threshold(tmp_path: Path, monkeypatch, run_val
     dev = _device_report(report, "DEV1")
     assert dev["status"] != "FAIL"
     assert dev["status"] == "PARTIAL"
+
+
+def test_half_rate_device_with_offline_intervals_stays_fail(tmp_path: Path, run_validator):
+    """A device that is BOTH half-rate and had offline intervals must remain FAIL.
+
+    The offline-interval branch used a plain assignment, which downgraded an earlier
+    sampling FAIL to PARTIAL — reintroducing the priority inversion this lane fixes.
+    The real production session's waist device had three offline intervals, so a device
+    hitting both conditions is not hypothetical.
+    """
+    csv = _write_csv(tmp_path / "s_waist_sensor_data.csv", _half_rate_rows("DEV"))
+    dev = _device("DEV", first_packet_ts=1000,
+                  offline_intervals=[{"start_ms": 1, "end_ms": 2, "source": "ping_timeout"}])
+
+    report = run_validator("s", {"DEV": csv}, [dev])
+
+    device = report["devices"][0]
+    assert device["status"] == "FAIL", "offline intervals must not downgrade a rate FAIL"
+    assert report["status"] == "FAIL"
+    assert any("true rate" in r for r in device["reasons"])
+    assert any("offline" in r for r in device["reasons"])
