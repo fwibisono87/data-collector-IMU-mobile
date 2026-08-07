@@ -37,7 +37,10 @@ declare global {
 // written data is confirmed to disk via a real handle; otherwise falls back to an in-memory
 // Blob + anchor download, which is memory-bound and cannot confirm the write, so it never
 // marks the session saved.
-async function saveOneCamera(group: ChunkGroup, onProgress: (done: number, total: number) => void): Promise<void> {
+async function saveOneCamera(
+  group: ChunkGroup,
+  onProgress: (done: number, total: number) => void,
+): Promise<{ confirmed: boolean }> {
   const total = group.chunks;
   const filename = `${group.sessionId}_${group.camId}_RESCUED.webm`;
 
@@ -59,7 +62,9 @@ async function saveOneCamera(group: ChunkGroup, onProgress: (done: number, total
       try { await writable.abort(); } catch { /* ignore */ }
       throw e;
     }
-    return;
+    // The handle closed cleanly — the bytes are on disk. This is the ONLY path that may
+    // report a confirmed save.
+    return { confirmed: true };
   }
 
   // Fallback: no picker available — build a Blob and anchor download. Memory-bound, cannot
@@ -81,6 +86,10 @@ async function saveOneCamera(group: ChunkGroup, onProgress: (done: number, total
   a.remove();
   await wait(15000);
   URL.revokeObjectURL(url);
+  // An anchor download cannot report whether the bytes ever reached disk. Treating this as
+  // success is exactly the 2026-08-07 defect — it let clearChunks run against footage that
+  // was never written. Never confirmed on this path.
+  return { confirmed: false };
 }
 
 export default function VideoRecoveryModal({ open, onClose }: Props) {
@@ -164,13 +173,16 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
     const savedCams = new Map<string, number>();
     let totalBytes = 0;
     let aborted = false;
+    let failed = false;
+    let allConfirmed = true;
     try {
       for (const cam of cams) {
         const camKey = keyOf(sessionId, cam.camId);
+        let confirmed = false;
         const runErr = await new Promise<unknown>(resolve => {
           saveOneCamera(cam, (done, total) =>
             setProgress(p => ({ ...p, [camKey]: `saving chunk ${done}/${total}…` })))
-            .then(() => resolve(null))
+            .then(r => { confirmed = r.confirmed; resolve(null); })
             .catch(e => resolve(e));
         });
         setProgress(p => ({ ...p, [camKey]: "" }));
@@ -178,10 +190,12 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
           if (runErr instanceof DOMException && runErr.name === "AbortError") {
             aborted = true;
           } else {
+            failed = true;
             setError(`Failed to save ${cam.camId}: ${runErr}`);
           }
           break;
         }
+        if (!confirmed) allConfirmed = false;
         savedCams.set(cam.camId, cam.bytes);
         totalBytes += cam.bytes;
       }
@@ -189,9 +203,12 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
       mark(sessionId, undefined, undefined);
     }
 
-    // Mark saved only if EVERY camera in the session wrote successfully — never on partial
-    // success, cancellation, or error.
-    if (!aborted && savedCams.size === cams.length && !error) {
+    // Mark saved only when EVERY camera wrote AND every write was CONFIRMED through a real
+    // file handle. The anchor-download fallback cannot confirm delivery, so it must never
+    // unlock deletion — marking on an unverifiable signal is the defect this whole change
+    // exists to remove. `failed` is a local flag because the `error` state read here would
+    // be a stale closure from the render that created this handler.
+    if (!aborted && !failed && allConfirmed && savedCams.size === cams.length) {
       try {
         await markSessionSaved(sessionId, totalBytes);
         await refresh();
@@ -199,8 +216,14 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
         setError(`Could not mark ${sessionId} saved: ${e}`);
       }
     } else {
-      // Refresh anyway so the UI reflects whatever did persist (nothing marked saved here).
+      if (!aborted && !failed && !allConfirmed) {
+        setError(
+          `Saved ${sessionId} via the fallback downloader, which cannot confirm the write. ` +
+          `Footage is retained and stays deletable only after a confirmed save.`,
+        );
+      }
       setProgress(p => ({ ...p, [k]: aborted ? "cancelled" : "" }));
+      await refresh();
     }
   };
 
