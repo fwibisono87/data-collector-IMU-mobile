@@ -73,6 +73,11 @@ class DeviceInfo:
     last_packet_at: float = 0.0             # time.monotonic() of the last accepted packet
     _packets_prev_tick: int = 0
     rate_hz: float = 0.0
+    last_acc: tuple | None = None        # last (acc_x, acc_y, acc_z) seen
+    acc_changes: int = 0                 # cumulative count of DISTINCT acc readings
+    _acc_changes_prev_tick: int = 0
+    true_hz: float = 0.0                 # distinct acc readings per second
+    held_pct: float = 0.0                # % of packets in the last tick that were repeats
 
     @property
     def is_alive(self) -> bool:
@@ -117,6 +122,11 @@ class SessionManager:
         preserved_intervals = existing.offline_intervals if existing else []
         preserved_first_ts = existing.first_packet_ts if existing else None
         preserved_packets = existing.packets_received if existing else 0
+        preserved_last_acc = existing.last_acc if existing else None
+        preserved_acc_changes = existing.acc_changes if existing else 0
+        preserved_acc_prev = existing._acc_changes_prev_tick if existing else 0
+        preserved_true_hz = existing.true_hz if existing else 0.0
+        preserved_held_pct = existing.held_pct if existing else 0.0
 
         self._devices[device_id] = DeviceInfo(
             device_id=device_id,
@@ -129,6 +139,11 @@ class SessionManager:
             offline_intervals=preserved_intervals,
             first_packet_ts=preserved_first_ts,
             packets_received=preserved_packets,
+            last_acc=preserved_last_acc,
+            acc_changes=preserved_acc_changes,
+            _acc_changes_prev_tick=preserved_acc_prev,
+            true_hz=preserved_true_hz,
+            held_pct=preserved_held_pct,
         )
         logger.info("Device registered: %s role=%s", device_id[:8], role)
         return None
@@ -173,6 +188,16 @@ class SessionManager:
             dev = self._devices[device_id]
             dev.packets_received += 1
             dev.last_packet_at = time.monotonic()
+
+    def note_sample(self, device_id: str, acc: tuple) -> None:
+        """Count DISTINCT accelerometer readings. A repeated triple is a held sample:
+        the OS re-delivered a stale hardware reading to satisfy the requested rate."""
+        dev = self._devices.get(device_id)
+        if dev is None:
+            return
+        if acc != dev.last_acc:
+            dev.acc_changes += 1
+        dev.last_acc = acc
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         return self._devices.get(device_id)
@@ -234,6 +259,11 @@ class SessionManager:
             dev.first_packet_ts = None
             dev.offline_intervals = []
             dev.packets_received = 0
+            dev.last_acc = None
+            dev.acc_changes = 0
+            dev._acc_changes_prev_tick = 0
+            dev.true_hz = 0.0
+            dev.held_pct = 0.0
 
         await self._transition(SessionState.RECORDING)
         await self._save_state()
@@ -399,6 +429,11 @@ class SessionManager:
                 dev.is_online = dev.is_alive
                 dev.rate_hz = float(dev.packets_received - dev._packets_prev_tick)
                 dev._packets_prev_tick = dev.packets_received
+                dev.true_hz = float(dev.acc_changes - dev._acc_changes_prev_tick)
+                dev.held_pct = (
+                    100.0 * (1 - dev.true_hz / dev.rate_hz) if dev.rate_hz > 0 else 0.0
+                )
+                dev._acc_changes_prev_tick = dev.acc_changes
                 if was_online and not dev.is_online:
                     await audit.log(
                         "WARN",

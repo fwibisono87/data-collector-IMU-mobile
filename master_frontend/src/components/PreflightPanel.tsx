@@ -6,6 +6,10 @@ type CheckStatus = "pending" | "pass" | "fail";
 
 interface Check { label: string; status: CheckStatus; detail?: string; }
 
+// Minimum distinct acc readings/sec each ONLINE device must sustain to pass preflight.
+// 100 Hz nominal × 90% — see session_manager note_sample (callbacks vs distinct values).
+const SAMPLING_RATE_MIN_HZ = 90;
+
 function buildChecks(
   isWsConnected: boolean,
   devices: DeviceInfo[],
@@ -26,6 +30,24 @@ function buildChecks(
       status: onlineDevices.length > 0 ? "pass" : "fail",
       detail: `${onlineDevices.length} online`,
     },
+    (() => {
+      const label = "Sampling rate healthy";
+      const reported = onlineDevices.filter(d => typeof d.true_hz === "number");
+      const everyOnlineHealthy = onlineDevices.every(
+        d => typeof d.true_hz === "number" && (d.true_hz as number) >= SAMPLING_RATE_MIN_HZ,
+      );
+      if (everyOnlineHealthy) {
+        return { label, status: "pass" as CheckStatus, detail: "OK" };
+      }
+      if (reported.length === 0) {
+        // Fresh connection — no rate has been reported yet, so don't show a red failure
+        // before the first 1 s tick lands.
+        return { label, status: "pending" as CheckStatus, detail: "Awaiting first rate tick" };
+      }
+      const offenders = reported.filter(d => (d.true_hz as number) < SAMPLING_RATE_MIN_HZ);
+      const detail = offenders.map(d => `${d.role} ${d.true_hz} Hz`).join(", ");
+      return { label, status: "fail" as CheckStatus, detail: detail || "below 90 Hz" };
+    })(),
     {
       label: "Subject name",
       status: subject.trim().length > 0 ? "pass" : "fail",

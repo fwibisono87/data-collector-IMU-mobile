@@ -14,6 +14,8 @@ export interface DeviceInfo {
   first_packet_ts?: number;
   offline_intervals?: number;
   rate_hz?: number;
+  true_hz?: number;
+  held_pct?: number;
   streaming?: boolean;
 }
 
