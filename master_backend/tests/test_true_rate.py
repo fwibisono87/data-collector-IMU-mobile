@@ -85,3 +85,71 @@ def test_counters_reset_on_start_recording_and_survive_reconnect():
     dev2 = sm.get_device("DEV1")
     assert dev2.acc_changes == 10
     assert dev2.last_acc == (9.0, 0.0, 0.0)
+
+
+# ── Rate tick: the derived per-second figures the preflight gate reads ────────
+
+def test_tick_rates_reports_half_rate_for_held_samples():
+    """A device delivering 100 packets/s from a 50 Hz sensor must read true_hz=50.
+
+    This is the 2026-08-07 signature: rate_hz looks perfectly healthy at 100 while half
+    the rows are byte-identical repeats of the previous reading.
+    """
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+
+    for i in range(100):
+        sm.increment_packets("DEV1")
+        # Value changes only every second packet — the OS re-delivering a stale sample.
+        sm.note_sample("DEV1", (i // 2, 0.0, 1.0))
+
+    sm._tick_rates(dev)
+    assert dev.rate_hz == 100.0, "packet counter should still look healthy"
+    assert dev.true_hz == 50.0, "distinct-reading counter must expose the real rate"
+    assert dev.held_pct == 50.0
+
+
+def test_tick_rates_reports_full_rate_for_distinct_samples():
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+
+    for i in range(100):
+        sm.increment_packets("DEV1")
+        sm.note_sample("DEV1", (i, 0.0, 1.0))
+
+    sm._tick_rates(dev)
+    assert dev.rate_hz == 100.0
+    assert dev.true_hz == 100.0
+    assert dev.held_pct == 0.0
+
+
+def test_tick_rates_is_a_delta_not_a_total():
+    """Consecutive ticks must each report one second's worth, not cumulative counts."""
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+
+    for i in range(100):
+        sm.increment_packets("DEV1")
+        sm.note_sample("DEV1", (i, 0.0, 1.0))
+    sm._tick_rates(dev)
+    assert dev.true_hz == 100.0
+
+    for i in range(100, 140):
+        sm.increment_packets("DEV1")
+        sm.note_sample("DEV1", (i, 0.0, 1.0))
+    sm._tick_rates(dev)
+    assert dev.true_hz == 40.0, "second tick must report only the new interval"
+
+
+def test_tick_rates_handles_zero_traffic():
+    """A silent device must not divide by zero."""
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+    sm._tick_rates(dev)
+    assert dev.rate_hz == 0.0
+    assert dev.true_hz == 0.0
+    assert dev.held_pct == 0.0

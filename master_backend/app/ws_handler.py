@@ -91,6 +91,15 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 continue
 
             if session_manager.state != SessionState.RECORDING:
+                # Rate accounting must run in EVERY state, not just RECORDING. Phones stream
+                # telemetry from the moment they connect (attachSensorStream is persistent),
+                # and preflight gates START on true_hz — so counting only while RECORDING left
+                # the gate reading 0 Hz before every session and blocked recording outright.
+                # start_recording() resets these counters, so idle traffic never contaminates
+                # a session's totals. Deliberately outside the dedup path below: that one is
+                # gated on the session id and exists to keep duplicate rows off disk.
+                session_manager.increment_packets(device_id)
+                session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
                 # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
                 # flushing the buffered tail of the session that just ended. Dropping it
                 # here (and letting the phone then erase its own copy) was a total-loss

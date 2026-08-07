@@ -418,6 +418,26 @@ class SessionManager:
                 pass
         return results
 
+    @staticmethod
+    def _tick_rates(dev: "DeviceInfo") -> None:
+        """Roll one second of per-device rate counters.
+
+        `rate_hz` counts PACKETS; `true_hz` counts DISTINCT accelerometer readings. They
+        diverge exactly when the OS re-delivers a stale hardware sample to satisfy the
+        requested rate — the failure that silently halved two devices on 2026-08-07.
+
+        Must be driven in every session state, not just RECORDING: preflight gates START on
+        true_hz while the session is IDLE, so a counter that only advanced during RECORDING
+        would leave every device pinned at 0 Hz and block recording outright.
+        """
+        dev.rate_hz = float(dev.packets_received - dev._packets_prev_tick)
+        dev._packets_prev_tick = dev.packets_received
+        dev.true_hz = float(dev.acc_changes - dev._acc_changes_prev_tick)
+        dev.held_pct = (
+            100.0 * (1 - dev.true_hz / dev.rate_hz) if dev.rate_hz > 0 else 0.0
+        )
+        dev._acc_changes_prev_tick = dev.acc_changes
+
     # ── Offline monitor ──────────────────────────────────────────────────────
 
     async def _monitor_offline(self) -> None:
@@ -427,13 +447,7 @@ class SessionManager:
             for dev in self._devices.values():
                 was_online = dev.is_online
                 dev.is_online = dev.is_alive
-                dev.rate_hz = float(dev.packets_received - dev._packets_prev_tick)
-                dev._packets_prev_tick = dev.packets_received
-                dev.true_hz = float(dev.acc_changes - dev._acc_changes_prev_tick)
-                dev.held_pct = (
-                    100.0 * (1 - dev.true_hz / dev.rate_hz) if dev.rate_hz > 0 else 0.0
-                )
-                dev._acc_changes_prev_tick = dev.acc_changes
+                self._tick_rates(dev)
                 if was_online and not dev.is_online:
                     await audit.log(
                         "WARN",
@@ -465,6 +479,17 @@ class SessionManager:
             late_summary = await io_manager.finalize_late()
             if late_summary:
                 await broadcast_to_frontends({"type": "LATE_DELIVERY", **late_summary})
+
+            # Keep the rate counters live outside RECORDING. Phones stream telemetry as soon
+            # as they connect, and preflight blocks START until it sees a healthy true_hz —
+            # so without this every device sits at 0 Hz while IDLE and START is never
+            # permitted. Skipped during RECORDING, where _monitor_offline owns the tick;
+            # running both would consume the same delta twice and halve both rates.
+            if self.state != SessionState.RECORDING and self._devices:
+                for dev in self._devices.values():
+                    dev.is_online = dev.is_alive
+                    self._tick_rates(dev)
+                await broadcast_to_frontends(_state_snapshot())
 
             if self.state != SessionState.IDLE:
                 continue
