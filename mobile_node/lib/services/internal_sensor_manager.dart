@@ -57,14 +57,34 @@ class InternalSensorManager {
   int _currentFrequency = 100;
   DateTime? _prevEmittedAccTs;
   DateTime? _prevEmittedGyroTs;
+  // Last EMITTED values, for the value-equality half of the held test above.
+  double _prevEmittedAx = double.nan;
+  double _prevEmittedAy = double.nan;
+  double _prevEmittedAz = double.nan;
+  double _prevEmittedGx = double.nan;
+  double _prevEmittedGy = double.nan;
+  double _prevEmittedGz = double.nan;
 
   static const double _gravity = 9.80665;
   static const double _radToDeg = 180.0 / pi;
 
-  /// Sampling period requested from the platform sensor, in ms. The OS treats this as a HINT:
-  /// some handsets clamp to a slower supported rate, which is what produces held samples.
-  /// Lower this (e.g. 5) to probe a device's true maximum rate.
-  static const int kSensorSamplingPeriodMs = 10;
+  /// Sampling period requested from the platform sensor, in ms — a HINT the OS is free to
+  /// round to a supported ODR.
+  ///
+  /// This is deliberately FASTER than the 100 Hz emit rate, and the two are independent: the
+  /// Timer.periodic below emits packets at `frequency`, reading whatever the sensor last
+  /// cached. Requesting faster therefore costs nothing downstream; it only makes the cached
+  /// value fresher.
+  ///
+  /// Why it matters (2026-08-07): the 2510DRA23E is dual-sourced. Handsets with the TDK
+  /// icm4n607 delivered a true 100 Hz at a 10 ms request, while those with the Bosch bmi3xy
+  /// ran the physical sensor at 50 Hz and DUPLICATED each reading to satisfy the 100 Hz
+  /// delivery rate — 49% of rows were byte-identical repeats. `dumpsys sensorservice` reports
+  /// maxRate=400 Hz on both parts, so 50 Hz was never a hardware ceiling; the HAL was simply
+  /// picking a power-optimised ODR one step below what was asked for. Asking for 200 Hz pushes
+  /// it up a step. Verify per handset with the true_hz readout on the dashboard — it counts
+  /// DISTINCT readings, which is the only number that reveals this.
+  static const int kSensorSamplingPeriodMs = 5;
 
   void start({int frequency = 100}) {
     if (isRunning && _currentFrequency == frequency) return;
@@ -72,7 +92,7 @@ class InternalSensorManager {
 
     _currentFrequency = frequency;
     final intervalMs = (1000 / frequency).round();
-    final samplingPeriod = Duration(milliseconds: kSensorSamplingPeriodMs);
+    const samplingPeriod = Duration(milliseconds: kSensorSamplingPeriodMs);
 
     _accSub = _source.accelerometer(samplingPeriod: samplingPeriod).listen(
       (e) {
@@ -180,7 +200,25 @@ class InternalSensorManager {
   double get currentFrequency => _currentFrequency.toDouble();
 
   void _emitPacket() {
-    final held = _lastAccTs == _prevEmittedAccTs && _lastGyroTs == _prevEmittedGyroTs;
+    // Held == this packet carries no NEW hardware reading.
+    //
+    // Timestamps alone are not sufficient. A HAL that upsamples (Bosch bmi3xy on this
+    // handset: physical ODR 50 Hz, delivery 100 Hz) re-fires the callback with a fresh event
+    // timestamp but identical values, so the timestamp test scored those as fresh and the
+    // phone reported a healthy 100 Hz while half its rows were duplicates. Comparing the
+    // values too is what actually detects a repeat; the timestamp test is kept because it
+    // catches the case where the callback did not fire at all between emits.
+    final sameTs = _lastAccTs == _prevEmittedAccTs && _lastGyroTs == _prevEmittedGyroTs;
+    final sameValues =
+        _lastAx == _prevEmittedAx && _lastAy == _prevEmittedAy && _lastAz == _prevEmittedAz &&
+        _lastGx == _prevEmittedGx && _lastGy == _prevEmittedGy && _lastGz == _prevEmittedGz;
+    final held = sameTs || sameValues;
+    _prevEmittedAx = _lastAx;
+    _prevEmittedAy = _lastAy;
+    _prevEmittedAz = _lastAz;
+    _prevEmittedGx = _lastGx;
+    _prevEmittedGy = _lastGy;
+    _prevEmittedGz = _lastGz;
     _prevEmittedAccTs = _lastAccTs;
     _prevEmittedGyroTs = _lastGyroTs;
     _streamController.add(SensorPacket(
