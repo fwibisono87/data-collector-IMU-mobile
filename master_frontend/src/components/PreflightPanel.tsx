@@ -31,22 +31,37 @@ function buildChecks(
       detail: `${onlineDevices.length} online`,
     },
     (() => {
+      // true_hz counts DISTINCT accelerometer readings per second, not packets. A phone can
+      // stream a confident 100 packets/sec while the OS re-delivers each hardware sample
+      // twice — the failure that silently halved two devices on 2026-08-07.
       const label = "Sampling rate healthy";
       const reported = onlineDevices.filter(d => typeof d.true_hz === "number");
-      const everyOnlineHealthy = onlineDevices.every(
-        d => typeof d.true_hz === "number" && (d.true_hz as number) >= SAMPLING_RATE_MIN_HZ,
-      );
-      if (everyOnlineHealthy) {
-        return { label, status: "pass" as CheckStatus, detail: "OK" };
-      }
-      if (reported.length === 0) {
-        // Fresh connection — no rate has been reported yet, so don't show a red failure
-        // before the first 1 s tick lands.
-        return { label, status: "pending" as CheckStatus, detail: "Awaiting first rate tick" };
-      }
       const offenders = reported.filter(d => (d.true_hz as number) < SAMPLING_RATE_MIN_HZ);
-      const detail = offenders.map(d => `${d.role} ${d.true_hz} Hz`).join(", ");
-      return { label, status: "fail" as CheckStatus, detail: detail || "below 90 Hz" };
+
+      // A real offender outranks incomplete reporting: name it immediately rather than
+      // hiding a known-bad device behind "awaiting".
+      if (offenders.length > 0) {
+        return {
+          label,
+          status: "fail" as CheckStatus,
+          detail: offenders.map(d => `${d.role} ${(d.true_hz as number).toFixed(0)} Hz`).join(", "),
+        };
+      }
+      // Nothing to evaluate yet, or some device has not produced its first 1 s tick. Both are
+      // "pending", never "pass" — a green tick on an unevaluated condition is how a bad
+      // session gets started. Note `onlineDevices.every()` on an empty list returns true,
+      // which is exactly the trap here.
+      if (onlineDevices.length === 0) {
+        return { label, status: "pending" as CheckStatus, detail: "No devices online" };
+      }
+      if (reported.length < onlineDevices.length) {
+        return {
+          label,
+          status: "pending" as CheckStatus,
+          detail: `Awaiting first rate tick (${reported.length}/${onlineDevices.length})`,
+        };
+      }
+      return { label, status: "pass" as CheckStatus, detail: `all ≥ ${SAMPLING_RATE_MIN_HZ} Hz` };
     })(),
     {
       label: "Subject name",
