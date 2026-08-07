@@ -353,8 +353,17 @@ export default function EndSessionModal({
         onDownloadComplete(sid);
       } else {
         await legacyDownload(m, sid, prefix);
+        // Deliberately NOT calling onDownloadComplete: it deletes the chunk backup, and this
+        // path ends in an anchor click that cannot report whether a single byte reached disk.
+        // Destroying the only copy on that signal is precisely the 2026-08-07 failure. The
+        // modal still closes; the footage stays in IndexedDB and is listed by the recovery
+        // screen until a confirmed save reclaims it.
         setDownloaded(true);
-        onDownloadComplete(sid);
+        setDownloadError(
+          "Saved via the legacy in-memory downloader, which cannot confirm the file reached " +
+          "disk. Video is being kept in this browser — verify the .zip opens, then clear it " +
+          "from “Recover buffered video”.",
+        );
       }
     } catch (e) {
       setDownloadError(`Download failed: ${e}`);

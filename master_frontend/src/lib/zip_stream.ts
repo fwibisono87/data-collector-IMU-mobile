@@ -19,23 +19,9 @@
 
 import JSZip from "jszip";
 
-// Minimal typings for the File System Access API, which the browser-flavoured lib.dom used by
-// this app does not yet ship. Declared locally (in the file that owns the feature) so the
-// sandbox rule "own exactly these four files" holds and tsc stays clean.
-declare global {
-  interface FileSystemWritableFileStreamLike {
-    write(data: Uint8Array): Promise<void>;
-    close(): Promise<void>;
-  }
-  interface Window {
-    showSaveFilePicker(options?: {
-      suggestedName?: string;
-      types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-    }): Promise<{
-      createWritable(options?: { keepExistingData?: boolean }): Promise<FileSystemWritableFileStreamLike>;
-    }>;
-  }
-}
+// File System Access typings live in src/types/file_system_access.d.ts — shared with
+// VideoRecoveryModal, which needs the same API. Declaring them per-module produced
+// conflicting `declare global` blocks that only surfaced once both were merged.
 
 export function canStreamSave(): boolean {
   return typeof window !== "undefined" && "showSaveFilePicker" in window;
@@ -206,11 +192,10 @@ export async function streamZipToDisk(
     throw new Error("File System Access API (showSaveFilePicker) is not available in this browser.");
   }
 
-  let handle: {
-    createWritable(options?: { keepExistingData?: boolean }): Promise<FileSystemWritableFileStreamLike>;
-  };
+  let handle: FileSystemFileHandleLike;
   try {
-    handle = await window.showSaveFilePicker({
+    // canStreamSave() above guarantees presence; TS cannot narrow through the helper.
+    handle = await window.showSaveFilePicker!({
       suggestedName,
       types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }],
     });

@@ -18,7 +18,8 @@ import MultiCameraRecorder, {
 } from "@/components/MultiCameraRecorder";
 import AmbientBackdrop from "@/components/AmbientBackdrop";
 import RecoveryModal from "@/components/RecoveryModal";
-import { clearChunks } from "@/lib/video_backup";
+import VideoRecoveryModal from "@/components/VideoRecoveryModal";
+import { clearChunks, listUnconfirmedSessions } from "@/lib/video_backup";
 import EndSessionModal, {
   type EndSessionInfo,
   type EndSessionVideoResult,
@@ -71,6 +72,11 @@ export default function Home() {
   const [alertResetKey, setAlertResetKey] = useState(0);
   const [resetError, setResetError] = useState("");
   const [showRecovery, setShowRecovery] = useState(false);
+  const [showVideoRecovery, setShowVideoRecovery] = useState(false);
+  // Sessions with footage still in IndexedDB that has never been confirmed written to disk.
+  // Surfaced as a persistent banner: on 2026-08-07 footage sat here unreachable after a crash
+  // and was one START press away from being reclaimed. [incident 2026-08-07]
+  const [unconfirmed, setUnconfirmed] = useState<string[]>([]);
 
   // End-of-session export modal — replaces the immediate per-camera downloads.
   const [endSession, setEndSession] = useState<EndSessionInfo | null>(null);
@@ -160,6 +166,17 @@ export default function Home() {
 
     return () => clearInterval(poll);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Unsaved-footage watch ──────────────────────────────────────────────────
+  // Re-checked whenever the recovery screen closes, a session ends, or the session state
+  // changes, so the banner clears as soon as footage is confirmed saved.
+  useEffect(() => {
+    let cancelled = false;
+    listUnconfirmedSessions()
+      .then(ids => { if (!cancelled) setUnconfirmed(ids); })
+      .catch(() => { /* IndexedDB unavailable — banner simply stays empty */ });
+    return () => { cancelled = true; };
+  }, [showVideoRecovery, endSession, sessionState]);
 
   // ── Connect ────────────────────────────────────────────────────────────────
   const handleConnect = () => {
@@ -318,6 +335,27 @@ export default function Home() {
       <div className="relative z-10 flex flex-col h-screen overflow-hidden">
         <StatusBanner state={sessionState} sessionId={sessionId} devices={devices} isWsConnected={isWsConnected} backendIp={backendIp} />
 
+        {/* Unsaved footage is retained across sessions now, but it is only retained — it still
+            needs saving. Persistent and unmissable, because the 2026-08-07 footage sat
+            invisible in IndexedDB while the operator believed it was gone. */}
+        {unconfirmed.length > 0 && (
+          <div className="shrink-0 bg-amber-600/20 border-y border-amber-500/50 px-4 py-2 text-sm
+                          text-amber-100 flex items-center gap-3">
+            <span>⚠</span>
+            <span className="flex-1">
+              Video from {unconfirmed.length} session{unconfirmed.length > 1 ? "s" : ""} is still
+              held in this browser and has never been confirmed saved to disk
+              {" "}({unconfirmed.join(", ")}). It is kept until you save it.
+            </span>
+            <button
+              onClick={() => setShowVideoRecovery(true)}
+              className="btn-glass px-3 py-1 text-xs text-amber-200 whitespace-nowrap"
+            >
+              Save it now
+            </button>
+          </div>
+        )}
+
         {isRecording && devices.some(d => !d.is_online) && (
           <div className="shrink-0 bg-red-600/25 border-y border-red-500/50 px-4 py-2 text-sm
                           text-red-200 font-bold flex items-center gap-3 animate-pulse">
@@ -362,6 +400,18 @@ export default function Home() {
               className="btn-glass w-full py-2 text-xs text-gray-300"
             >
               Download / merge phone rescue files
+            </button>
+
+            {/* Buffered webcam footage held in this browser. Reachable even after a reload —
+                the failure on 2026-08-07 was that nothing in the UI could get at it. */}
+            <button
+              onClick={() => setShowVideoRecovery(true)}
+              className={`btn-glass w-full py-2 text-xs ${
+                unconfirmed.length > 0 ? "text-amber-300 border-amber-500/40" : "text-gray-300"
+              }`}
+            >
+              Recover buffered video
+              {unconfirmed.length > 0 && ` (${unconfirmed.length} unsaved)`}
             </button>
 
             {/* Start / Stop button */}
@@ -502,6 +552,11 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      <VideoRecoveryModal
+        open={showVideoRecovery}
+        onClose={() => setShowVideoRecovery(false)}
+      />
 
       <RecoveryModal
         backendIp={backendIp}

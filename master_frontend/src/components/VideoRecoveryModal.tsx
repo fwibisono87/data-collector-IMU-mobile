@@ -20,18 +20,8 @@ interface RowBusy {
 
 const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
-interface SaveFilePickerHandle {
-  createWritable(): Promise<{ write(blob: Blob): Promise<void>; close(): Promise<void>; abort(): Promise<void> }>;
-  suggestedName?: string;
-}
-declare global {
-  interface Window {
-    showSaveFilePicker?: (opts?: {
-      suggestedName?: string;
-      types?: { description: string; accept: Record<string, string[]> }[];
-    }) => Promise<SaveFilePickerHandle>;
-  }
-}
+// File System Access typings live in src/types/file_system_access.d.ts — shared with
+// lib/zip_stream.ts, which needs the same API.
 
 // Per-camera save. Uses the File System Access API (showSaveFilePicker) when present so the
 // written data is confirmed to disk via a real handle; otherwise falls back to an in-memory
