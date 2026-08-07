@@ -115,6 +115,7 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 if dev is not None:
                     await io_manager.ensure_writer(device_id, dev.device_role)
             session_manager.increment_packets(device_id)
+            session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
             session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
             try:
                 await io_manager.write_packet(pkt)
@@ -419,6 +420,8 @@ def _state_snapshot() -> dict:
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),
                 "rate_hz": round(d.rate_hz, 1),
+                "true_hz": round(d.true_hz, 1),
+                "held_pct": round(d.held_pct, 1),
                 "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }
             for d in session_manager._devices.values()
