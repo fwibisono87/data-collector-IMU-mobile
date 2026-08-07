@@ -216,21 +216,34 @@ export default function Home() {
     // Capture identity BEFORE the stop call — a late STATE_UPDATE broadcast after the ACK
     // could otherwise describe the session differently than the one we just ended.
     const ended = { sessionId, subject, sessionTag, operator };
+    let results: EndSessionVideoResult[] = [];
+    let missed: string[] = [];
+    // Stop the cameras first, but never let a camera-finalisation throw strand the backend in
+    // RECORDING. A throw here is caught and recorded so the session can still be stopped.
     try {
-      const { results, missed } = (await camRef.current?.stopRecording()) ?? { results: [], missed: [] };
-      // Release backend before the export modal opens — a throw/hang here can no longer
-      // leave the session stuck in RECORDING. [Finding B]
-      await wsClient.stopSession("operator_stop");
-      // No immediate downloads — the end-of-session modal handles artifacts+video as one
-      // zip, and cannot be dismissed until a download has completed.
-      setEndSession(ended);
-      setEndVideoResults(results);
-      setEndMissed(missed);
+      const out = (await camRef.current?.stopRecording()) ?? { results: [], missed: [] };
+      results = out.results;
+      missed = out.missed;
     } catch (e) {
-      alert(`Stop failed: ${e}`);
-    } finally {
-      setIsStopping(false);
+      console.error("camera finalisation failed (session stop will still run)", e);
     }
+    // Always tell the backend the session ended, in its OWN try/catch. This must execute even
+    // if the camera stop above threw — the previous code path aborted before stopSession and
+    // left the backend recording forever despite the "cannot strand" comment. [Finding B]
+    let stopError = "";
+    try {
+      await wsClient.stopSession("operator_stop");
+    } catch (e) {
+      stopError = String(e);
+      console.error("session stop on backend failed", e);
+    }
+    // No immediate downloads — the end-of-session modal handles artifacts+video as one
+    // zip, and cannot be dismissed until a download has completed.
+    setEndSession(ended);
+    setEndVideoResults(results);
+    setEndMissed(missed);
+    setIsStopping(false);
+    if (stopError) alert(`Session stop reported a problem: ${stopError}`);
   };
 
   const handleLabel = async (id: number) => {

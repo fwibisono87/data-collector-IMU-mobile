@@ -9,6 +9,8 @@ import {
   isDataKind,
   type ExportManifest,
 } from "@/lib/export_client";
+import { streamZipToDisk, canStreamSave, type StreamZipEntry } from "@/lib/zip_stream";
+import { streamChunks, markSessionSaved } from "@/lib/video_backup";
 
 // ── Public contract ───────────────────────────────────────────────────────
 
@@ -23,8 +25,9 @@ export interface EndSessionVideoResult {
   camId: string;
   deviceId: string;
   label: string;
-  blob: Blob;
   mime: string;
+  sessionId: string;
+  chunkCount: number;
   startedAtMs: number;
   flashAtMs: number;
   stoppedAtMs: number;
@@ -46,15 +49,6 @@ const POLL_MS = 3000;
 
 function _ext(r: EndSessionVideoResult): string {
   return r.mime.includes("mp4") ? "mp4" : "webm";
-}
-
-function _downloadBlob(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 const STATUS_STYLE: Record<string, string> = {
@@ -169,6 +163,163 @@ export default function EndSessionModal({
   };
 
   // ── Download everything as one .zip ─────────────────────────────────────
+  //
+  // Primary path (canStreamSave): the archive is streamed chunk-by-chunk to a real file
+  // handle (see zip_stream.ts). Nothing is assembled in the JS heap, and no save signal is
+  // emitted from a .click() — markSessionSaved runs only after the write handle has closed
+  // successfully. The old _downloadBlob (URL + a.click + immediate revoke) is gone; it raced
+  // the download and could not report failure, which is what let the only backup get deleted.
+
+  // Count bytes as chunks stream through (cheap, bounded memory) so markSessionSaved can
+  // record an accurate total after a successful close.
+  const trackBytes = (sink: (c: Uint8Array | Blob) => Promise<void>, tally: { total: number }) =>
+    async (chunk: Uint8Array | Blob) => {
+      tally.total += chunk instanceof Blob ? chunk.size : chunk.byteLength;
+      await sink(chunk);
+    };
+
+  const buildStreamEntries = (
+    m: ExportManifest | null,
+    sid: string,
+    tally: { total: number },
+  ): StreamZipEntry[] => {
+    const entries: StreamZipEntry[] = [];
+
+    // Video — streamed chunk-by-chunk straight from IndexedDB, never concatenated.
+    for (const r of videoResults) {
+      entries.push({
+        path: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+        write: (sink) => streamChunks(sid, r.camId, (chunk) => trackBytes(sink, tally)(chunk)).then(() => {}),
+      });
+    }
+
+    // Backend data artifacts (small) pulled fresh at click-time.
+    if (m) {
+      for (const f of m.files) {
+        if (!isDataKind(f.kind)) continue;
+        entries.push({
+          path: `data/${f.name}`,
+          write: async (sink) => {
+            const buf = await (await fetchExportFile(backendIp, sid, f.name)).arrayBuffer();
+            await trackBytes(sink, tally)(new Uint8Array(buf));
+          },
+        });
+      }
+      for (const rec of m.recovery) {
+        if (!rec.complete || !rec.csv_exists) continue;
+        entries.push({
+          path: `data/recovery/${rec.device_id}.csv`,
+          write: async (sink) => {
+            const buf = await (await fetchRecoveryFile(backendIp, sid, rec.device_id)).arrayBuffer();
+            await trackBytes(sink, tally)(new Uint8Array(buf));
+          },
+        });
+      }
+      entries.push({
+        path: "data/manifest.json",
+        write: async (sink) => {
+          await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify(m, null, 2)));
+        },
+      });
+    } else {
+      entries.push({
+        path: "data/export_error.txt",
+        write: async (sink) => {
+          const text = `Backend data unavailable (${dataError || "not reachable"}).\n` +
+            "This ZIP contains video only — pull/rescue CSVs from the Recovery screen.\n";
+          await trackBytes(sink, tally)(new TextEncoder().encode(text));
+        },
+      });
+    }
+
+    const cameras = videoResults.map(r => ({
+      session_id: sid,
+      cam_id: r.camId,
+      device_id: r.deviceId,
+      browser_label: r.label,
+      mime: r.mime,
+      file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+      started_at_ms: r.startedAtMs,
+      flash_at_ms: r.flashAtMs,
+      stopped_at_ms: r.stoppedAtMs,
+    }));
+    entries.push({
+      path: "cameras.json",
+      write: async (sink) => {
+        await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify({ session_id: sid, cameras }, null, 2)));
+      },
+    });
+    if (missed.length > 0) {
+      entries.push({
+        path: "missed_cameras.txt",
+        write: async (sink) => {
+          await trackBytes(sink, tally)(new TextEncoder().encode(missed.join("\n") + "\n"));
+        },
+      });
+    }
+    return entries;
+  };
+
+  // Legacy fallback for browsers without the File System Access API. Deliberately builds the
+  // whole archive in the JS heap — it is memory-bound and may fail on long sessions, so it
+  // must only run where showSaveFilePicker is unsupported (and the UI warns the operator).
+  const legacyDownload = async (m: ExportManifest | null, sid: string, prefix: string) => {
+    setDownloadProgress("Legacy in-memory build — memory-bound on long sessions…");
+    const zip = new JSZip();
+    const videos = zip.folder("videos")!;
+    for (const r of videoResults) {
+      const blobs: Blob[] = [];
+      await streamChunks(sid, r.camId, (b) => { blobs.push(b); });
+      videos.file(`${sid}_${r.camId}_video_sync.${_ext(r)}`, new Blob(blobs, { type: r.mime || "video/webm" }));
+      setDownloadProgress(`Adding ${r.camId}…`);
+      await new Promise(res => setTimeout(res, 0));   // keep UI responsive
+    }
+    const data = zip.folder("data")!;
+    if (m) {
+      for (const f of m.files) {
+        if (!isDataKind(f.kind)) continue;
+        const buf = await (await fetchExportFile(backendIp, sid, f.name)).arrayBuffer();
+        data.file(f.name, buf);
+      }
+      const rec = data.folder("recovery")!;
+      for (const r of m.recovery) {
+        if (!r.complete || !r.csv_exists) continue;
+        const buf = await (await fetchRecoveryFile(backendIp, sid, r.device_id)).arrayBuffer();
+        rec.file(`${r.device_id}.csv`, buf);
+      }
+      data.file("manifest.json", JSON.stringify(m, null, 2));
+    } else {
+      data.file("export_error.txt",
+        `Backend data unavailable (${dataError || "not reachable"}).\n` +
+        "This ZIP contains video only — pull/rescue CSVs from the Recovery screen.\n");
+    }
+    const cameras = videoResults.map(r => ({
+      session_id: sid,
+      cam_id: r.camId,
+      device_id: r.deviceId,
+      browser_label: r.label,
+      mime: r.mime,
+      file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+      started_at_ms: r.startedAtMs,
+      flash_at_ms: r.flashAtMs,
+      stopped_at_ms: r.stoppedAtMs,
+    }));
+    zip.file("cameras.json", JSON.stringify({ session_id: sid, cameras }, null, 2));
+    if (missed.length > 0) zip.file("missed_cameras.txt", missed.join("\n") + "\n");
+
+    const blob = await zip.generateAsync(
+      { type: "blob", compression: "STORE", streamFiles: true },
+      meta => setDownloadProgress(`Compressing… ${Math.round(meta.percent)}%`),
+    );
+    // Delay the revoke so it cannot race the (unverifiable) start of the download.
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${prefix}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  };
+
   const handleDownload = async () => {
     if (!session || downloading) return;
     setDownloading(true);
@@ -178,66 +329,33 @@ export default function EndSessionModal({
     const prefix = `${session.subject || "subject"}_${session.sessionTag || "session"}_${sid}`
       .replace(/\s+/g, "_");
     try {
-      const zip = new JSZip();
-
-      // Videos live in browser memory after recording stops.
-      const videos = zip.folder("videos")!;
-      for (const r of videoResults) {
-        // Add as ArrayBuffer — universally supported by JSZip and avoids any
-        // Blob-vs-streaming quirks when streamFiles is enabled.
-        videos.file(`${sid}_${r.camId}_video_sync.${_ext(r)}`, await r.blob.arrayBuffer());
-        setDownloadProgress(`Adding ${r.camId}…`);
-        await new Promise(res => setTimeout(res, 0));   // keep UI responsive
-      }
-
-      // Data artifacts pulled fresh from the backend at click-time.
+      // Fresh manifest at click-time (data artifacts are re-pulled by each entry).
       let m = manifest;
       if (!m) {
         try { m = await fetchManifest(backendIp, sid); setManifest(m); }
         catch { m = null; }
       }
-      const data = zip.folder("data")!;
-      if (m) {
-        for (const f of m.files) {
-          if (!isDataKind(f.kind)) continue;
-          const buf = await (await fetchExportFile(backendIp, sid, f.name)).arrayBuffer();
-          data.file(f.name, buf);
+
+      const tally = { total: 0 };
+      if (canStreamSave()) {
+        setDownloadProgress("Streaming videos to disk…");
+        const entries = buildStreamEntries(m, sid, tally);
+        const ok = await streamZipToDisk(`${prefix}.zip`, entries, setDownloadProgress);
+        if (!ok) {
+          // User cancelled the file picker — no error, and the session is NOT marked saved.
+          setDownloadProgress("");
+          return;
         }
-        const rec = data.folder("recovery")!;
-        for (const r of m.recovery) {
-          if (!r.complete || !r.csv_exists) continue;
-          const buf = await (await fetchRecoveryFile(backendIp, sid, r.device_id)).arrayBuffer();
-          rec.file(`${r.device_id}.csv`, buf);
-        }
-        data.file("manifest.json", JSON.stringify(m, null, 2));
+        // Only here has the write handle closed successfully. This is the sole place a save
+        // is confirmed — never on a click or a cancel/throw. [incident 2026-08-07]
+        await markSessionSaved(sid, tally.total);
+        setDownloaded(true);
+        onDownloadComplete(sid);
       } else {
-        data.file("export_error.txt",
-          `Backend data unavailable (${dataError || "not reachable"}).\n` +
-          "This ZIP contains video only — pull/rescue CSVs from the Recovery screen.\n");
+        await legacyDownload(m, sid, prefix);
+        setDownloaded(true);
+        onDownloadComplete(sid);
       }
-
-      const cameras = videoResults.map(r => ({
-        session_id: sid,
-        cam_id: r.camId,
-        device_id: r.deviceId,
-        browser_label: r.label,
-        mime: r.mime,
-        file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
-        started_at_ms: r.startedAtMs,
-        flash_at_ms: r.flashAtMs,
-        stopped_at_ms: r.stoppedAtMs,
-      }));
-      zip.file("cameras.json", JSON.stringify({ session_id: sid, cameras }, null, 2));
-      if (missed.length > 0) zip.file("missed_cameras.txt", missed.join("\n") + "\n");
-
-      const blob = await zip.generateAsync(
-        { type: "blob", compression: "STORE", streamFiles: true },
-        meta => setDownloadProgress(`Compressing… ${Math.round(meta.percent)}%`),
-      );
-      _downloadBlob(blob, `${prefix}.zip`);
-      setDownloadProgress("");
-      setDownloaded(true);
-      onDownloadComplete(sid);
     } catch (e) {
       setDownloadError(`Download failed: ${e}`);
     } finally {
@@ -380,6 +498,12 @@ export default function EndSessionModal({
 
         {/* Download */}
         <div className="shrink-0 mt-auto pt-1 border-t border-white/10 flex flex-col gap-2">
+          {!canStreamSave() && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300">
+              This browser lacks the File System Access API — downloads fall back to an
+              in-memory ZIP that may fail on long sessions.
+            </div>
+          )}
           {!downloaded && (
             <p className="text-[10px] text-gray-600 text-center">
               This screen stays open until a download has completed.
