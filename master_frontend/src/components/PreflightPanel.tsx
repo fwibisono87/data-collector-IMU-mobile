@@ -8,7 +8,7 @@ interface Check { label: string; status: CheckStatus; detail?: string; }
 
 // Minimum distinct acc readings/sec each ONLINE device must sustain to pass preflight.
 // 100 Hz nominal × 90% — see session_manager note_sample (callbacks vs distinct values).
-const SAMPLING_RATE_MIN_HZ = 90;
+export const SAMPLING_RATE_MIN_HZ = 90;
 
 function buildChecks(
   isWsConnected: boolean,

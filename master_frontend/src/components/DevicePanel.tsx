@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef } from "react";
 import type { DeviceInfo } from "@/lib/ws_client";
+import { SAMPLING_RATE_MIN_HZ } from "@/components/PreflightPanel";
 
 interface Sample { acc: number[]; gyro: number[]; ts: number }
 
@@ -107,6 +108,14 @@ export default function DevicePanel({ devices, quorum, liveSamples, isRecording 
                 <span className={d.streaming ? "text-green-400" : "text-gray-500"}>
                   {d.packets?.toLocaleString() ?? 0} pkts · {(d.rate_hz ?? 0).toFixed(0)} Hz
                 </span>
+                {/* True rate = DISTINCT accelerometer readings per second. rate_hz counts
+                    packets, which stays at 100 even when the OS re-delivers each hardware
+                    sample twice — the failure that silently halved two devices' data. */}
+                {d.true_hz !== undefined && d.true_hz < SAMPLING_RATE_MIN_HZ && (d.packets ?? 0) > 0 && (
+                  <span className="text-red-400 font-bold tabular-nums">
+                    ⚠ {d.true_hz.toFixed(0)} Hz real
+                  </span>
+                )}
                 {(d.offline_intervals ?? 0) > 0 && (
                   <span className="text-orange-400">⚠ {d.offline_intervals} gap(s)</span>
                 )}
@@ -116,6 +125,13 @@ export default function DevicePanel({ devices, quorum, liveSamples, isRecording 
               </div>
               {isRecording && d.is_online && d.streaming === false && (
                 <div className="mt-1 text-xs text-red-400 font-bold">⚠ no data</div>
+              )}
+              {/* Build identity. Three handsets ran a stale pre-v2 build for days without
+                  anything reporting it, leaving every hardware-timestamp column empty. */}
+              {d.app_version && (
+                <div className="mt-0.5 text-[10px] text-gray-600 truncate">
+                  v{d.app_version}{d.device_model ? ` · ${d.device_model}` : ""}
+                </div>
               )}
             </div>
           );

@@ -416,6 +416,11 @@ def _state_snapshot() -> dict:
                 "role": d.device_role,
                 "is_online": d.control_ws is not None,
                 "packets": d.packets_received,
+                # Surfaced so a stale handset build is visible on the dashboard. Three phones
+                # ran a pre-v2 build for days on 2026-08-07, leaving acc_ts_ms/sample_kind
+                # empty on every row, and nothing anywhere reported it.
+                "app_version": d.app_version,
+                "device_model": d.device_model,
                 "substate": d.substate,
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),

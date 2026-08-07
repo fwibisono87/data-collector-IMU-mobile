@@ -16,6 +16,8 @@ export interface DeviceInfo {
   rate_hz?: number;
   true_hz?: number;
   held_pct?: number;
+  app_version?: string;
+  device_model?: string;
   streaming?: boolean;
 }
 
