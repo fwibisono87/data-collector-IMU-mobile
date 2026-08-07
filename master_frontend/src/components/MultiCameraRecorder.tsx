@@ -1,11 +1,11 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
-import { saveChunk, loadChunks, clearConfirmedChunks } from "@/lib/video_backup";
-import { finalizeWebm } from "@/lib/webm_seekable";
+import { saveChunk, clearConfirmedChunks } from "@/lib/video_backup";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
 export interface CameraResult {
-  camId: string; deviceId: string; label: string; blob: Blob; mime: string;
+  camId: string; deviceId: string; label: string; mime: string;
+  sessionId: string; chunkCount: number;
   startedAtMs: number; flashAtMs: number; stoppedAtMs: number;
 }
 export interface CameraStatus { ready: number; total: number; ok: boolean; }
@@ -24,8 +24,10 @@ const TIMESLICE_MS = 1000;
 // Prefer WebM (VP9→VP8). Chrome/Edge MediaRecorder emits *fragmented* MP4 that desktop
 // players (Windows Media Player, QuickTime) can't open, even though it plays in-browser —
 // so MP4 is deliberately the last resort, kept only so a WebM-less browser (Safari) still
-// records rather than failing. WebM output gets its duration patched on stop (see stopFn),
-// making it fully seekable in VLC / browsers / modern players. Video-only: no audio codec.
+// records rather than failing. The raw chunks are kept in IndexedDB and streamed straight to
+// disk by the export modal (see video_backup.streamChunks) — no in-memory reassembly. The
+// recorder simply reports the codec it used (mimeType) so the export can name the file.
+// Video-only: no audio codec.
 const CODEC_PRIORITY = [
   "video/webm;codecs=vp9",
   "video/webm;codecs=vp8",
@@ -153,26 +155,21 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
   const stopFn = async (): Promise<CameraResult | null> => {
     const recorder = mediaRef.current;
     if (!recorder || recorder.state === "inactive") return null;
+    const mime = recorder.mimeType || "";
     await new Promise<void>(resolve => { recorder.onstop = () => resolve(); recorder.stop(); });
     const stoppedAtMs = Date.now();
     setIsRecording(false);
-    // stop() fires a final dataavailable before onstop; wait for every chunk write to commit
-    // so the reassembled blob includes the tail (fixes the dropped last second).
+    // stop() fires a final dataavailable before onstop. Await every chunk write to commit
+    // before reporting the count, so the tail is flushed to IndexedDB (fixes the dropped
+    // last second). We no longer reassemble the footage here — the raw chunks stay in
+    // IndexedDB and are streamed straight to disk by the export modal (streamChunks),
+    // avoiding the two full-heap copies that exhausted the renderer.
     await Promise.all(pendingSavesRef.current);
-    const chunks = await loadChunks(sessionRef.current, camId);
-    if (chunks.length === 0) return null;
-    // MediaRecorder writes WebM as a live stream with no header duration/seek info → players
-    // can't determine length and the tail is often misreported as broken. Rewrite the metadata
-    // (SeekHead/Info/Cues) via the battle-tested ts-ebml finalizer so the file is fully playable
-    // and seekable, preserving every cluster byte. MP4 fallback (Safari) is left untouched. The
-    // finalizer always falls back to the raw concatenation rather than losing footage.
-    const isWebm = (chunks[0].type || "video/webm").includes("webm");
-    const blob = isWebm
-      ? (await finalizeWebm(chunks)).blob
-      : new Blob(chunks, { type: chunks[0].type || "video/webm" });
+    const chunkCount = chunkIndexRef.current;
+    if (chunkCount === 0) return null;
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted
     // download. They are GC'd at the start of the NEXT session (see startRecording). [Finding A]
-    return { camId, deviceId, label, blob, mime: blob.type,
+    return { camId, deviceId, label, mime, sessionId: sessionRef.current, chunkCount,
              startedAtMs: startedAtRef.current, flashAtMs: flashAtRef.current, stoppedAtMs };
   };
   const startRef = useRef(startFn); startRef.current = startFn;
