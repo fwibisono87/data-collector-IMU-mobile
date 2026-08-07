@@ -153,3 +153,53 @@ def test_tick_rates_handles_zero_traffic():
     assert dev.rate_hz == 0.0
     assert dev.true_hz == 0.0
     assert dev.held_pct == 0.0
+
+
+# ── Smoothed rate: what the preflight gate actually reads ────────────────────
+
+def test_true_hz_avg_smooths_a_noisy_signal():
+    """A device oscillating 80/100/80/100 must average out, not flap the gate."""
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+
+    seq = 0
+    for distinct in (80, 100, 80, 100, 90):
+        for i in range(100):
+            sm.increment_packets("DEV1")
+            # Only `distinct` unique values within this 100-packet second.
+            sm.note_sample("DEV1", (seq + (i * distinct) // 100, 0.0, 1.0))
+        seq += distinct
+        sm._tick_rates(dev)
+
+    assert dev.true_hz == 90.0, "instantaneous value is the last tick"
+    assert 88.0 <= dev.true_hz_avg <= 92.0, f"smoothed value was {dev.true_hz_avg}"
+
+
+def test_true_hz_avg_ignores_idle_ticks():
+    """Silence must not drag the average down — a connected-but-idle device is not broken."""
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+
+    for i in range(100):
+        sm.increment_packets("DEV1")
+        sm.note_sample("DEV1", (i, 0.0, 1.0))
+    sm._tick_rates(dev)
+    assert dev.true_hz_avg == 100.0
+
+    for _ in range(3):            # three seconds of no traffic at all
+        sm._tick_rates(dev)
+    assert dev.true_hz_avg == 100.0, "idle ticks must not enter the window"
+
+
+def test_true_hz_avg_window_is_bounded():
+    sm = SessionManager()
+    _register(sm, "DEV1", "chest")
+    dev = sm.get_device("DEV1")
+    for tick in range(20):
+        for i in range(100):
+            sm.increment_packets("DEV1")
+            sm.note_sample("DEV1", (tick * 100 + i, 0.0, 1.0))
+        sm._tick_rates(dev)
+    assert len(dev._true_hz_window) <= 5

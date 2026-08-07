@@ -435,6 +435,7 @@ def _state_snapshot() -> dict:
                 "offline_intervals": len(d.offline_intervals),
                 "rate_hz": round(d.rate_hz, 1),
                 "true_hz": round(d.true_hz, 1),
+                "true_hz_avg": round(d.true_hz_avg, 1),
                 "held_pct": round(d.held_pct, 1),
                 "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }

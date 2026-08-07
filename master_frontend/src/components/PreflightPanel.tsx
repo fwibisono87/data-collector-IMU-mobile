@@ -35,8 +35,17 @@ function buildChecks(
       // stream a confident 100 packets/sec while the OS re-delivers each hardware sample
       // twice — the failure that silently halved two devices on 2026-08-07.
       const label = "Sampling rate healthy";
-      const reported = onlineDevices.filter(d => typeof d.true_hz === "number");
-      const offenders = reported.filter(d => (d.true_hz as number) < SAMPLING_RATE_MIN_HZ);
+      // Judge on the smoothed average, not the instantaneous tick: a single 1 s bucket swings
+      // 79→100→84 on a healthy device purely from where the tick boundary lands.
+      // A device that is connected but not yet streaming reports 0 Hz with 0 packets. That is
+      // "hasn't started", not "broken" — counting it as an offender made every fresh
+      // connection show a red FAIL at 0 Hz.
+      const streaming = onlineDevices.filter(
+        d => typeof d.true_hz_avg === "number" && (d.packets ?? 0) > 0,
+      );
+      const offenders = streaming.filter(
+        d => (d.true_hz_avg as number) < SAMPLING_RATE_MIN_HZ,
+      );
 
       // A real offender outranks incomplete reporting: name it immediately rather than
       // hiding a known-bad device behind "awaiting".
@@ -44,7 +53,9 @@ function buildChecks(
         return {
           label,
           status: "fail" as CheckStatus,
-          detail: offenders.map(d => `${d.role} ${(d.true_hz as number).toFixed(0)} Hz`).join(", "),
+          detail: offenders
+            .map(d => `${d.role} ${(d.true_hz_avg as number).toFixed(0)} Hz`)
+            .join(", "),
         };
       }
       // Nothing to evaluate yet, or some device has not produced its first 1 s tick. Both are
@@ -54,11 +65,11 @@ function buildChecks(
       if (onlineDevices.length === 0) {
         return { label, status: "pending" as CheckStatus, detail: "No devices online" };
       }
-      if (reported.length < onlineDevices.length) {
+      if (streaming.length < onlineDevices.length) {
         return {
           label,
           status: "pending" as CheckStatus,
-          detail: `Awaiting first rate tick (${reported.length}/${onlineDevices.length})`,
+          detail: `Awaiting telemetry (${streaming.length}/${onlineDevices.length} streaming)`,
         };
       }
       return { label, status: "pass" as CheckStatus, detail: `all ≥ ${SAMPLING_RATE_MIN_HZ} Hz` };

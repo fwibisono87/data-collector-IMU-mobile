@@ -23,6 +23,7 @@ from .integrity_validator import IntegrityValidator
 logger = logging.getLogger(__name__)
 
 _DEVICE_OFFLINE_SEC = 8.0   # matches Flutter _pongTimeoutSec in websocket_client.dart
+_TRUE_HZ_WINDOW = 5         # seconds of true_hz history averaged for the preflight gate
 _COORDINATED_START_LEAD_MS = 500   # ms ahead of now for scheduled_start
 
 
@@ -76,8 +77,14 @@ class DeviceInfo:
     last_acc: tuple | None = None        # last (acc_x, acc_y, acc_z) seen
     acc_changes: int = 0                 # cumulative count of DISTINCT acc readings
     _acc_changes_prev_tick: int = 0
-    true_hz: float = 0.0                 # distinct acc readings per second
+    true_hz: float = 0.0                 # distinct acc readings in the LAST 1 s tick
     held_pct: float = 0.0                # % of packets in the last tick that were repeats
+    # Rolling window of recent true_hz ticks. The instantaneous figure is far too noisy to
+    # gate on — a single 1 s bucket swings 79→100→84 on a healthy device because tick
+    # boundaries slice packet arrival unevenly. Preflight reads the smoothed value; the
+    # device card shows the instantaneous one.
+    _true_hz_window: list = field(default_factory=list)
+    true_hz_avg: float = 0.0
 
     @property
     def is_alive(self) -> bool:
@@ -127,6 +134,8 @@ class SessionManager:
         preserved_acc_prev = existing._acc_changes_prev_tick if existing else 0
         preserved_true_hz = existing.true_hz if existing else 0.0
         preserved_held_pct = existing.held_pct if existing else 0.0
+        preserved_true_avg = existing.true_hz_avg if existing else 0.0
+        preserved_true_window = list(existing._true_hz_window) if existing else []
 
         self._devices[device_id] = DeviceInfo(
             device_id=device_id,
@@ -144,6 +153,8 @@ class SessionManager:
             _acc_changes_prev_tick=preserved_acc_prev,
             true_hz=preserved_true_hz,
             held_pct=preserved_held_pct,
+            true_hz_avg=preserved_true_avg,
+            _true_hz_window=preserved_true_window,
         )
         logger.info("Device registered: %s role=%s", device_id[:8], role)
         return None
@@ -264,6 +275,9 @@ class SessionManager:
             dev._acc_changes_prev_tick = 0
             dev.true_hz = 0.0
             dev.held_pct = 0.0
+            # Keep the smoothed rate across the START boundary: it was measured seconds ago
+            # on the same hardware and is what preflight just approved. Zeroing it would make
+            # every device look broken for the first 5 s of every recording.
 
         await self._transition(SessionState.RECORDING)
         await self._save_state()
@@ -437,6 +451,16 @@ class SessionManager:
             100.0 * (1 - dev.true_hz / dev.rate_hz) if dev.rate_hz > 0 else 0.0
         )
         dev._acc_changes_prev_tick = dev.acc_changes
+
+        # Smooth only while the device is actually streaming. Folding idle zeros into the
+        # window would drag the average down for seconds after a device starts, which reads
+        # as a failing sensor rather than one that has just connected.
+        if dev.rate_hz > 0:
+            dev._true_hz_window.append(dev.true_hz)
+            del dev._true_hz_window[:-_TRUE_HZ_WINDOW]
+            dev.true_hz_avg = sum(dev._true_hz_window) / len(dev._true_hz_window)
+        elif not dev._true_hz_window:
+            dev.true_hz_avg = 0.0
 
     # ── Offline monitor ──────────────────────────────────────────────────────
 

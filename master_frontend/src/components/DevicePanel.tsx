@@ -111,9 +111,16 @@ export default function DevicePanel({ devices, quorum, liveSamples, isRecording 
                 {/* True rate = DISTINCT accelerometer readings per second. rate_hz counts
                     packets, which stays at 100 even when the OS re-delivers each hardware
                     sample twice — the failure that silently halved two devices' data. */}
-                {d.true_hz !== undefined && d.true_hz < SAMPLING_RATE_MIN_HZ && (d.packets ?? 0) > 0 && (
-                  <span className="text-red-400 font-bold tabular-nums">
-                    ⚠ {d.true_hz.toFixed(0)} Hz real
+                {d.true_hz_avg !== undefined && (d.packets ?? 0) > 0 && (
+                  <span
+                    className={`tabular-nums ${
+                      d.true_hz_avg < SAMPLING_RATE_MIN_HZ
+                        ? "text-red-400 font-bold"
+                        : "text-gray-500"
+                    }`}
+                    title="Distinct sensor readings per second, averaged over 5 s. Lower than the packet rate means the HAL is repeating samples."
+                  >
+                    {d.true_hz_avg.toFixed(0)} Hz real
                   </span>
                 )}
                 {(d.offline_intervals ?? 0) > 0 && (

@@ -15,6 +15,7 @@ export interface DeviceInfo {
   offline_intervals?: number;
   rate_hz?: number;
   true_hz?: number;
+  true_hz_avg?: number;
   held_pct?: number;
   app_version?: string;
   device_model?: string;
