@@ -30,6 +30,7 @@ from .audit_logger import audit
 from .session_manager import SessionState, session_manager
 from .upload import router as recovery_router
 from .export import router as export_router
+from .cameras import router as cameras_router
 from .ws_handler import router as ws_router, _live_broadcaster_loop
 
 
@@ -87,6 +88,7 @@ app.add_middleware(
 app.include_router(ws_router)
 app.include_router(recovery_router)
 app.include_router(export_router)
+app.include_router(cameras_router)
 
 
 @app.get("/health")

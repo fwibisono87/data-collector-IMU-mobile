@@ -91,6 +91,10 @@ def _classify(name: str) -> str:
         return "rescue"
     if name.endswith("_sensor_data.csv"):
         return "main"
+    if name.endswith("_cameras.json"):
+        return "cameras"
+    if name.endswith("_video_sync.webm") or name.endswith("_video_sync.mp4"):
+        return "video"
     if name.endswith(".csv"):
         return "csv"
     return "other"
