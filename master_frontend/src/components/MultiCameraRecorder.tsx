@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
-import { saveChunk, loadChunks, clearAllChunks } from "@/lib/video_backup";
+import { saveChunk, loadChunks, clearConfirmedChunks } from "@/lib/video_backup";
 import { finalizeWebm } from "@/lib/webm_seekable";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
@@ -347,7 +347,14 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
       async startRecording(sessionId: string) {
         // Deferred-clear point: free the PREVIOUS session's backups now that a new session is
         // starting. Must finish before any tile starts writing chunks. [Finding A]
-        await clearAllChunks();
+        //
+        // Only sessions whose footage was CONFIRMED written to disk are dropped. Unsaved
+        // footage is retained and surfaced by the recovery screen — wiping it here is what
+        // would have made the 2026-08-07 crash unrecoverable.
+        const { kept } = await clearConfirmedChunks();
+        if (kept.length > 0) {
+          console.warn(`video_backup: retained unsaved footage for session(s) ${kept.join(", ")}`);
+        }
         await Promise.all(Array.from(tilesRef.current.values()).map(t => t.start(sessionId)));
       },
       async stopRecording(): Promise<StopOutcome> {
