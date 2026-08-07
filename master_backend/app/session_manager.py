@@ -102,6 +102,7 @@ class SessionManager:
         self._devices: dict[str, DeviceInfo] = {}
         self._state_path = Path(os.getenv("SSD_PATH", "./data")) / ".sessions"
         self._offline_check_task: asyncio.Task | None = None
+        self._recording_started_at: float = 0.0
 
     # ── Device registry ──────────────────────────────────────────────────────
 
@@ -256,13 +257,19 @@ class SessionManager:
         self.scheduled_start_ms = int(time.time() * 1000) + _COORDINATED_START_LEAD_MS
 
         device_roles = {d.device_id: d.device_role for d in self.online_devices}
+        # Preflight's smoothed measurement names the file. It is provisional — close_session
+        # re-tiers from the session-wide average — but it means a file is never unlabelled,
+        # not even if the backend dies mid-session.
+        device_rates = {d.device_id: d.true_hz_avg for d in self.online_devices}
         await io_manager.open_session(
             session_id=self.session_id,
             subject_name=self.subject_name,
             session_tag=self.session_tag,
             operator=self.operator,
             device_roles=device_roles,
+            device_rates=device_rates,
         )
+        self._recording_started_at = time.monotonic()
         dedup.clear()
 
         # Reset per-device session state
@@ -307,7 +314,7 @@ class SessionManager:
                 dev.offline_intervals[-1]["end_ms"] = int(time.time() * 1000)
             dev.substate = DeviceSubstate.FINALIZED
 
-        file_results = await io_manager.close_session()
+        file_results = await io_manager.close_session(self._session_true_hz())
         await audit.log("INFO", "session_finalizing", {"reason": reason, "files": file_results})
 
         await self._transition(SessionState.VALIDATING)
@@ -431,6 +438,18 @@ class SessionManager:
             except Exception:
                 pass
         return results
+
+    def _session_true_hz(self) -> dict[str, float]:
+        """Session-wide average of DISTINCT readings per second, per device.
+
+        `acc_changes` counts distinct accelerometer readings and is reset at start_recording,
+        so dividing by the elapsed recording time gives the whole-session rate — the same
+        quantity sampling_analysis derives from the finished CSV, without re-reading it.
+        """
+        elapsed = time.monotonic() - self._recording_started_at
+        if elapsed <= 0:
+            return {}
+        return {d.device_id: d.acc_changes / elapsed for d in self._devices.values()}
 
     @staticmethod
     def _tick_rates(dev: "DeviceInfo") -> None:

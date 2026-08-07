@@ -122,7 +122,7 @@ async def telemetry_ws(websocket: WebSocket) -> None:
             if not io_manager.has_writer(device_id):
                 dev = session_manager.get_device(device_id)
                 if dev is not None:
-                    await io_manager.ensure_writer(device_id, dev.device_role)
+                    await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
             session_manager.increment_packets(device_id)
             session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
             session_manager.mark_first_packet(device_id, pkt.timestamp_ms)

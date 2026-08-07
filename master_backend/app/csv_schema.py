@@ -41,6 +41,52 @@ COL_SAMPLE_KIND = 13
 
 _METADATA_RE = re.compile(r"(\w+)=([^,\s]+)")
 
+# ── Sampling tier ────────────────────────────────────────────────────────────
+#
+# The rate a session ACTUALLY attained is a property of the handset, not a setting: the
+# 2510DRA23E is dual-sourced, and the Bosch bmi3xy units deliver ~80 Hz of distinct readings
+# against a 100 Hz request while the TDK icm4n607 units deliver ~99 Hz. Encoding the attained
+# level in the filename lets an analyst see, and glob, what they are working with.
+#
+# Tiers are a coarse ladder rather than the raw figure: the raw value drifts session to
+# session on the same device (79-88), so raw names would never group. The precise number stays
+# in <session>_sampling.json and the integrity report.
+#
+# Floor semantics with a 5% grace: a file is only labelled 100hz if it genuinely sustained
+# ~100. 99 -> 100hz (within grace), 88 -> 75hz, 84 -> 75hz, 50 -> 50hz. Never round up — the
+# label must not claim more than the data delivered.
+SAMPLING_TIERS = (100, 75, 50, 25)
+_TIER_GRACE = 0.95
+_TIER_RE = re.compile(r"_(?:\d+|unk)hz$")
+
+
+def rate_tier(hz: float) -> int:
+    """Highest tier this measured rate qualifies for, or 0 if below the ladder."""
+    try:
+        value = float(hz)
+    except (TypeError, ValueError):
+        return 0
+    for tier in SAMPLING_TIERS:
+        if value >= tier * _TIER_GRACE:
+            return tier
+    return 0
+
+
+def tier_token(hz: float) -> str:
+    """Filename token for a measured rate: '100hz', '75hz', ... or 'unkhz'."""
+    tier = rate_tier(hz)
+    return f"{tier}hz" if tier else "unkhz"
+
+
+def strip_tier_token(stem: str) -> str:
+    """Remove a trailing sampling-tier token from a filename stem.
+
+    Every filename-to-role parser must call this, otherwise a role reads as 'waist_75hz' and
+    per-role consolidation buckets the same physical device separately each time its attained
+    rate shifts a tier.
+    """
+    return _TIER_RE.sub("", stem)
+
 
 def is_header_line(line: str) -> bool:
     """Return True if the line is a CSV header of ANY schema version.

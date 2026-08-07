@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from .audit_logger import audit
-from .csv_schema import parse_row
+from .csv_schema import parse_row, strip_tier_token
 from .upload import (
     _session_dir as _recovery_dir,
     _slug,
@@ -118,8 +118,11 @@ def _role_from_name(name: str, session_id: str) -> str:
         ".csv",
     ):
         if stem.endswith(suffix):
-            return stem[: -len(suffix)]
-    return stem[:-4] if stem.endswith(".csv") else stem
+            # strip_tier_token: names carry an attained-rate token (<role>_75hz_sensor_data.csv)
+            # since 2026-08-07. Without removing it the same physical device buckets separately
+            # each time its measured rate crosses a tier boundary.
+            return strip_tier_token(stem[: -len(suffix)])
+    return strip_tier_token(stem[:-4] if stem.endswith(".csv") else stem)
 
 
 def _recovery_role(info: dict) -> str:

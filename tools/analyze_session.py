@@ -30,7 +30,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from master_backend.app.csv_schema import parse_metadata_line, parse_row  # noqa: E402
+from master_backend.app.csv_schema import (  # noqa: E402
+    parse_metadata_line,
+    parse_row,
+    strip_tier_token,
+)
 from master_backend.app.sampling_analysis import (  # noqa: E402
     DEFAULT_THRESHOLDS,
     analyse_device,
@@ -58,7 +62,9 @@ def _identity_from_filename(path: Path) -> tuple:
         return "", "", kind
     parts = prefix.split("_")
     session_id = parts[0] if parts else ""
-    role = "_".join(parts[1:]) if len(parts) > 1 else ""
+    # Names carry an attained-sampling-rate token (<role>_75hz_sensor_data.csv) since
+    # 2026-08-07; strip it so the role stays comparable across sessions.
+    role = strip_tier_token("_".join(parts[1:])) if len(parts) > 1 else ""
     return session_id, role, kind
 
 

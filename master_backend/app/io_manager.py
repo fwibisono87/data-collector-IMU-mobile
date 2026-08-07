@@ -14,7 +14,12 @@ from pathlib import Path
 import aiofiles
 
 from .audit_logger import audit
-from .csv_schema import CSV_HEADER as _CSV_HEADER, metadata_line
+from .csv_schema import (
+    CSV_HEADER as _CSV_HEADER,
+    metadata_line,
+    strip_tier_token,
+    tier_token,
+)
 from master_backend.proto.sensor_packet import SensorPacket
 
 logger = logging.getLogger(__name__)
@@ -99,6 +104,20 @@ def _format_row(pkt: SensorPacket, label_id: int, label_name: str) -> str:
     )
 
 
+def _retier_name(name: str, tier: str) -> str:
+    """Swap the sampling-tier token in a filename for `tier`.
+
+    Operates on the token immediately before the known suffix, so
+    `<sid>_<role>_50hz_sensor_data.csv` -> `<sid>_<role>_75hz_sensor_data.csv` and the role is
+    left untouched even when it contains underscores (e.g. thigh_right).
+    """
+    for suffix in ("_sensor_data_late.csv", "_sensor_data_rescue.csv", "_sensor_data.csv"):
+        if name.endswith(suffix):
+            stem = name[: -len(suffix)]
+            return f"{strip_tier_token(stem)}_{tier}{suffix}"
+    return name
+
+
 def _sort_rows_by_timestamp(path: Path) -> dict:
     """Restore monotonic time order.
 
@@ -143,6 +162,9 @@ class IoManager:
         self._metadata_line: str = ""
         self._session_open: bool = False
         self._dropped_no_writer: dict[str, int] = {}
+        # device_id -> sampling-tier token currently reflected in that device's filename.
+        # Kept past close_session so late-delivery sidecars inherit the same tier.
+        self._device_tiers: dict[str, str] = {}
 
         # Label timeline: applied_at_ms ascending, parallel value list (plan D14 / T16).
         self._label_ts: list[int] = []
@@ -198,8 +220,13 @@ class IoManager:
     def dropped_no_writer(self, device_id: str) -> int:
         return self._dropped_no_writer.get(device_id, 0)
 
-    async def _open_writer_for(self, device_id: str, role: str) -> None:
-        fname = f"{self._session_id}_{role}_sensor_data.csv"
+    async def _open_writer_for(self, device_id: str, role: str, true_hz: float = 0.0) -> None:
+        # Named from the rate preflight just measured. close_session() renames it if the
+        # session-wide average lands in a different tier, so the name is provisional until
+        # then but never absent.
+        tier = tier_token(true_hz)
+        self._device_tiers[device_id] = tier
+        fname = f"{self._session_id}_{role}_{tier}_sensor_data.csv"
         path = self._base / fname
         writer = DeviceWriter(path, self._metadata_line)
         try:
@@ -217,7 +244,7 @@ class IoManager:
             self._rescue_writers[device_id] = rescue_writer
             await audit.log("INFO", "rescue_path_activated", {"path": str(rescue_path)})
 
-    async def ensure_writer(self, device_id: str, role: str) -> bool:
+    async def ensure_writer(self, device_id: str, role: str, true_hz: float = 0.0) -> bool:
         """Open a CSV for a device that joined (or rejoined) AFTER the session started.
 
         Without this, every packet from such a device was discarded by write_packet's
@@ -226,7 +253,7 @@ class IoManager:
         """
         if not self._session_open or self.has_writer(device_id):
             return self.has_writer(device_id)
-        await self._open_writer_for(device_id, role)
+        await self._open_writer_for(device_id, role, true_hz)
         await audit.log("WARN", "late_writer_created",
                         {"device_id": device_id, "role": role, "session_id": self._session_id})
         return self.has_writer(device_id)
@@ -238,6 +265,7 @@ class IoManager:
         session_tag: str,
         operator: str,
         device_roles: dict[str, str],  # device_id -> role
+        device_rates: dict[str, float] | None = None,  # device_id -> preflight true_hz
     ) -> None:
         # A new session starting while a previous late-delivery window is still open must
         # not leak its file handles or silently drop the pending summary (plan R7).
@@ -255,8 +283,9 @@ class IoManager:
         self._label_ts = [int(time.time() * 1000)]
         self._label_val = [(_DEFAULT_LABEL_ID, _DEFAULT_LABEL_NAME)]
 
+        rates = device_rates or {}
         for device_id, role in device_roles.items():
-            await self._open_writer_for(device_id, role)
+            await self._open_writer_for(device_id, role, rates.get(device_id, 0.0))
 
     async def write_packet(self, pkt: SensorPacket) -> None:
         writer = self._writers.get(pkt.device_id) or self._rescue_writers.get(pkt.device_id)
@@ -285,7 +314,10 @@ class IoManager:
             return
         writer = self._late_writers.get(pkt.device_id)
         if writer is None:
-            path = self._late_base / f"{self._late_session_id}_{role}_sensor_data_late.csv"
+            # Inherit the main file's final tier so a session's artifacts glob together.
+            tier = self._device_tiers.get(pkt.device_id, "unkhz")
+            path = (self._late_base
+                    / f"{self._late_session_id}_{role}_{tier}_sensor_data_late.csv")
             writer = DeviceWriter(path, self._late_metadata + ",late_delivery=1")
             await writer.open(append_if_exists=True)
             self._late_writers[pkt.device_id] = writer
@@ -295,10 +327,41 @@ class IoManager:
         await writer.write_row(_format_row(pkt, *self.label_at(pkt.timestamp_ms)))
         self._late_rows[pkt.device_id] = self._late_rows.get(pkt.device_id, 0) + 1
 
-    async def close_session(self) -> dict:
+    async def close_session(self, device_rates: dict[str, float] | None = None) -> dict:
+        """Close every writer, then correct each filename's sampling tier.
+
+        `device_rates` is the session-wide average of DISTINCT readings per second per device.
+        The name written at open came from preflight, which is a few seconds of measurement;
+        this is the whole session, so it wins.
+        """
         results = {}
         for device_id, writer in {**self._writers, **self._rescue_writers}.items():
             results[device_id] = await writer.close()
+
+        # Rename only after every file is flushed, fsynced and closed. Failure to rename is
+        # logged and swallowed: a file under the provisional name is complete and correct
+        # data, and losing it to a rename error would be far worse than a stale label.
+        rates = device_rates or {}
+        for device_id, result in results.items():
+            final = tier_token(rates.get(device_id, 0.0))
+            old = Path(result["path"])
+            if self._device_tiers.get(device_id) == final or not old.exists():
+                self._device_tiers[device_id] = final
+                continue
+            new = old.with_name(_retier_name(old.name, final))
+            try:
+                os.replace(old, new)          # atomic within a filesystem
+                result["path"] = str(new)     # downstream (validator, manifest) follows this
+                result["retiered_from"] = old.name
+                await audit.log("INFO", "csv_retiered", {
+                    "device_id": device_id, "from": old.name, "to": new.name,
+                    "session_avg_hz": round(rates.get(device_id, 0.0), 2),
+                })
+            except OSError as exc:
+                await audit.log("ERROR", "csv_retier_failed", {
+                    "device_id": device_id, "path": str(old), "error": str(exc),
+                })
+            self._device_tiers[device_id] = final
 
         # Arm the late-delivery window: a phone that reconnects within LATE_ACCEPT_SEC of
         # STOP still gets its buffered tail written, to a sidecar (plan DD-4).
