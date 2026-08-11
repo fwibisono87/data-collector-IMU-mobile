@@ -180,3 +180,39 @@ def test_half_rate_device_with_offline_intervals_stays_fail(tmp_path: Path, run_
     assert report["status"] == "FAIL"
     assert any("true rate" in r for r in device["reasons"])
     assert any("offline" in r for r in device["reasons"])
+
+
+def test_all_devices_completed_reflects_actual_rows(tmp_path: Path, run_validator):
+    """The flag must read file_results' "rows" key, not "row_count".
+
+    io_manager.close_session() returns {path, rows, sha256, reordered}. Reading "row_count"
+    defaulted to 0 for every device, so a session where all three devices wrote 103k rows
+    still reported all_devices_completed=False (observed 2026-08-11).
+    """
+    csv1 = _write_csv(tmp_path / "s_chest_sensor_data.csv", _clean_rows("DEV1"))
+    csv2 = _write_csv(tmp_path / "s_waist_sensor_data.csv", _clean_rows("DEV2"))
+    devices = [_device("DEV1", first_packet_ts=1000), _device("DEV2", first_packet_ts=1000)]
+
+    report = run_validator("s", {"DEV1": csv1, "DEV2": csv2}, devices, scheduled_start_ms=900)
+
+    assert report["cross_device_checks"]["all_devices_completed"] is True
+
+
+def test_all_devices_completed_false_when_a_device_wrote_nothing(tmp_path: Path, monkeypatch):
+    """Still False when a device genuinely produced no rows — the flag must stay meaningful."""
+    monkeypatch.setattr(iv_mod, "io_manager", _FakeIo())
+    csv1 = _write_csv(tmp_path / "s_chest_sensor_data.csv", _clean_rows("DEV1"))
+    empty = tmp_path / "s_waist_sensor_data.csv"
+    empty.write_text(HEADER + "\n", encoding="utf-8")
+
+    report = asyncio.run(iv_mod.IntegrityValidator().run(
+        "s",
+        {
+            "DEV1": {"path": str(csv1), "rows": 100, "sha256": "a", "reordered": 0},
+            "DEV2": {"path": str(empty), "rows": 0, "sha256": "b", "reordered": 0},
+        },
+        [_device("DEV1", first_packet_ts=1000), _device("DEV2", first_packet_ts=1000)],
+        900,
+    ))
+
+    assert report["cross_device_checks"]["all_devices_completed"] is False

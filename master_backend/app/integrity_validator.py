@@ -184,8 +184,12 @@ class IntegrityValidator:
             "start_drift_ok": True,
             "scheduled_start_ms": scheduled_start_ms,
             "device_count": len(file_results),
+            # file_results values come from io_manager.close_session(), whose keys are
+            # {path, rows, sha256, reordered} — "rows", not "row_count". Reading the wrong key
+            # made this default to 0 for every device, so the flag reported False even for a
+            # session where all three devices wrote 103k rows (2026-08-11, Grace_Testing_Sesi_Pagi).
             "all_devices_completed": all(
-                r.get("row_count", 0) > 0 for r in file_results.values()
+                r.get("rows", 0) > 0 for r in file_results.values()
             ),
             "missing_devices_intervals": [
                 {
