@@ -253,6 +253,18 @@ class SessionManager:
         self.session_tag = payload.get("session_tag", "Session")
         self.operator = payload.get("operator", "Unknown")
 
+        # Which preflight checks were red when the operator pressed START. A failing check
+        # warns but does not block (a field session must never be stranded by a judgement
+        # call), so the session has to carry its own provenance: the audit log records it,
+        # and open_session stamps it into the CSV metadata line. A half-rate recording is
+        # then self-documenting instead of looking indistinguishable from a clean one.
+        preflight_failed = [str(x) for x in (payload.get("preflight_failed") or [])]
+        if preflight_failed:
+            await audit.log("WARN", "preflight_failed_at_start", {
+                "session_id": self.session_id,
+                "failed_checks": preflight_failed,
+            })
+
         # Coordinated start: all devices start at the same ms (CLAUDE.md §22.5)
         self.scheduled_start_ms = int(time.time() * 1000) + _COORDINATED_START_LEAD_MS
 
@@ -268,6 +280,7 @@ class SessionManager:
             operator=self.operator,
             device_roles=device_roles,
             device_rates=device_rates,
+            preflight_failed=preflight_failed,
         )
         self._recording_started_at = time.monotonic()
         dedup.clear()

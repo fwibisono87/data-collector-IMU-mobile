@@ -266,6 +266,7 @@ class IoManager:
         operator: str,
         device_roles: dict[str, str],  # device_id -> role
         device_rates: dict[str, float] | None = None,  # device_id -> preflight true_hz
+        preflight_failed: list[str] | None = None,     # preflight checks red at START
     ) -> None:
         # A new session starting while a previous late-delivery window is still open must
         # not leak its file handles or silently drop the pending summary (plan R7).
@@ -274,8 +275,11 @@ class IoManager:
         self._session_id = session_id
         folder_name = f"{subject_name}_{session_tag}".replace(" ", "_")
         self._base = self._ssd_path / "Data_Riset_IMU" / folder_name
+        # A session started over a red preflight records that fact in its own data file, so an
+        # analyst reading the CSV months later sees it without needing the audit log.
         self._metadata_line = metadata_line(
-            session_id=session_id, subject=subject_name, operator=operator
+            session_id=session_id, subject=subject_name, operator=operator,
+            extra={"preflight_failed": ";".join(preflight_failed)} if preflight_failed else None,
         )
         self._session_open = True
         self._dropped_no_writer.clear()

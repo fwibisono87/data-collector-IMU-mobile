@@ -98,8 +98,19 @@ class WsClient {
     this.connListeners.forEach(l => l(connected));
   }
 
-  async startSession(subject: string, tag: string, operator: string): Promise<AckMsg> {
-    return this._sendWithAck("START_SESSION", { subject_name: subject, session_tag: tag, operator });
+  /**
+   * @param preflightFailed labels of preflight checks that were red at START. A failing check
+   * warns rather than blocks, so the session must carry its own provenance: the backend
+   * audit-logs these and stamps them into the CSV metadata line, making a substandard
+   * recording self-documenting instead of indistinguishable from a clean one.
+   */
+  async startSession(
+    subject: string, tag: string, operator: string, preflightFailed: string[] = [],
+  ): Promise<AckMsg> {
+    return this._sendWithAck("START_SESSION", {
+      subject_name: subject, session_tag: tag, operator,
+      preflight_failed: preflightFailed,
+    });
   }
 
   async stopSession(reason = "operator_stop"): Promise<AckMsg> {

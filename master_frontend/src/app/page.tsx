@@ -249,7 +249,10 @@ export default function Home() {
     setActiveLabel(0);
     setLabelError("");
     try {
-      await wsClient.startSession(subject, sessionTag, operator);
+      await wsClient.startSession(
+        subject, sessionTag, operator,
+        preflightFailures.map(c => (c.detail ? `${c.label}: ${c.detail}` : c.label)),
+      );
       // Webcam start is triggered by STATE_UPDATE with scheduled_start_ms
       // for coordinated sync with mobile devices (CLAUDE.md §22.5)
     } catch (e) {

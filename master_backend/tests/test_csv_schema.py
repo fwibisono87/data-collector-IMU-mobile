@@ -73,3 +73,28 @@ def test_parse_metadata_line():
     assert parsed["subject"] == "rabil"
     assert parsed["nominal_hz"] == "100.0"
     assert parse_metadata_line("not a comment") == {}
+
+
+def test_metadata_line_carries_preflight_failures():
+    """A session started over a red preflight documents that in its own data file.
+
+    Preflight failures warn rather than block, so without this stamp a half-rate recording is
+    indistinguishable from a clean one to anyone reading the CSV later.
+    """
+    line = metadata_line(
+        session_id="1786417387700",
+        subject="Grace Testing",
+        operator="Farhan",
+        extra={"preflight_failed": "Sampling rate healthy: chest 50 Hz"},
+    )
+    parsed = parse_metadata_line(line)
+    assert parsed["session_id"] == "1786417387700"
+    assert parsed["schema_version"] == "2"
+    # Whitespace is collapsed so the value survives the (\w+)=([^,\s]+) reader on both sides.
+    assert parsed["preflight_failed"] == "Sampling_rate_healthy:_chest_50_Hz"
+    assert parsed["subject"] == "Grace_Testing"
+
+
+def test_metadata_line_omits_preflight_key_when_clean():
+    line = metadata_line(session_id="1", subject="s", operator="o")
+    assert "preflight_failed" not in parse_metadata_line(line)
