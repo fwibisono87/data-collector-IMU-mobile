@@ -9,6 +9,7 @@ import SessionForm from "@/components/SessionForm";
 import PreflightPanel from "@/components/PreflightPanel";
 import LabelingPanel from "@/components/LabelingPanel";
 import IntegrityReport from "@/components/IntegrityReport";
+import SafeBoundary from "@/components/SafeBoundary";
 import DevicePanel from "@/components/DevicePanel";
 import AlertCenter from "@/components/AlertCenter";
 // Direct import — dynamic() breaks forwardRef so camRef.current would be null.
@@ -487,7 +488,9 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="max-h-44 overflow-y-auto">
-                  <IntegrityReport report={integrityReport as unknown as Parameters<typeof IntegrityReport>[0]["report"]} />
+                  <SafeBoundary what="integrity report">
+                    <IntegrityReport report={integrityReport as unknown as Parameters<typeof IntegrityReport>[0]["report"]} />
+                  </SafeBoundary>
                 </div>
               </div>
             )}
@@ -568,15 +571,17 @@ export default function Home() {
           The cleared video backup only happens AFTER a successful download so footage
           survives a failed/aborted download until the next session anyway (see
           video_backup.ts clearAllChunks). */}
-      <EndSessionModal
-        session={endSession}
-        videoResults={endVideoResults}
-        missed={endMissed}
-        backendIp={backendIp}
-        recheckTick={endRecheckTick}
-        onClose={() => setEndSession(null)}
-        onDownloadComplete={(sid) => { void clearChunks(sid); }}
-      />
+      <SafeBoundary what="end-of-session export dialog">
+        <EndSessionModal
+          session={endSession}
+          videoResults={endVideoResults}
+          missed={endMissed}
+          backendIp={backendIp}
+          recheckTick={endRecheckTick}
+          onClose={() => setEndSession(null)}
+          onDownloadComplete={(sid) => { void clearChunks(sid); }}
+        />
+      </SafeBoundary>
     </>
   );
 }

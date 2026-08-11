@@ -377,7 +377,13 @@ export default function EndSessionModal({
   const m = manifest;
   const isWhole = m?.whole ?? false;
   const status = m?.status ?? "NONE";
-  const totalLabels = (m?.labels_used ?? []).reduce((s, l) => s + l.row_count, 0);
+  // The manifest is server-supplied JSON typed only by an interface, so a backend that
+  // omits or renames a list crashes the render — at end of session, after the recording,
+  // right when the operator is saving. `totalLabels` already defended itself; the JSX
+  // below did not. Normalise both lists once, here.
+  const labelsUsed = Array.isArray(m?.labels_used) ? m.labels_used : [];
+  const reasons = Array.isArray(m?.reasons) ? m.reasons : [];
+  const totalLabels = labelsUsed.reduce((s, l) => s + (l?.row_count ?? 0), 0);
 
   return (
     <div
@@ -414,12 +420,12 @@ export default function EndSessionModal({
         {m && (
           <div className="shrink-0 glass-card p-2">
             <div className="text-[11px] text-gray-400 mb-1">
-              Labels used: <span className="text-cyan-300 font-bold">{m.labels_used.length}</span>{" "}
+              Labels used: <span className="text-cyan-300 font-bold">{labelsUsed.length}</span>{" "}
               ({totalLabels.toLocaleString()} labeled rows)
             </div>
             <div className="flex flex-wrap gap-1 max-h-16 overflow-y-auto">
-              {m.labels_used.length === 0 && <span className="text-[11px] text-gray-600 italic">no labeled rows</span>}
-              {m.labels_used.map(l => (
+              {labelsUsed.length === 0 && <span className="text-[11px] text-gray-600 italic">no labeled rows</span>}
+              {labelsUsed.map(l => (
                 <span
                   key={l.label_id}
                   className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 border border-accent/30 text-cyan-200 tabular-nums"
@@ -442,7 +448,7 @@ export default function EndSessionModal({
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
               <div className="text-amber-300 font-bold mb-1">Data not yet whole</div>
               <ul className="list-disc list-inside text-[11px] text-amber-200/90 space-y-0.5">
-                {(m ? m.reasons : ["session data not found on backend"]).map((r, i) => <li key={i}>{r}</li>)}
+                {(m ? reasons : ["session data not found on backend"]).map((r, i) => <li key={i}>{r}</li>)}
                 {!m && dataError && <li>{dataError}</li>}
               </ul>
               {(m?.late_pending || m?.recovery_pending) && (
