@@ -121,6 +121,30 @@ export async function postConsolidate(ip: string, sessionId: string): Promise<Co
   );
 }
 
+export interface BundleResult {
+  session_id: string;
+  path: string;
+  size: number;
+  entries: string[];
+  contains_video: boolean;
+}
+
+/**
+ * Ask the backend to write the session's data bundle to the SSD itself.
+ *
+ * The zip this dashboard builds with jszip is convenient but makes the browser load-bearing for
+ * the deliverable: on 2026-08-11 a render crash at save left the operator with nothing to hand
+ * over even though the backend had finalised perfectly. This path does not need the browser to
+ * survive, and works with the dashboard closed or on another machine.
+ */
+export async function postBundle(ip: string, sessionId: string): Promise<BundleResult> {
+  return _json<BundleResult>(
+    await fetch(`${base(ip)}/export/${encodeURIComponent(sessionId)}/bundle`, {
+      method: "POST",
+    }),
+  );
+}
+
 // ── Recovery endpoints (shared with RecoveryModal) ─────────────────────────
 
 export async function fetchRecoverySessions(

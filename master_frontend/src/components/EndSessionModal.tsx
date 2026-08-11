@@ -5,6 +5,7 @@ import {
   fetchManifest,
   fetchExportFile,
   postConsolidate,
+  postBundle,
   fetchRecoveryFile,
   isDataKind,
   type ExportManifest,
@@ -77,6 +78,26 @@ export default function EndSessionModal({
   const [downloadProgress, setDownloadProgress] = useState("");
   const [downloadError, setDownloadError] = useState("");
   const [downloaded, setDownloaded] = useState(false);
+  const [bundlePhase, setBundlePhase] = useState<"idle" | "running">("idle");
+  const [bundleResult, setBundleResult] = useState("");
+
+  const handleServerBundle = useCallback(async () => {
+    if (!session) return;
+    setBundlePhase("running");
+    setBundleResult("");
+    try {
+      const r = await postBundle(backendIp, session.sessionId);
+      const mb = (r.size / 1048576).toFixed(1);
+      setBundleResult(
+        `✓ Saved on backend: ${r.path} (${mb} MB, ${r.entries.length} files). ` +
+        `Video is not included — retrieve it from “Recover buffered video”.`,
+      );
+    } catch (e) {
+      setBundleResult(`✕ Backend could not write the bundle: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBundlePhase("idle");
+    }
+  }, [session, backendIp]);
 
   const loadManifest = useCallback(async () => {
     if (!session) return;
@@ -501,6 +522,24 @@ export default function EndSessionModal({
             </button>
           </div>
         )}
+        {/* Server-side save. Always available, never gated on `whole` — its whole purpose is to
+            work when this dashboard cannot be relied on. The client-side zip below stays as the
+            convenient path; this one is the one that survives a render crash. */}
+        <div className="shrink-0">
+          <button
+            onClick={handleServerBundle}
+            disabled={bundlePhase === "running"}
+            className="btn-glass w-full py-2 text-xs text-cyan-200 disabled:opacity-50"
+            title="Backend writes the data bundle to the SSD itself — does not need this browser"
+          >
+            {bundlePhase === "running" ? "Saving on backend…" : "💾 Save data bundle on backend (no browser needed)"}
+          </button>
+          {bundleResult && (
+            <div className="mt-1 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] text-cyan-200 break-all">
+              {bundleResult}
+            </div>
+          )}
+        </div>
         {progressText && <div className="shrink-0 text-[11px] text-gray-500">{progressText}</div>}
         {consolidateResult && (
           <div className="shrink-0 rounded border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[11px] text-cyan-200">
