@@ -5,6 +5,7 @@ helpers, and the /export consolidate + manifest contract with per-role primacy f
 "whole" verdict.
 """
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -339,3 +340,64 @@ def test_scan_rows_ignores_v1_header(tmp_path: Path):
     row_count, _labels = _scan_rows([v1, v2])
 
     assert row_count == 7, "header lines of either schema version must not be counted"
+
+
+# ── Server-side bundle ───────────────────────────────────────────────────────
+
+
+def test_bundle_contains_data_artifacts_and_excludes_video(store: dict):
+    """The bundle must be assemblable without the browser.
+
+    The 2026-08-11 incident cost the deliverable — not the data — because the zip was built
+    entirely in the dashboard, so a render crash at save left the operator with nothing to hand
+    over even though every byte was on disk.
+    """
+    import zipfile
+    from master_backend.app.export import export_bundle
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv",
+               [_row(1, 1, "DEV-CHEST"), _row(2, 2, "DEV-CHEST")])
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text('{"status":"PASS"}', encoding="utf-8")
+    # Video lives only in the browser; if one is ever on disk it must not silently bloat the zip.
+    (folder / f"{SESSION_ID}_cam1_video_sync.webm").write_bytes(b"\x1a\x45\xdf\xa3fake")
+
+    result = _run(export_bundle(SESSION_ID))
+
+    assert result["contains_video"] is False
+    out = Path(result["path"])
+    assert out.name == f"{SESSION_ID}_bundle.zip" and out.is_file()
+
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        manifest = json.loads(z.read("bundle_manifest.json"))
+
+    assert f"data/{SESSION_ID}_chest_sensor_data.csv" in names
+    assert f"data/{SESSION_ID}_integrity_report.json" in names
+    assert manifest["session_id"] == SESSION_ID
+    assert manifest["contains_video"] is False
+    # No leftover temp file masquerading as a finished archive.
+    assert not (folder / f"{SESSION_ID}_bundle.zip.tmp").exists()
+
+
+def test_bundle_is_not_nested_into_itself_on_rebuild(store: dict):
+    import zipfile
+    from master_backend.app.export import export_bundle
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [_row(1, 1, "DEV-CHEST")])
+
+    _run(export_bundle(SESSION_ID))
+    second = _run(export_bundle(SESSION_ID))
+
+    with zipfile.ZipFile(Path(second["path"])) as z:
+        assert not any(n.endswith("_bundle.zip") for n in z.namelist())
+
+
+def test_bundle_unknown_session_is_404_not_500(store: dict):
+    from fastapi import HTTPException
+    from master_backend.app.export import export_bundle
+
+    with pytest.raises(HTTPException) as exc:
+        _run(export_bundle("no-such-session"))
+    assert exc.value.status_code == 404

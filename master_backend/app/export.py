@@ -12,15 +12,22 @@ single .zip on the client. This router is the backend contract behind that modal
   POST /export/{session_id}/consolidate-> merge main + rescue + late + recovery into
                                           <session_id>_consolidated.csv plus one
                                           <session_id>_<role>_consolidated.csv per role
+  POST /export/{session_id}/bundle     -> assemble the data artifacts into
+                                          <session_id>_bundle.zip ON THE SSD, so a crashed or
+                                          closed dashboard cannot cost the deliverable (video
+                                          excluded — it never reaches the backend)
 
 The modal's "whole" verdict is strict: every sample source must be either absent or
 already folded into the consolidated output, plus the integrity report must PASS. Once
 per-role consolidated files exist they take primacy for that verdict (per-role coverage
 is checked first, session-wide mtime is the fallback).
 """
+import asyncio
 import json
 import logging
 import os
+import time
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -418,7 +425,7 @@ async def export_consolidate(session_id: str):
     summary_path = primary_folder / f"{session_id}_consolidation.json"
     summary = {
         "session_id": session_id,
-        "consolidated_at_ms": int(__import__("time").time() * 1000),
+        "consolidated_at_ms": int(time.time() * 1000),
         "per_role": per_role["per_role"],
         "per_role_files": per_role["files"],
         **result,
@@ -433,3 +440,80 @@ async def export_consolidate(session_id: str):
         "per_role_files": per_role["files"],
     })
     return {"session_id": session_id, **result, "per_role": per_role["per_role"]}
+
+
+BUNDLE_SUFFIX = "_bundle.zip"
+
+
+def _build_bundle(session_id: str, out: Path, files: list[dict], recovery: list[dict]) -> dict:
+    """Write the session's data artifacts into `out` as a zip. Blocking; run in an executor.
+
+    Written to a temporary path and moved into place with os.replace, so an interrupted build
+    can never leave behind a truncated archive that looks finished. That distinction matters
+    here more than usual: this file exists precisely so the operator has something trustworthy
+    when the dashboard does not.
+    """
+    tmp = out.with_name(out.name + ".tmp")
+    written: list[str] = []
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+        for f in files:
+            # Never nest a previous bundle inside the new one.
+            if f["name"].endswith(BUNDLE_SUFFIX):
+                continue
+            z.write(f["path"], arcname=f"data/{f['name']}")
+            written.append(f"data/{f['name']}")
+        for r in recovery:
+            if not r.get("csv_exists"):
+                continue
+            arc = f"data/recovery/{Path(r['csv_path']).name}"
+            z.write(r["csv_path"], arcname=arc)
+            written.append(arc)
+        manifest = {
+            "session_id": session_id,
+            "built_at_ms": int(time.time() * 1000),
+            "entries": written,
+            "contains_video": False,
+            "note": (
+                "Data artifacts only. Camera footage is recorded by the browser via "
+                "MediaRecorder and never reaches the backend, so it cannot appear here. It is "
+                "independently durable in the browser's IndexedDB until the NEXT session starts "
+                "— retrieve it from the dashboard's 'Recover buffered video' screen."
+            ),
+        }
+        z.writestr("bundle_manifest.json", json.dumps(manifest, indent=2))
+    os.replace(tmp, out)
+    return {"path": str(out), "entries": written, "size": out.stat().st_size}
+
+
+@router.post("/export/{session_id}/bundle")
+async def export_bundle(session_id: str):
+    """Assemble the session's data artifacts into a zip on the SSD, server-side.
+
+    Until now the end-of-session zip was built entirely in the browser with jszip, which made a
+    render bug in the dashboard cost the deliverable even though every byte was already safely
+    on disk — exactly what happened on 2026-08-11. This endpoint takes the browser off that
+    path: the operator can obtain a complete data bundle with the dashboard closed, crashed, or
+    on a different machine.
+    """
+    folders = _session_folders(session_id)
+    files = _session_files(session_id)
+    recovery = _recovery_manifest(session_id)
+    if not folders or (not files and not any(r.get("csv_exists") for r in recovery)):
+        raise HTTPException(status_code=404, detail=f"no artifacts found for session {session_id}")
+
+    out = folders[0] / f"{session_id}{BUNDLE_SUFFIX}"
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _build_bundle, session_id, out, files, recovery
+        )
+    except OSError as exc:
+        await audit.log("ERROR", "bundle_failed", {"session_id": session_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"could not write bundle: {exc}") from exc
+
+    await audit.log("INFO", "session_bundled", {
+        "session_id": session_id,
+        "path": result["path"],
+        "entries": len(result["entries"]),
+        "size": result["size"],
+    })
+    return {"session_id": session_id, "contains_video": False, **result}
