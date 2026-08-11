@@ -2,13 +2,42 @@
 import type { DeviceInfo } from "@/lib/ws_client";
 import type { CameraStatus } from "@/components/MultiCameraRecorder";
 
-type CheckStatus = "pending" | "pass" | "fail";
+export type CheckStatus = "pending" | "pass" | "fail";
 
-interface Check { label: string; status: CheckStatus; detail?: string; }
+export interface Check { label: string; status: CheckStatus; detail?: string; }
 
 // Minimum distinct acc readings/sec each ONLINE device must sustain to pass preflight.
 // 100 Hz nominal × 90% — see session_manager note_sample (callbacks vs distinct values).
 export const SAMPLING_RATE_MIN_HZ = 90;
+
+/** This bundle's identity, baked in at build time by next.config.mjs. */
+export const DASHBOARD_BUILD_ID = process.env.NEXT_PUBLIC_BUILD_ID || "unknown";
+
+/**
+ * Compare the running dashboard bundle against the backend it is talking to.
+ *
+ * On 2026-08-11 an operator's browser executed a cached bundle that existed on no disk and
+ * matched no commit, against a backend whose payload shape had since moved. It dereferenced a
+ * field that no longer arrives and white-screened at the moment a 17-minute session was being
+ * saved. Nothing in the UI could have told them. This check can.
+ *
+ * "unknown" on either side yields `pending`, never `fail`: a build outside a git checkout must
+ * not raise a false alarm that scares an operator mid-study.
+ */
+function buildMatchCheck(backendBuildId: string | null): Check {
+  const label = "Dashboard build matches backend";
+  const ours = DASHBOARD_BUILD_ID;
+  if (!backendBuildId) {
+    return { label, status: "pending", detail: "backend not reached yet" };
+  }
+  if (ours === "unknown" || backendBuildId === "unknown") {
+    return { label, status: "pending", detail: "build id unavailable" };
+  }
+  if (ours === backendBuildId) {
+    return { label, status: "pass", detail: ours };
+  }
+  return { label, status: "fail", detail: `dashboard ${ours} / backend ${backendBuildId}` };
+}
 
 function buildChecks(
   isWsConnected: boolean,
@@ -17,6 +46,7 @@ function buildChecks(
   sessionTag: string,
   operator: string,
   camStatus: CameraStatus,
+  backendBuildId: string | null = null,
 ): Check[] {
   const onlineDevices = devices.filter(d => d.is_online);
   return [
@@ -25,6 +55,7 @@ function buildChecks(
       status: isWsConnected ? "pass" : "fail",
       detail: isWsConnected ? "OK" : "Not connected",
     },
+    buildMatchCheck(backendBuildId),
     {
       label: "At least 1 device online",
       status: onlineDevices.length > 0 ? "pass" : "fail",
@@ -98,19 +129,21 @@ function buildChecks(
 }
 
 interface Props {
-  isWsConnected: boolean;
+  /**
+   * Computed by the caller via buildChecks() and passed down, rather than recomputed here.
+   *
+   * These checks used to be built inside this component while page.tsx separately hand-rolled
+   * its own boolean for the START gate — a boolean that omitted "Sampling rate healthy"
+   * entirely. The panel could therefore display ✗ NO-GO for a 50 Hz device while START stayed
+   * enabled, which is how the rate protection added after 2026-08-07 ended up decorative.
+   * One array, one source of truth, shared by the panel and whatever the caller gates on.
+   */
+  checks: Check[];
   devices: DeviceInfo[];
-  subject: string;
-  sessionTag: string;
-  operator: string;
-  camStatus: CameraStatus;
 }
 
 export default function PreflightPanel(props: Props) {
-  const checks = buildChecks(
-    props.isWsConnected, props.devices,
-    props.subject, props.sessionTag, props.operator, props.camStatus,
-  );
+  const checks = props.checks;
   const allPass = checks.every(c => c.status === "pass");
 
   return (

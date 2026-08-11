@@ -6,7 +6,7 @@ import { wsClient, type SessionState, type DeviceInfo, type StateUpdate } from "
 import { armAudio } from "@/lib/alert_sound";
 import StatusBanner from "@/components/StatusBanner";
 import SessionForm from "@/components/SessionForm";
-import PreflightPanel from "@/components/PreflightPanel";
+import PreflightPanel, { buildChecks } from "@/components/PreflightPanel";
 import LabelingPanel from "@/components/LabelingPanel";
 import IntegrityReport from "@/components/IntegrityReport";
 import SafeBoundary from "@/components/SafeBoundary";
@@ -46,6 +46,9 @@ export default function Home() {
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [quorum, setQuorum] = useState<{ connected: number; roles: string[] }>({ connected: 0, roles: [] });
   const [integrityReport, setIntegrityReport] = useState<Record<string, unknown> | null>(null);
+  // Commit the backend reports for itself, for the preflight build-match check. Null until
+  // /health has answered; the check reads that as "pending", never as a mismatch.
+  const [backendBuildId, setBackendBuildId] = useState<string | null>(null);
 
   // Session form
   const [subject, setSubject] = useState("");
@@ -90,13 +93,39 @@ export default function Home() {
   const isRecording = sessionState === "RECORDING";
   // Derive online count directly from devices — single source of truth.
   const onlineCount = devices.filter(d => d.is_online).length;
-  const prefightAllPass =
+  // Single source of truth for preflight, shared with PreflightPanel so the panel and the
+  // START button can never disagree again. Previously this file hand-rolled its own boolean
+  // that omitted "Sampling rate healthy", so the panel could read ✗ NO-GO for a 50 Hz device
+  // while START stayed enabled.
+  const preflightChecks = buildChecks(
+    isWsConnected, devices, subject, sessionTag, operator, camStatus, backendBuildId,
+  );
+  const preflightFailures = preflightChecks.filter(c => c.status === "fail");
+
+  // Hard prerequisites: without these a session cannot physically start (no backend, no
+  // device, no session identity, no camera). Deliberately a SUBSET of the checks above —
+  // quality problems such as a half-rate sensor warn loudly but do not block, so a field
+  // session is never stranded by a judgement call. The difference is intentional and named,
+  // rather than an accident of two divergent expressions.
+  const canStart =
     isWsConnected &&
     onlineCount > 0 &&
     subject.trim().length > 0 &&
     sessionTag.trim().length > 0 &&
     operator.trim().length > 0 &&
     camStatus.ok;
+
+  // Ask the backend which commit it is, once we're connected. A backend cannot change build
+  // without restarting, which drops the socket — so reconnecting re-runs this and the answer
+  // can never go quietly stale.
+  useEffect(() => {
+    if (!isWsConnected || !backendIp) return;
+    let cancelled = false;
+    probeBackend(backendIp).then(probe => {
+      if (!cancelled && probe.ok) setBackendBuildId(probe.buildId ?? "unknown");
+    });
+    return () => { cancelled = true; };
+  }, [isWsConnected, backendIp]);
 
   // ── WS event subscriptions ─────────────────────────────────────────────────
   useEffect(() => {
@@ -386,14 +415,7 @@ export default function Home() {
             <div className="glass-panel p-3">
               <AlertCenter key={alertResetKey} devices={devices} state={sessionState} isWsConnected={isWsConnected} />
             </div>
-            <PreflightPanel
-              isWsConnected={isWsConnected}
-              devices={devices}
-              subject={subject}
-              sessionTag={sessionTag}
-              operator={operator}
-              camStatus={camStatus}
-            />
+            <PreflightPanel checks={preflightChecks} devices={devices} />
 
             {/* Open the recover-from-devices modal */}
             <button
@@ -415,14 +437,46 @@ export default function Home() {
               {unconfirmed.length > 0 && ` (${unconfirmed.length} unsaved)`}
             </button>
 
+            {/* A failing quality check does not disable START — a field session must never be
+                stranded by a judgement call — but it must be impossible to start one believing
+                the setup is clean. The banner is not dismissible while the failure holds, and
+                the failures are sent with START_SESSION so the recording documents itself. */}
+            {!isRecording && preflightFailures.length > 0 && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs">
+                <div className="font-bold text-red-300 mb-1">⚠ Preflight failing — you can still record</div>
+                <ul className="list-disc list-inside text-red-200/90 space-y-0.5">
+                  {preflightFailures.map(c => (
+                    <li key={c.label}>
+                      {c.label}
+                      {c.detail ? <span className="text-red-300/80"> — {c.detail}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+                {/* A build mismatch has exactly one fix, so offer it rather than describing it.
+                    reload(true) is non-standard and ignored by modern browsers; the document is
+                    already no-store (see layout.tsx force-dynamic), so a plain reload is enough
+                    to pick up the current bundle. */}
+                {preflightFailures.some(c => c.label === "Dashboard build matches backend") && (
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="mt-2 btn-glass text-xs text-cyan-300 border-cyan-500/40 px-2 py-1"
+                  >
+                    ⟳ Reload dashboard
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Start / Stop button */}
             {!isRecording ? (
               <button
                 onClick={handleStart}
-                disabled={!prefightAllPass}
-                className="btn-success w-full py-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed"
+                disabled={!canStart}
+                className={`w-full py-2 font-bold text-sm disabled:opacity-30 disabled:cursor-not-allowed ${
+                  preflightFailures.length > 0 ? "btn-glass border-red-500/50 text-red-200" : "btn-success"
+                }`}
               >
-                ▶ START SESSION
+                {preflightFailures.length > 0 ? "▶ START ANYWAY (preflight failing)" : "▶ START SESSION"}
               </button>
             ) : (
               <button
@@ -587,7 +641,7 @@ export default function Home() {
 }
 
 async function probeBackend(ip: string): Promise<
-  { ok: true; lanIp?: string } | { ok: false; reason: string }
+  { ok: true; lanIp?: string; buildId?: string } | { ok: false; reason: string }
 > {
   try {
     const ctrl = new AbortController();
@@ -596,7 +650,7 @@ async function probeBackend(ip: string): Promise<
     clearTimeout(t);
     if (!res.ok) return { ok: false, reason: `Backend answered HTTP ${res.status}` };
     const j = await res.json();
-    return { ok: true, lanIp: j.lan_ip };
+    return { ok: true, lanIp: j.lan_ip, buildId: j.build_id };
   } catch {
     return { ok: false, reason: "No HTTP response (backend not started, wrong IP, or firewall/subnet)" };
   }

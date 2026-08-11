@@ -10,7 +10,9 @@ pyproject.toml declares the package root one level up:
 import logging
 import os
 import socket
+import subprocess
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 
 import asyncio
@@ -28,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 from .audit_logger import audit
 from .session_manager import SessionState, session_manager
+
+
+@lru_cache(maxsize=1)
+def build_id() -> str:
+    """Identity of the running backend, for the dashboard's preflight version check.
+
+    The dashboard bakes its own git sha in at build time and compares the two, so a skew is
+    caught before a session instead of surfacing as a render crash at save — the 2026-08-11
+    failure, where a browser ran a bundle that existed on no disk and matched no commit.
+
+    Returns "unknown" rather than guessing when this is not a git checkout; the preflight check
+    treats "unknown" as pending, never as a mismatch, so a false alarm can never block an
+    operator mid-study.
+    """
+    env = os.getenv("BUILD_ID", "").strip()
+    if env:
+        return env
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 from .upload import router as recovery_router
 from .export import router as export_router
 from .cameras import router as cameras_router
@@ -98,6 +125,8 @@ async def health():
     return {
         "status": "ok",
         "version": "2.0.0",
+        # Real commit identity. `version` is left untouched for any existing consumer.
+        "build_id": build_id(),
         "session_state": session_manager.state,
         "session_id": session_manager.session_id or None,
         "online_devices": len(session_manager.online_devices),
