@@ -3,6 +3,10 @@ description: "IMU Telemetry Mobile Node"
 publish_to: 'none'
 version: 2.2.0+3
 
+# Build with Flutter 3.44.8 (Dart 3.12.x). The constraint below is satisfied by far older
+# Flutter releases, which is a trap: 3.24.5 also satisfies it and silently resolves
+# path_provider_android 2.2.15 — no jni, no libdartjni.so, a 22.7 MB APK instead of 52.7 MB.
+# pubspec.lock is checked in to pin this; do not delete it to "fix" a resolution error.
 environment:
   sdk: '>=3.3.4 <4.0.0'
 
