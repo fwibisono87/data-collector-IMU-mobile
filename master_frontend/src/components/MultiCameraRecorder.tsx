@@ -21,6 +21,7 @@ interface Props {
 
 const MAX_CAMERAS = 5;
 const TIMESLICE_MS = 1000;
+const STOP_TIMEOUT_MS = 10_000;
 // Prefer WebM (VP9→VP8). Chrome/Edge MediaRecorder emits *fragmented* MP4 that desktop
 // players (Windows Media Player, QuickTime) can't open, even though it plays in-browser —
 // so MP4 is deliberately the last resort, kept only so a WebM-less browser (Safari) still
@@ -57,7 +58,8 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
   const mediaRef = useRef<MediaRecorder | null>(null);
   const sessionRef = useRef<string>("");
   const chunkIndexRef = useRef(0);
-  const pendingSavesRef = useRef<Promise<void>[]>([]); // in-flight chunk writes to await on stop
+  const pendingSavesRef = useRef(new Set<Promise<void>>()); // unresolved writes only
+  const writeErrorRef = useRef<unknown>(null);
   const startedAtRef = useRef(0);
   const flashAtRef = useRef(0);
   const liveRef = useRef(false); // true while this slot has a working stream (gates re-acquire)
@@ -134,7 +136,8 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     if (!streamRef.current) return;
     sessionRef.current = sessionId;
     chunkIndexRef.current = 0;
-    pendingSavesRef.current = [];
+    pendingSavesRef.current.clear();
+    writeErrorRef.current = null;
     const mime = CODEC_PRIORITY.find(m => MediaRecorder.isTypeSupported(m)) ?? "";
     const recorder = new MediaRecorder(streamRef.current, mime ? { mimeType: mime } : {});
     mediaRef.current = recorder;
@@ -142,7 +145,10 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     // chunk, and we must await that write before reading back — otherwise the last ~1s is lost.
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
-        pendingSavesRef.current.push(saveChunk(sessionId, camId, chunkIndexRef.current++, e.data));
+        const write = saveChunk(sessionId, camId, chunkIndexRef.current++, e.data)
+          .catch((error) => { writeErrorRef.current ??= error; })
+          .finally(() => pendingSavesRef.current.delete(write));
+        pendingSavesRef.current.add(write);
       }
     };
     recorder.start(TIMESLICE_MS);
@@ -156,7 +162,11 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     const recorder = mediaRef.current;
     if (!recorder || recorder.state === "inactive") return null;
     const mime = recorder.mimeType || "";
-    await new Promise<void>(resolve => { recorder.onstop = () => resolve(); recorder.stop(); });
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error(`${camId} did not stop within ${STOP_TIMEOUT_MS / 1000}s`)), STOP_TIMEOUT_MS);
+      recorder.onstop = () => { window.clearTimeout(timeout); resolve(); };
+      try { recorder.stop(); } catch (error) { window.clearTimeout(timeout); reject(error); }
+    });
     const stoppedAtMs = Date.now();
     setIsRecording(false);
     // stop() fires a final dataavailable before onstop. Await every chunk write to commit
@@ -164,7 +174,8 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     // last second). We no longer reassemble the footage here — the raw chunks stay in
     // IndexedDB and are streamed straight to disk by the export modal (streamChunks),
     // avoiding the two full-heap copies that exhausted the renderer.
-    await Promise.all(pendingSavesRef.current);
+    await Promise.all(Array.from(pendingSavesRef.current));
+    if (writeErrorRef.current) throw new Error(`${camId} video backup failed: ${String(writeErrorRef.current)}`);
     const chunkCount = chunkIndexRef.current;
     if (chunkCount === 0) return null;
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted

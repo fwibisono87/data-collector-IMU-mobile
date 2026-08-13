@@ -88,6 +88,8 @@ class PipelineController {
       final ip = data['ip']?.toString() ?? '';
       unawaited(_connectAndReport(ip));
     } else if (cmd == 'disconnect') {
+      // WebSocketClient refuses this while a session is active; keep the authoritative
+      // recorder/sensor pipeline alive instead of silently creating a local-only stop.
       unawaited(WebSocketClient().disconnect());
     }
   }

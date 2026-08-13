@@ -51,6 +51,11 @@ function buildChecks(
   const onlineDevices = devices.filter(d => d.is_online);
   return [
     {
+      label: "Durable video export browser",
+      status: typeof window !== "undefined" && "showSaveFilePicker" in window ? "pass" : "fail",
+      detail: "Chrome or Edge desktop is required for recording",
+    },
+    {
       label: "Backend connected",
       status: isWsConnected ? "pass" : "fail",
       detail: isWsConnected ? "OK" : "Not connected",

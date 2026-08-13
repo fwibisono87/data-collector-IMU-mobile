@@ -49,6 +49,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // Reflect current state immediately.
     _wsState = TaskBridge().state;
+    _sessionId = TaskBridge().activeSessionId;
+    _serverState = TaskBridge().serverState;
+    _isRecording = _sessionId != null;
 
     // Drives time-based UI (unconfirmed-recording badge, offline timer) that would
     // otherwise only refresh when a new bridge event arrives.
@@ -190,6 +193,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
 
   Future<void> _disconnect() async {
+    if (TaskBridge().activeSessionId != null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Disconnect is disabled during recording. Stop the shared session from the dashboard.'),
+      ));
+      return;
+    }
     await TaskBridge().disconnect();
     if (!mounted) return;
     Navigator.pushReplacement(

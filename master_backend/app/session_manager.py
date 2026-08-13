@@ -308,16 +308,17 @@ class SessionManager:
         if self.state != SessionState.RECORDING:
             return {}
 
-        # Notify mobile nodes before closing files so they exit recording state
-        # while their control_ws handles are still live.
+        # Arm late delivery before STOP reaches phones. Once we transition out of RECORDING,
+        # a reconnecting phone may immediately flush its buffered tail.
+        io_manager.arm_late_window()
+        await self._transition(SessionState.FINALIZING)
+        # Notify mobile nodes while their control sockets are still live.
         stop_cmd = Command(
             type=CommandType.STOP_SESSION,
             payload=json.dumps({"reason": reason}),
             issued_at_ms=int(time.time() * 1000),
         ).to_bytes()
         await self.broadcast_control(stop_cmd)
-
-        await self._transition(SessionState.FINALIZING)
         if self._offline_check_task:
             self._offline_check_task.cancel()
 
@@ -374,13 +375,14 @@ class SessionManager:
         socket was perfectly alive but whose last PING was 9 s old — the phone then
         stayed stuck in RECORDING forever (plan D1).
         """
-        for device in self._devices.values():
+        async def send(device: DeviceInfo) -> None:
             if device.control_ws is None:
-                continue
+                return
             try:
-                await device.control_ws.send_bytes(data)
+                await asyncio.wait_for(device.control_ws.send_bytes(data), timeout=2.0)
             except Exception:
                 device.is_online = False
+        await asyncio.gather(*(send(device) for device in self._devices.values()))
 
     async def send_to_device(self, device_id: str, data: bytes) -> None:
         dev = self._devices.get(device_id)

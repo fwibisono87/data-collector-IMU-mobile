@@ -11,6 +11,7 @@ const DB_NAME = "imu-video-backup";
 const DB_VERSION = 2;
 const STORE = "chunks";
 const SAVED = "saved";
+let dbPromise: Promise<IDBDatabase> | null = null;
 
 interface ChunkRecord {
   key: string;
@@ -41,7 +42,8 @@ export interface ChunkGroup {
 }
 
 async function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       // Additive only — never drop `chunks`, it may hold the sole copy of a session.
@@ -52,9 +54,13 @@ async function openDb(): Promise<IDBDatabase> {
         req.result.createObjectStore(SAVED, { keyPath: "sessionId" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      req.result.onversionchange = () => { req.result.close(); dbPromise = null; };
+      resolve(req.result);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
   });
+  return dbPromise;
 }
 
 function chunkKey(sessionId: string, camId: string, index: number): string {
@@ -148,35 +154,36 @@ export async function streamChunks(
 /** Every (session, camera) group currently on disk, newest session first. */
 export async function listAllChunkGroups(): Promise<ChunkGroup[]> {
   const db = await openDb();
-  const all: ChunkRecord[] = await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const req = tx.objectStore(STORE).getAll();
-    req.onsuccess = () => resolve(req.result as ChunkRecord[]);
-    req.onerror = () => reject(req.error);
-  });
   const savedIds = new Set(await listSavedSessions());
-
   const acc = new Map<string, { g: ChunkGroup; idx: number[] }>();
-  for (const r of all) {
-    const k = `${r.sessionId}__${r.camId}`;
-    let e = acc.get(k);
-    if (!e) {
-      e = {
-        g: {
-          sessionId: r.sessionId, camId: r.camId, chunks: 0, bytes: 0,
-          firstIndex: r.index, lastIndex: r.index, hasHole: false,
-          saved: savedIds.has(r.sessionId),
-        },
-        idx: [],
-      };
-      acc.set(k, e);
-    }
-    e.g.chunks++;
-    e.g.bytes += r.blob.size;
-    e.g.firstIndex = Math.min(e.g.firstIndex, r.index);
-    e.g.lastIndex = Math.max(e.g.lastIndex, r.index);
-    e.idx.push(r.index);
-  }
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).openCursor();
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      // A cursor materialises just one record at a time; getAll() created an array holding
+      // every Blob-backed record in the session at precisely the end-of-recording moment.
+      const r = cursor.value as ChunkRecord;
+      const k = `${r.sessionId}__${r.camId}`;
+      let e = acc.get(k);
+      if (!e) {
+        e = { g: { sessionId: r.sessionId, camId: r.camId, chunks: 0, bytes: 0,
+                    firstIndex: r.index, lastIndex: r.index, hasHole: false,
+                    saved: savedIds.has(r.sessionId) }, idx: [] };
+        acc.set(k, e);
+      }
+      e.g.chunks++;
+      e.g.bytes += r.blob.size;
+      e.g.firstIndex = Math.min(e.g.firstIndex, r.index);
+      e.g.lastIndex = Math.max(e.g.lastIndex, r.index);
+      e.idx.push(r.index);
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 
   const out: ChunkGroup[] = [];
   Array.from(acc.values()).forEach(({ g, idx }) => {

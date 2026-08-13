@@ -85,6 +85,22 @@ class DeviceWriter:
             **reorder,
         }
 
+    async def abandon(self) -> None:
+        """Release a failed file handle without another flush/fsync attempt.
+
+        A write error commonly means the mounted SSD is no longer usable.  Calling the
+        normal close path would retry the failing fsync and can prevent the in-memory
+        writer from switching to the rescue filesystem.
+        """
+        if self._file is None:
+            return
+        try:
+            await self._file.close()
+        except OSError:
+            pass
+        finally:
+            self._file = None
+
 
 def _format_row(pkt: SensorPacket, label_id: int, label_name: str) -> str:
     acc_ts = pkt.acc_ts_ms if pkt.acc_ts_ms else ""
@@ -162,6 +178,10 @@ class IoManager:
         self._metadata_line: str = ""
         self._session_open: bool = False
         self._dropped_no_writer: dict[str, int] = {}
+        # A failed primary writer is retried once on RESCUE_PATH.  These counters make any
+        # row that could not be rescued visible in the final integrity report.
+        self._write_failures: dict[str, int] = {}
+        self._rows_lost_after_failover: dict[str, int] = {}
         # device_id -> sampling-tier token currently reflected in that device's filename.
         # Kept past close_session so late-delivery sidecars inherit the same tier.
         self._device_tiers: dict[str, str] = {}
@@ -220,6 +240,41 @@ class IoManager:
     def dropped_no_writer(self, device_id: str) -> int:
         return self._dropped_no_writer.get(device_id, 0)
 
+    def write_failures(self, device_id: str) -> int:
+        return self._write_failures.get(device_id, 0)
+
+    def rows_lost_after_failover(self, device_id: str) -> int:
+        return self._rows_lost_after_failover.get(device_id, 0)
+
+    def _rescue_path_for(self, writer: DeviceWriter) -> Path:
+        assert self._base is not None
+        return (
+            self._rescue_path / "Data_Riset_IMU" / self._base.name
+            / writer._path.name.replace(".csv", "_rescue.csv")
+        )
+
+    async def _activate_rescue_writer(
+        self, device_id: str, failed_writer: DeviceWriter
+    ) -> DeviceWriter | None:
+        """Create the runtime fallback writer after a primary SSD write fails."""
+        existing = self._rescue_writers.get(device_id)
+        if existing is not None:
+            return existing
+        rescue_path = self._rescue_path_for(failed_writer)
+        rescue_writer = DeviceWriter(rescue_path, self._metadata_line)
+        try:
+            await rescue_writer.open(append_if_exists=True)
+        except OSError as exc:
+            await audit.log("ERROR", "rescue_path_open_failed", {
+                "device_id": device_id, "path": str(rescue_path), "error": str(exc),
+            })
+            return None
+        self._rescue_writers[device_id] = rescue_writer
+        await audit.log("WARN", "rescue_path_activated", {
+            "device_id": device_id, "path": str(rescue_path), "reason": "runtime_write_failure",
+        })
+        return rescue_writer
+
     async def _open_writer_for(self, device_id: str, role: str, true_hz: float = 0.0) -> None:
         # Named from the rate preflight just measured. close_session() renames it if the
         # session-wide average lands in a different tier, so the name is provisional until
@@ -235,14 +290,9 @@ class IoManager:
             await audit.log("INFO", "csv_opened", {"path": str(path), "device_id": device_id})
         except OSError as exc:
             await audit.log("ERROR", "ssd_write_failed", {"error": str(exc), "device_id": device_id})
-            rescue_path = (
-                self._rescue_path / "Data_Riset_IMU" / self._base.name
-                / fname.replace(".csv", "_rescue.csv")
-            )
-            rescue_writer = DeviceWriter(rescue_path, self._metadata_line)
-            await rescue_writer.open(append_if_exists=True)
-            self._rescue_writers[device_id] = rescue_writer
-            await audit.log("INFO", "rescue_path_activated", {"path": str(rescue_path)})
+            rescue_writer = await self._activate_rescue_writer(device_id, writer)
+            if rescue_writer is None:
+                await audit.log("ERROR", "no_rescue_writer", {"device_id": device_id})
 
     async def ensure_writer(self, device_id: str, role: str, true_hz: float = 0.0) -> bool:
         """Open a CSV for a device that joined (or rejoined) AFTER the session started.
@@ -283,6 +333,8 @@ class IoManager:
         )
         self._session_open = True
         self._dropped_no_writer.clear()
+        self._write_failures.clear()
+        self._rows_lost_after_failover.clear()
 
         self._label_ts = [int(time.time() * 1000)]
         self._label_val = [(_DEFAULT_LABEL_ID, _DEFAULT_LABEL_NAME)]
@@ -292,7 +344,8 @@ class IoManager:
             await self._open_writer_for(device_id, role, rates.get(device_id, 0.0))
 
     async def write_packet(self, pkt: SensorPacket) -> None:
-        writer = self._writers.get(pkt.device_id) or self._rescue_writers.get(pkt.device_id)
+        primary_writer = self._writers.get(pkt.device_id)
+        writer = primary_writer or self._rescue_writers.get(pkt.device_id)
         if writer is None:
             self._dropped_no_writer[pkt.device_id] = self._dropped_no_writer.get(pkt.device_id, 0) + 1
             n = self._dropped_no_writer[pkt.device_id]
@@ -305,12 +358,39 @@ class IoManager:
         try:
             await writer.write_row(row)
         except OSError as exc:
-            await audit.log("ERROR", "csv_write_error", {"error": str(exc), "device_id": pkt.device_id})
-            # Try rescue path
-            if pkt.device_id not in self._rescue_writers:
-                await audit.log("ERROR", "no_rescue_writer", {"device_id": pkt.device_id})
+            device_id = pkt.device_id
+            self._write_failures[device_id] = self._write_failures.get(device_id, 0) + 1
+            await audit.log("ERROR", "csv_write_error", {
+                "error": str(exc), "device_id": device_id,
+                "writer": "primary" if writer is primary_writer else "rescue",
+            })
+
+            # A primary SSD can disappear long after a session starts. Retire its handle,
+            # create a rescue writer on demand, and retry this exact row once.
+            if writer is primary_writer:
+                self._writers.pop(device_id, None)
+                await writer.abandon()
+                writer = await self._activate_rescue_writer(device_id, writer)
             else:
-                await self._rescue_writers[pkt.device_id].write_row(row)
+                writer = None
+
+            if writer is not None:
+                try:
+                    await writer.write_row(row)
+                    return
+                except OSError as retry_exc:
+                    self._write_failures[device_id] = self._write_failures.get(device_id, 0) + 1
+                    await audit.log("ERROR", "rescue_write_failed", {
+                        "error": str(retry_exc), "device_id": device_id,
+                    })
+
+            self._rows_lost_after_failover[device_id] = (
+                self._rows_lost_after_failover.get(device_id, 0) + 1
+            )
+            await audit.log("ERROR", "packet_lost_after_failover", {
+                "device_id": device_id,
+                "count": self._rows_lost_after_failover[device_id],
+            })
 
     async def write_late(self, pkt: SensorPacket, role: str) -> None:
         """Append a post-STOP packet to <session>_<role>_sensor_data_late.csv."""
@@ -330,6 +410,20 @@ class IoManager:
                              "session_id": self._late_session_id})
         await writer.write_row(_format_row(pkt, *self.label_at(pkt.timestamp_ms)))
         self._late_rows[pkt.device_id] = self._late_rows.get(pkt.device_id, 0) + 1
+
+    def arm_late_window(self) -> None:
+        """Make the just-ending session eligible for post-STOP packets immediately.
+
+        This is deliberately separate from close_session(): STOP control messages may cause a
+        phone to flush while the main writers are still being fsynced and sorted.
+        """
+        if self._late_session_id == self._session_id and self._late_base == self._base:
+            return
+        self._late_session_id = self._session_id
+        self._late_base = self._base
+        self._late_metadata = self._metadata_line
+        self._late_closed_at = time.monotonic()
+        self._late_rows = {}
 
     async def close_session(self, device_rates: dict[str, float] | None = None) -> dict:
         """Close every writer, then correct each filename's sampling tier.
@@ -369,11 +463,7 @@ class IoManager:
 
         # Arm the late-delivery window: a phone that reconnects within LATE_ACCEPT_SEC of
         # STOP still gets its buffered tail written, to a sidecar (plan DD-4).
-        self._late_session_id = self._session_id
-        self._late_base = self._base
-        self._late_metadata = self._metadata_line
-        self._late_closed_at = time.monotonic()
-        self._late_rows = {}
+        self.arm_late_window()
 
         self._session_open = False
         self._writers.clear()

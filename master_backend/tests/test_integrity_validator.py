@@ -59,6 +59,12 @@ class _FakeIo:
     def dropped_no_writer(self, device_id: str) -> int:
         return 0
 
+    def write_failures(self, device_id: str) -> int:
+        return 0
+
+    def rows_lost_after_failover(self, device_id: str) -> int:
+        return 0
+
 
 @pytest.fixture
 def run_validator(tmp_path: Path, monkeypatch):

@@ -635,6 +635,14 @@ class WebSocketClient {
   // ── Disconnect ───────────────────────────────────────────────────────────
 
   Future<void> disconnect() async {
+    if (_activeSessionId != null) {
+      _emitEvent({
+        'type': 'disconnect_refused',
+        'session_id': _activeSessionId,
+        'reason': 'An active session can only be stopped by the backend operator.',
+      });
+      return;
+    }
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
     _sensorSub?.cancel();

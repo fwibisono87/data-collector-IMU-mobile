@@ -123,6 +123,8 @@ class IntegrityValidator:
                 "offline_total_ms": _total_offline_ms(dev_obj.offline_intervals) if dev_obj else 0,
                 "rows_reordered": result.get("reordered", 0),
                 "packets_dropped_no_writer": io_manager.dropped_no_writer(device_id),
+                "csv_write_failures": io_manager.write_failures(device_id),
+                "rows_lost_after_failover": io_manager.rows_lost_after_failover(device_id),
             }
 
             if rows == 0:
@@ -171,6 +173,17 @@ class IntegrityValidator:
                 )
                 device_report["issue"] = (
                     f"{device_report['packets_dropped_no_writer']} packets had no open writer"
+                )
+
+            # A failed SSD is recoverable only if the exact failed row was written to the
+            # rescue volume. Any row lost during that hand-off is a hard data-integrity fail.
+            if device_report["rows_lost_after_failover"] > 0:
+                device_report["status"] = _escalate(device_report["status"], "FAIL")
+                device_report["reasons"].append(
+                    f"{device_report['rows_lost_after_failover']} rows lost after writer failover"
+                )
+                device_report["issue"] = (
+                    f"{device_report['rows_lost_after_failover']} rows lost after writer failover"
                 )
 
             report["devices"].append(device_report)

@@ -65,12 +65,14 @@ def _recovery_info(recovery: Path, device: str, *, role: str, seq1: int, n: int)
         "device_id": device,
         "role": role,
         "complete": True,
+        "sha256_verified": True,
+        "state": "verified",
         "done": False,
     }
-    (d / f"{slug}.info.json").write_text(
-        __import__("json").dumps(info), encoding="utf-8"
-    )
-    return _write_csv(d / f"{slug}.csv", [_row(1000 + i, seq1 + i, device) for i in range(n)])
+    csv = _write_csv(d / f"{slug}.csv", [_row(1000 + i, seq1 + i, device) for i in range(n)])
+    info["total_bytes"] = csv.stat().st_size
+    (d / f"{slug}.info.json").write_text(__import__("json").dumps(info), encoding="utf-8")
+    return csv
 
 
 def _slug_impl(s: str) -> str:

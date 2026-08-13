@@ -188,6 +188,15 @@ def _recovery_manifest(session_id: str) -> list[dict]:
         info["csv_exists"] = csv.exists()
         info["csv_size"] = csv.stat().st_size if csv.exists() else 0
         info["csv_path"] = str(csv)
+        # A legacy sidecar may claim complete without ever having passed a hash check. Never
+        # let that claim make the file eligible for export/consolidation.
+        info["verified"] = bool(
+            info.get("complete")
+            and info.get("sha256_verified")
+            and info.get("total_bytes") == info["csv_size"]
+        )
+        if not info["verified"]:
+            info["complete"] = False
         out.append(info)
     return out
 
@@ -316,7 +325,8 @@ async def export_manifest(session_id: str):
         )
 
     recovery_sources = [
-        (r, Path(r["csv_path"])) for r in recovery if r.get("complete") and r.get("csv_exists")
+        (r, Path(r["csv_path"])) for r in recovery
+        if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists")
     ]
     if recovery_sources and has_per_role:
         recovery_pending = any(
@@ -402,7 +412,7 @@ async def export_consolidate(session_id: str):
             role_key = _slug(_role_from_name(f["name"], session_id)) or "unknown"
             sources.append((role_key, f["kind"], Path(f["path"])))
     for r in _recovery_manifest(session_id):
-        if r.get("complete") and r.get("csv_exists"):
+        if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists"):
             sources.append((_slug(_recovery_role(r)), "recovery", Path(r["csv_path"])))
 
     if not sources:

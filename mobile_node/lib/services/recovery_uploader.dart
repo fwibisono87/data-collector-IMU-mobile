@@ -59,7 +59,8 @@ class RecoveryUploader {
   Future<bool> _isOpenFile(File f) async {
     // The active session's recorder holds an open IOSink; harmless to skip it. We identify
     // it by asking the recorder whether its current path matches.
-    return LocalSessionRecorder().path == f.path;
+    final recorder = LocalSessionRecorder();
+    return recorder.isOpen && recorder.path == f.path;
   }
 
   /// Parse the metadata # header line of a rescue CSV into a map.
@@ -88,35 +89,69 @@ class RecoveryUploader {
   Future<bool> _uploadOne(File f, Map<String, String> meta) async {
     final sessionId = meta['session_id']!;
     final deviceId = meta['device_id']!;
-    final bytes = await f.readAsBytes();
-    if (bytes.isEmpty) return true; // nothing to upload — treat as done
-    final sha = sha256.convert(bytes).toString();
+    final total = await f.length();
+    if (total == 0) return true; // nothing to upload — treat as done
+    // Recordings can be hundreds of MB. Hash and upload bounded chunks from disk instead
+    // of materialising the whole CSV in the Dart heap (which could kill the app mid-recovery).
+    final sha = await _sha256File(f);
 
     final client = HttpClient();
+    RandomAccessFile? reader;
     try {
       // Resume point already stored on the backend.
-      var offset = await _status(deviceId, sessionId, client);
-      final total = bytes.length;
+      final status = await _status(deviceId, sessionId, client);
+      if (status == null) return false;
+      var offset = (status['received_bytes'] as num?)?.toInt() ?? 0;
+      if (offset < 0 || offset > total) return false;
+      if (offset == total) {
+        return status['complete'] == true && status['sha256_verified'] == true;
+      }
+      reader = await f.open();
 
       while (offset < total) {
-        // clamp() returns num; force int for sublist()/sublist boundaries.
-        final end = (offset + _chunkBytes).clamp(offset, total) as int;
-        final chunk = bytes.sublist(offset, end);
+        final end = (offset + _chunkBytes).clamp(offset, total);
+        await reader.setPosition(offset);
+        final chunk = await reader.read(end - offset);
+        if (chunk.length != end - offset) return false;
         final response = await _postChunk(
           client, deviceId, sessionId, meta, chunk, offset, total,
           last: end >= total, sha: sha,
         );
         final statusCode = response.statusCode;
-        await response.drain<void>(); // consume/discard the response body
+        final responseText = await response.transform(utf8.decoder).join();
+        Map<String, dynamic>? server;
+        try { server = jsonDecode(responseText) as Map<String, dynamic>; } catch (_) {}
+        if (statusCode == 409) {
+          final expected = (server?['expected_offset'] as num?)?.toInt();
+          // The backend is authoritative after an interrupted request. Resume exactly where
+          // it says, but reject a nonsensical/non-progressing response to avoid an infinite loop.
+          if (expected == null || expected < 0 || expected > total || expected == offset) return false;
+          offset = expected;
+          continue;
+        }
         if (statusCode != 200) return false;
-        offset = end;
-        if (end >= total) break;
+        final received = (server?['received_bytes'] as num?)?.toInt();
+        if (received != end) return false;
+        offset = received!;
+        if (end >= total) {
+          // Do not create the local completion marker until the backend has both the
+          // complete byte count and the digest match.
+          return server?['complete'] == true && server?['sha256_verified'] == true;
+        }
       }
 
-      return true;
+      return false;
     } finally {
+      await reader?.close();
       client.close(force: true);
     }
+  }
+
+  Future<String> _sha256File(File file) async {
+    // File.openRead feeds the digest incrementally; it never creates a byte array for the
+    // complete recording.
+    final digest = await sha256.bind(file.openRead()).first;
+    return digest.toString();
   }
 
   Future<HttpClientResponse> _postChunk(
@@ -150,7 +185,8 @@ class RecoveryUploader {
     return await req.close();
   }
 
-  Future<int> _status(String deviceId, String sessionId, HttpClient client) async {
+  Future<Map<String, dynamic>?> _status(
+      String deviceId, String sessionId, HttpClient client) async {
     for (int i = 0; i < _maxRetries; i++) {
       try {
         final uri = Uri.parse('$_baseUrl/upload/status').replace(queryParameters: {
@@ -161,14 +197,13 @@ class RecoveryUploader {
         final res = await req.close();
         if (res.statusCode == 200) {
           final body = await res.transform(utf8.decoder).join();
-          final json = jsonDecode(body) as Map<String, dynamic>;
-          return (json['received_bytes'] as num?)?.toInt() ?? 0;
+          return jsonDecode(body) as Map<String, dynamic>;
         }
       } catch (_) {}
       final delayMs = 400 * (i + 1);
       await Future.delayed(Duration(milliseconds: delayMs));
     }
-    return 0;
+    return null;
   }
 
   // ── Local completion markers ───────────────────────────────────────────────

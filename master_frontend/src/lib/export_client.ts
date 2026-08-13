@@ -17,6 +17,7 @@ export interface RecoveryFileInfo {
   session_tag: string;
   operator: string;
   complete: boolean;
+  verified?: boolean;
   done: boolean;
   received_bytes: number;
   total_bytes: number;

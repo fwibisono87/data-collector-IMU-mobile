@@ -19,6 +19,7 @@ Upload protocol (chunked, resumable):
 
 The server appends chunks in order and tracks received_bytes per (device, session).
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["recovery"])
 
 RECOVERY_PATH = Path(os.getenv("RECOVERY_PATH", "./data_recovery"))
+_upload_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 
 def _session_dir(session_id: str) -> Path:
@@ -95,9 +98,10 @@ def _load_info(session_id: str, device_id: str) -> dict:
 
 def _save_info(info: dict) -> None:
     info["updated_at_ms"] = int(time.time() * 1000)
-    _info_path(str(info["session_id"]), str(info["device_id"])).write_text(
-        json.dumps(info, indent=2), encoding="utf-8"
-    )
+    path = _info_path(str(info["session_id"]), str(info["device_id"]))
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _sha256(path: Path) -> str:
@@ -133,40 +137,48 @@ async def upload_csv(request: Request):
     sha = (request.headers.get("x-sha256") or "").strip()
     complete = request.headers.get("x-complete") == "1"
 
-    info = _load_info(session_id, device_id)
-    if info["received_bytes"] > offset:
-        # Duplicate / out-of-order chunk (retry after a partial write). Client should resume
-        # from received_bytes; return current state instead of corrupting the file.
-        return JSONResponse(info)
-
     body = await request.body()
-    csv = _csv_path(session_id, device_id)
-    with open(csv, "ab") as f:
-        f.write(body)
-
-    info.update({
-        "role": role or info["role"],
-        "subject": subject or info["subject"],
-        "session_tag": session_tag or info["session_tag"],
-        "operator": operator or info["operator"],
-        "total_bytes": total,
-        "received_bytes": offset + len(body),
-    })
-    if complete:
-        info["sha256"] = sha
-        info["complete"] = True
-        try:
-            info["sha256_verified"] = _sha256(csv) == sha
-        except Exception:
-            info["sha256_verified"] = None
-        _save_info(info)
-        await audit.log("INFO", "recovery_upload_complete", {
-            "session_id": session_id, "device_id": device_id, "bytes": info["received_bytes"],
+    if offset < 0 or total < 0 or len(body) > _MAX_CHUNK_BYTES:
+        raise HTTPException(status_code=400, detail="invalid upload offsets or chunk size")
+    lock = _upload_locks.setdefault((session_id, device_id), asyncio.Lock())
+    async with lock:
+        info = _load_info(session_id, device_id)
+        csv = _csv_path(session_id, device_id)
+        actual = csv.stat().st_size if csv.exists() else 0
+        expected = int(info.get("received_bytes", 0))
+        if actual != expected:
+            info["received_bytes"] = actual
+            info["complete"] = False
+            _save_info(info)
+            expected = actual
+        if offset != expected:
+            return JSONResponse({**info, "expected_offset": expected}, status_code=409)
+        prior_total = int(info.get("total_bytes", 0))
+        if prior_total not in (0, total) or offset + len(body) > total:
+            return JSONResponse({**info, "expected_offset": expected}, status_code=409)
+        with open(csv, "ab") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        info.update({
+            "role": role or info["role"], "subject": subject or info["subject"],
+            "session_tag": session_tag or info["session_tag"], "operator": operator or info["operator"],
+            "total_bytes": total, "received_bytes": offset + len(body), "complete": False,
+            "sha256_verified": False,
         })
+        if complete:
+            if not sha or info["received_bytes"] != total or _sha256(csv) != sha:
+                info["state"] = "corrupt"
+                _save_info(info)
+                raise HTTPException(status_code=422, detail="final size or sha256 verification failed")
+            info.update({"sha256": sha, "sha256_verified": True, "complete": True, "state": "verified"})
+            await audit.log("INFO", "recovery_upload_complete", {
+                "session_id": session_id, "device_id": device_id, "bytes": info["received_bytes"],
+            })
+        else:
+            info["state"] = "receiving"
+        _save_info(info)
         return JSONResponse(info)
-
-    _save_info(info)
-    return JSONResponse(info)
 
 
 def _int_header(request: Request, name: str, default: int) -> int:
@@ -410,7 +422,7 @@ async def recovery_merge(session_id: str):
     for p in d.glob("*.info.json"):
         info = json.loads(p.read_text(encoding="utf-8"))
         csv = d / f"{_slug(info['device_id'])}.csv"
-        if csv.exists() and info.get("complete"):
+        if csv.exists() and info.get("complete") and info.get("sha256_verified"):
             sources.append((info["device_id"], csv))
     if not sources:
         raise HTTPException(status_code=404, detail="no complete recovery files to merge")

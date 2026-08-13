@@ -49,6 +49,9 @@ type LiveListener = (samples: Record<string, { acc: number[]; gyro: number[]; ts
 
 const ACK_TIMEOUT_MS = 2000;
 const ACK_MAX_RETRIES = 3;
+// STOP includes server-side fsync, sort, and validation. Retrying it every two seconds makes
+// the dashboard claim failure while the backend is correctly finalizing the session.
+const STOP_ACK_TIMEOUT_MS = 120_000;
 
 class WsClient {
   private controlWs: WebSocket | null = null;
@@ -114,7 +117,7 @@ class WsClient {
   }
 
   async stopSession(reason = "operator_stop"): Promise<AckMsg> {
-    return this._sendWithAck("STOP_SESSION", { reason });
+    return this._sendWithAck("STOP_SESSION", { reason }, undefined, 0, STOP_ACK_TIMEOUT_MS);
   }
 
   async setLabel(labelId: number): Promise<AckMsg> {
@@ -176,6 +179,7 @@ class WsClient {
     payload: Record<string, unknown>,
     commandId?: string,
     attempt = 0,
+    timeoutMs = ACK_TIMEOUT_MS,
   ): Promise<AckMsg> {
     return new Promise((resolve, reject) => {
       const id = commandId ?? crypto.randomUUID();
@@ -184,11 +188,11 @@ class WsClient {
       const timer = setTimeout(() => {
         this.pendingAcks.delete(id);
         if (attempt < ACK_MAX_RETRIES - 1) {
-          this._sendWithAck(type, payload, id, attempt + 1).then(resolve).catch(reject);
+          this._sendWithAck(type, payload, id, attempt + 1, timeoutMs).then(resolve).catch(reject);
         } else {
           reject(new Error(`ACK timeout after ${ACK_MAX_RETRIES} attempts`));
         }
-      }, ACK_TIMEOUT_MS);
+      }, timeoutMs);
 
       this.pendingAcks.set(id, { msg, attempts: attempt, resolve, reject, timer });
 

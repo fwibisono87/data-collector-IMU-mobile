@@ -91,6 +91,7 @@ export default function Home() {
   useEffect(() => { endSessionOpenRef.current = endSession !== null; }, [endSession]);
 
   const isRecording = sessionState === "RECORDING";
+  const supportsDurableVideoExport = typeof window !== "undefined" && "showSaveFilePicker" in window;
   // Derive online count directly from devices — single source of truth.
   const onlineCount = devices.filter(d => d.is_online).length;
   // Single source of truth for preflight, shared with PreflightPanel so the panel and the
@@ -101,6 +102,7 @@ export default function Home() {
     isWsConnected, devices, subject, sessionTag, operator, camStatus, backendBuildId,
   );
   const preflightFailures = preflightChecks.filter(c => c.status === "fail");
+  const hasBuildMismatch = preflightFailures.some(c => c.label === "Dashboard build matches backend");
 
   // Hard prerequisites: without these a session cannot physically start (no backend, no
   // device, no session identity, no camera). Deliberately a SUBSET of the checks above —
@@ -113,7 +115,9 @@ export default function Home() {
     subject.trim().length > 0 &&
     sessionTag.trim().length > 0 &&
     operator.trim().length > 0 &&
-    camStatus.ok;
+    camStatus.ok &&
+    supportsDurableVideoExport &&
+    !hasBuildMismatch;
 
   // Ask the backend which commit it is, once we're connected. A backend cannot change build
   // without restarting, which drops the socket — so reconnecting re-runs this and the answer
@@ -268,24 +272,23 @@ export default function Home() {
     const ended = { sessionId, subject, sessionTag, operator };
     let results: EndSessionVideoResult[] = [];
     let missed: string[] = [];
-    // Stop the cameras first, but never let a camera-finalisation throw strand the backend in
-    // RECORDING. A throw here is caught and recorded so the session can still be stopped.
-    try {
-      const out = (await camRef.current?.stopRecording()) ?? { results: [], missed: [] };
-      results = out.results;
-      missed = out.missed;
-    } catch (e) {
-      console.error("camera finalisation failed (session stop will still run)", e);
-    }
-    // Always tell the backend the session ended, in its OWN try/catch. This must execute even
-    // if the camera stop above threw — the previous code path aborted before stopSession and
-    // left the backend recording forever despite the "cannot strand" comment. [Finding B]
+    // Stop the shared session immediately. Camera finalisation is independent and bounded by
+    // its own timeout, so a broken MediaRecorder cannot strand phones/backend in RECORDING.
+    const cameraStop = camRef.current?.stopRecording() ?? Promise.resolve({ results: [], missed: [] });
     let stopError = "";
     try {
       await wsClient.stopSession("operator_stop");
     } catch (e) {
       stopError = String(e);
       console.error("session stop on backend failed", e);
+    }
+    try {
+      const out = await cameraStop;
+      results = out.results;
+      missed = out.missed;
+    } catch (e) {
+      console.error("camera finalisation failed", e);
+      missed = ["camera finalisation failed — recover IndexedDB footage before a new session"];
     }
     // No immediate downloads — the end-of-session modal handles artifacts+video as one
     // zip, and cannot be dismissed until a download has completed.

@@ -115,9 +115,9 @@ class TaskBridge {
     if (m['state'] is int) newState = WsState.values[m['state'] as int];
     _packetsSent = m['packetsSent'] as int? ?? _packetsSent;
     _packetsBuffered = m['packetsBuffered'] as int? ?? _packetsBuffered;
-    _activeSessionId = m['activeSessionId'] as String? ?? _activeSessionId;
-    _serverState = m['serverState'] as String? ?? _serverState;
-    _lastConnectError = m['lastConnectError'] as String? ?? _lastConnectError;
+    if (m.containsKey('activeSessionId')) _activeSessionId = m['activeSessionId'] as String?;
+    if (m.containsKey('serverState')) _serverState = m['serverState'] as String?;
+    if (m.containsKey('lastConnectError')) _lastConnectError = m['lastConnectError'] as String?;
     _deviceRole = m['deviceRole'] as String? ?? _deviceRole;
     _localRows = m['localRows'] as int? ?? _localRows;
     _localOpen = m['localOpen'] as bool? ?? _localOpen;

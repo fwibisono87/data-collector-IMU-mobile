@@ -281,9 +281,8 @@ export default function EndSessionModal({
     return entries;
   };
 
-  // Legacy fallback for browsers without the File System Access API. Deliberately builds the
-  // whole archive in the JS heap — it is memory-bound and may fail on long sessions, so it
-  // must only run where showSaveFilePicker is unsupported (and the UI warns the operator).
+  // Kept only for recovery from older sessions. New recordings are blocked on browsers without
+  // File System Access because this path necessarily assembles the archive in memory.
   const legacyDownload = async (m: ExportManifest | null, sid: string, prefix: string) => {
     setDownloadProgress("Legacy in-memory build — memory-bound on long sessions…");
     const zip = new JSZip();
@@ -372,20 +371,7 @@ export default function EndSessionModal({
         await markSessionSaved(sid, tally.total);
         setDownloaded(true);
         onDownloadComplete(sid);
-      } else {
-        await legacyDownload(m, sid, prefix);
-        // Deliberately NOT calling onDownloadComplete: it deletes the chunk backup, and this
-        // path ends in an anchor click that cannot report whether a single byte reached disk.
-        // Destroying the only copy on that signal is precisely the 2026-08-07 failure. The
-        // modal still closes; the footage stays in IndexedDB and is listed by the recovery
-        // screen until a confirmed save reclaims it.
-        setDownloaded(true);
-        setDownloadError(
-          "Saved via the legacy in-memory downloader, which cannot confirm the file reached " +
-          "disk. Video is being kept in this browser — verify the .zip opens, then clear it " +
-          "from “Recover buffered video”.",
-        );
-      }
+      } else throw new Error("This browser cannot safely export a long recording. Open this session in Chrome or Edge.");
     } catch (e) {
       setDownloadError(`Download failed: ${e}`);
     } finally {
@@ -554,8 +540,8 @@ export default function EndSessionModal({
         <div className="shrink-0 mt-auto pt-1 border-t border-white/10 flex flex-col gap-2">
           {!canStreamSave() && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300">
-              This browser lacks the File System Access API — downloads fall back to an
-              in-memory ZIP that may fail on long sessions.
+              This browser cannot safely export long recordings. Reopen this session in Chrome
+              or Edge using the same origin and browser profile.
             </div>
           )}
           {!downloaded && (
@@ -568,7 +554,7 @@ export default function EndSessionModal({
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownload}
-              disabled={downloading}
+              disabled={downloading || !canStreamSave()}
               className="btn-primary flex-1 py-2 font-bold text-sm disabled:opacity-50 disabled:cursor-wait"
             >
               {downloading ? "Building ZIP…" : "Download all as .zip"}

@@ -79,13 +79,15 @@ class FallbackBufferManager {
   /// flush would write session A's rows into session B's CSV (plan D13).
   Future<void> activate({String? sessionId}) async {
     if (_isActive) return;
+    _bufferedCount = 0;
+    _droppedOverflow = 0;
+    // Mark active synchronously: sensor callbacks may enqueue before asynchronous storage
+    // setup completes. _pending retains those first packets until _openCurrentFile() kicks.
+    _isActive = true;
     await loadMeta();
     if (_sessionId != null && _sessionId != sessionId) {
       await quarantine();
     }
-    _isActive = true;
-    _bufferedCount = 0;
-    _droppedOverflow = 0;
     _sessionId = sessionId;
     await _openCurrentFile();
     await _writeMeta();

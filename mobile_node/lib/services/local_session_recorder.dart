@@ -154,6 +154,9 @@ class LocalSessionRecorder {
     _flushTimer = null;
     final s = _sink;
     final ev = _events;
+    // Keep a local reference for close, but make the public path cease to identify this file
+    // as active before recovery upload is triggered by STOP_SESSION.
+    _file = null;
     _sink = null;
     _events = null;
     _sessionId = null;
