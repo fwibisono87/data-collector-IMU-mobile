@@ -42,41 +42,19 @@ COL_SAMPLE_KIND = 13
 
 _METADATA_RE = re.compile(r"(\w+)=([^,\s]+)")
 
-# ── Sampling tier ────────────────────────────────────────────────────────────
+# ── Legacy sampling-tier token ───────────────────────────────────────────────
 #
-# The rate a session ACTUALLY attained is a property of the handset, not a setting: the
-# 2510DRA23E is dual-sourced, and the Bosch bmi3xy units deliver ~80 Hz of distinct readings
-# against a 100 Hz request while the TDK icm4n607 units deliver ~99 Hz. Encoding the attained
-# level in the filename lets an analyst see, and glob, what they are working with.
+# Filenames used to carry an attained-rate token (`<role>_75hz_sensor_data.csv`). It was
+# removed in Aug 2026: the tier came from true_sensor_hz (distinct hardware readings) while
+# rows are emitted by a separate ~100 Hz timer, so it described neither the row cadence nor
+# a uniform grid. Session 1786677865027 wrote `chest_75hz` for a file whose 56,173 rows span
+# 575.9 s at 97.5 rows/s — reading it as rows/75 gives 749 s against a real 575.9 s.
 #
-# Tiers are a coarse ladder rather than the raw figure: the raw value drifts session to
-# session on the same device (79-88), so raw names would never group. The precise number stays
-# in <session>_sampling.json and the integrity report.
-#
-# Floor semantics with a 5% grace: a file is only labelled 100hz if it genuinely sustained
-# ~100. 99 -> 100hz (within grace), 88 -> 75hz, 84 -> 75hz, 50 -> 50hz. Never round up — the
-# label must not claim more than the data delivered.
-SAMPLING_TIERS = (100, 75, 50, 25)
-_TIER_GRACE = 0.95
+# Measured rates now live in <session>_<role>_timing.json, stated precisely. Only the
+# STRIPPER survives, because sessions already on disk still carry the token and every
+# filename-to-role parser must tolerate it — otherwise one physical device buckets under
+# several roles depending on the rate it happened to attain.
 _TIER_RE = re.compile(r"_(?:\d+|unk)hz$")
-
-
-def rate_tier(hz: float) -> int:
-    """Highest tier this measured rate qualifies for, or 0 if below the ladder."""
-    try:
-        value = float(hz)
-    except (TypeError, ValueError):
-        return 0
-    for tier in SAMPLING_TIERS:
-        if value >= tier * _TIER_GRACE:
-            return tier
-    return 0
-
-
-def tier_token(hz: float) -> str:
-    """Filename token for a measured rate: '100hz', '75hz', ... or 'unkhz'."""
-    tier = rate_tier(hz)
-    return f"{tier}hz" if tier else "unkhz"
 
 
 def strip_tier_token(stem: str) -> str:

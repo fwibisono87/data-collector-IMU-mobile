@@ -1,50 +1,30 @@
-"""Sampling-tier filename token: <session>_<role>_<tier>hz_sensor_data.csv.
+"""Filenames must not claim a sampling rate, and legacy names that do must still parse.
 
-The attained sampling rate is a property of the handset, not a setting — the 2510DRA23E is
-dual-sourced and its Bosch units deliver ~80 Hz of distinct readings against a 100 Hz request.
-The token records what a file actually contains. These tests pin the two things that can
-silently corrupt downstream analysis: mislabelling a file as a higher rate than it delivered,
-and letting the token leak into the parsed role so one device buckets under several names.
+Files used to be written as `<session>_<role>_<tier>hz_sensor_data.csv`. The token was
+derived from true_sensor_hz — distinct hardware readings per second — while the rows in the
+file are emitted by a separate ~100 Hz timer. It therefore described neither the row cadence
+nor a uniform grid, and the most natural way to read such a name is the one that is wrong:
+
+    session 1786677865027, chest -> `chest_75hz_sensor_data.csv`
+    56,173 rows spanning 575.890 s  =  97.54 rows/s
+    rows / 75 = 748.9 s, against a real 575.9 s — a 30% error
+
+Three phones in that session produced 56,173 / 50,569 / 57,317 rows over the SAME
+wall-clock window (spans within 30 ms of each other), because each one's emit timer slipped
+differently. No single rate in a filename can express that; the per-role timing sidecar
+states it explicitly instead.
+
+These tests pin both halves: new files carry no rate token, and old files on disk still
+resolve to the right role.
 """
 import asyncio
+import json
 from pathlib import Path
 
-import pytest
-
-from master_backend.app.csv_schema import (
-    rate_tier,
-    strip_tier_token,
-    tier_token,
-)
-from master_backend.app.io_manager import _retier_name
+from master_backend.app.csv_schema import strip_tier_token
 
 
-# ── Tier ladder ──────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("hz,expected", [
-    (100.0, 100), (99.0, 100), (95.0, 100),        # 5% grace below nominal
-    (94.9, 75), (88.0, 75), (84.0, 75), (75.0, 75), (71.25, 75),
-    (71.0, 50), (50.0, 50), (47.5, 50),
-    (47.4, 25), (25.0, 25), (23.75, 25),
-    (23.7, 0), (1.0, 0), (0.0, 0),
-])
-def test_rate_tier_never_rounds_up(hz, expected):
-    """A file must never claim a higher rate than it delivered."""
-    assert rate_tier(hz) == expected
-
-
-def test_rate_tier_handles_garbage():
-    assert rate_tier(None) == 0
-    assert rate_tier("nonsense") == 0
-
-
-def test_tier_token_formats():
-    assert tier_token(99.0) == "100hz"
-    assert tier_token(84.0) == "75hz"
-    assert tier_token(0.0) == "unkhz"
-
-
-# ── Role parsing ─────────────────────────────────────────────────────────────
+# ── Legacy token parsing (sessions already on disk) ──────────────────────────
 
 def test_strip_tier_token_removes_only_the_token():
     assert strip_tier_token("waist_100hz") == "waist"
@@ -53,7 +33,7 @@ def test_strip_tier_token_removes_only_the_token():
 
 
 def test_strip_tier_token_is_a_noop_on_untiered_names():
-    """Files written before this change carry no token and must still parse."""
+    """The shape every NEW file has."""
     assert strip_tier_token("waist") == "waist"
     assert strip_tier_token("thigh_right") == "thigh_right"
 
@@ -61,13 +41,14 @@ def test_strip_tier_token_is_a_noop_on_untiered_names():
 def test_role_from_name_handles_both_old_and_new_layouts():
     from master_backend.app.export import _role_from_name
     sid = "1786071998055"
-    # New, tiered
+    # Legacy, tiered — must keep resolving, or one device buckets under several roles.
     assert _role_from_name(f"{sid}_thigh_right_75hz_sensor_data.csv", sid) == "thigh_right"
     assert _role_from_name(f"{sid}_waist_100hz_sensor_data.csv", sid) == "waist"
     assert _role_from_name(f"{sid}_chest_50hz_sensor_data_late.csv", sid) == "chest"
-    # Legacy, untiered — sessions already on disk
+    # Current, untiered
     assert _role_from_name(f"{sid}_thigh_right_sensor_data.csv", sid) == "thigh_right"
     assert _role_from_name(f"{sid}_waist_sensor_data.csv", sid) == "waist"
+    assert _role_from_name(f"{sid}_chest_sensor_data_late.csv", sid) == "chest"
 
 
 def test_analyze_session_cli_strips_the_token_too():
@@ -79,29 +60,9 @@ def test_analyze_session_cli_strips_the_token_too():
     assert (sid, role, kind) == ("1786071998055", "thigh_right", "sensor_data")
 
 
-# ── Rename ───────────────────────────────────────────────────────────────────
-
-def test_retier_name_preserves_roles_containing_underscores():
-    assert _retier_name("123_thigh_right_50hz_sensor_data.csv", "75hz") == \
-        "123_thigh_right_75hz_sensor_data.csv"
-    assert _retier_name("123_waist_unkhz_sensor_data.csv", "100hz") == \
-        "123_waist_100hz_sensor_data.csv"
-
-
-def test_retier_name_covers_late_and_rescue_sidecars():
-    assert _retier_name("123_chest_50hz_sensor_data_late.csv", "75hz") == \
-        "123_chest_75hz_sensor_data_late.csv"
-    assert _retier_name("123_chest_50hz_sensor_data_rescue.csv", "75hz") == \
-        "123_chest_75hz_sensor_data_rescue.csv"
-
-
-def test_retier_name_leaves_unrelated_files_alone():
-    assert _retier_name("123_consolidated.csv", "75hz") == "123_consolidated.csv"
-
-
 # ── End to end through the writer ────────────────────────────────────────────
 
-def _run_session(tmp_path, role, open_hz, close_hz, on_open=None):
+def _run_session(tmp_path, role, open_hz, close_hz):
     """Open and close one session in a SINGLE event loop.
 
     aiofiles binds its handle to the loop that opened it, so splitting open and close across
@@ -117,55 +78,89 @@ def _run_session(tmp_path, role, open_hz, close_hz, on_open=None):
             session_id="S1", subject_name="Subj", session_tag="Tag", operator="Op",
             device_roles={"DEV1": role}, **kwargs,
         )
-        if on_open:
-            on_open()
         rates = {} if close_hz is None else {"DEV1": close_hz}
         return await mgr.close_session(rates)
 
     return asyncio.run(body())
 
 
-def test_close_session_retiers_from_the_session_average(tmp_path, monkeypatch):
-    """Named from preflight at open, corrected from the session average at close."""
+def test_written_filename_carries_no_rate_token(tmp_path, monkeypatch):
+    """The whole point: the name must not claim a rate it cannot describe."""
     monkeypatch.setenv("SSD_PATH", str(tmp_path))
     monkeypatch.setenv("SORT_CSV_ON_CLOSE", "false")
     folder = tmp_path / "Data_Riset_IMU" / "Subj_Tag"
 
-    seen = {}
-    # Preflight said ~99 Hz; the session actually sustained 84.
-    results = _run_session(
-        tmp_path, "thigh_right", 99.0, 84.0,
-        on_open=lambda: seen.update(
-            open_name=(folder / "S1_thigh_right_100hz_sensor_data.csv").exists()),
-    )
+    results = _run_session(tmp_path, "thigh_right", 99.0, 84.0)
 
-    assert seen["open_name"], "file should be named from the preflight tier at open"
-    assert not (folder / "S1_thigh_right_100hz_sensor_data.csv").exists()
-    renamed = folder / "S1_thigh_right_75hz_sensor_data.csv"
-    assert renamed.exists(), "file should have been re-tiered down to the attained rate"
-    assert results["DEV1"]["path"] == str(renamed), "downstream must follow the new path"
-    assert results["DEV1"]["retiered_from"] == "S1_thigh_right_100hz_sensor_data.csv"
+    expected = folder / "S1_thigh_right_sensor_data.csv"
+    assert expected.exists()
+    assert results["DEV1"]["path"] == str(expected)
+    # Whatever the measured rate, it must not appear in the name.
+    assert not list(folder.glob("*hz*")), [p.name for p in folder.glob("*hz*")]
 
 
-def test_close_session_does_not_rename_when_the_tier_is_unchanged(tmp_path, monkeypatch):
+def test_no_rename_happens_at_close(tmp_path, monkeypatch):
+    """The file opened under one name and closed under the same one.
+
+    The old close path renamed to correct the tier, which could fail and leave a stale
+    label on correct data. There is nothing to correct now.
+    """
     monkeypatch.setenv("SSD_PATH", str(tmp_path))
     monkeypatch.setenv("SORT_CSV_ON_CLOSE", "false")
-    results = _run_session(tmp_path, "waist", 99.0, 97.0)   # both tier 100
+    results = _run_session(tmp_path, "waist", 99.0, 51.0)   # would have crossed two tiers
     folder = tmp_path / "Data_Riset_IMU" / "Subj_Tag"
-    assert (folder / "S1_waist_100hz_sensor_data.csv").exists()
+    assert (folder / "S1_waist_sensor_data.csv").exists()
     assert "retiered_from" not in results["DEV1"]
 
 
-def test_unmeasured_device_is_labelled_unknown_not_guessed(tmp_path, monkeypatch):
-    """No measurement must produce 'unkhz', never a fabricated rate."""
+def test_unmeasured_device_still_gets_a_stable_name(tmp_path, monkeypatch):
+    """No measurement used to mean 'unkhz' in the name; now it changes nothing."""
     monkeypatch.setenv("SSD_PATH", str(tmp_path))
     monkeypatch.setenv("SORT_CSV_ON_CLOSE", "false")
+    _run_session(tmp_path, "chest", None, None)
     folder = tmp_path / "Data_Riset_IMU" / "Subj_Tag"
-    seen = {}
-    _run_session(
-        tmp_path, "chest", None, None,
-        on_open=lambda: seen.update(
-            open_name=(folder / "S1_chest_unkhz_sensor_data.csv").exists()),
-    )
-    assert seen["open_name"]
-    assert (folder / "S1_chest_unkhz_sensor_data.csv").exists()
+    assert (folder / "S1_chest_sensor_data.csv").exists()
+    assert not (folder / "S1_chest_unkhz_sensor_data.csv").exists()
+
+
+def test_close_session_reports_the_measured_rate_instead_of_naming_with_it(tmp_path, monkeypatch):
+    """The measurement is not lost — it moves out of the name and into the result."""
+    monkeypatch.setenv("SSD_PATH", str(tmp_path))
+    monkeypatch.setenv("SORT_CSV_ON_CLOSE", "false")
+    results = _run_session(tmp_path, "waist", 99.0, 87.81)
+    assert results["DEV1"]["session_avg_hz"] == 87.81
+
+
+# ── Timing sidecar ───────────────────────────────────────────────────────────
+
+def test_timing_sidecar_states_the_rate_that_describes_the_rows(tmp_path):
+    """row_hz must be rows/span, the number that was missing.
+
+    Reproduces the real chest device: 56,173 rows over 575.890 s. A reader given only
+    `75hz` computes 748.9 s; row_hz gives back the true 97.54.
+    """
+    from master_backend.app.sampling_analysis import analyse_device
+
+    first_ts = 1786677865080
+    rows = []
+    # 97.54 rows/s over ~575.89 s, evenly spaced for the purposes of the average.
+    n = 56173
+    span_ms = 575890
+    # Sample the series rather than build 56k rows; include the LAST index so the span is
+    # exact (nominal_hz is span-based, so a short tail would understate it).
+    indices = list(range(0, n, 1000))
+    if indices[-1] != n - 1:
+        indices.append(n - 1)
+    for i in indices:
+        ts = first_ts + round(i * span_ms / (n - 1))
+        rows.append([str(ts), "0.1", "0.2", "0.3", "1.0", "2.0", "3.0",
+                     "0", "0", str(i), "DEV-CHEST", "", "", "0"])
+    stats = analyse_device(rows, device_id="DEV-CHEST", role="chest")
+
+    assert stats["first_timestamp_ms"] == first_ts
+    assert stats["last_timestamp_ms"] == first_ts + span_ms
+    span_s = (stats["last_timestamp_ms"] - stats["first_timestamp_ms"]) / 1000
+    assert abs(span_s - 575.890) < 0.01
+    # The label that would have been written for this device was 75hz; the honest figure
+    # for its ROW cadence is far from that.
+    assert stats["nominal_hz"] > 0

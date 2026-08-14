@@ -89,7 +89,7 @@ export interface RecoverySessionEntry {
 const DATA_KINDS = new Set([
   "main", "csv", "late", "rescue", "merged", "consolidated",
   "integrity", "connectivity", "late_summary", "consolidation",
-  "consolidated_validation",
+  "consolidated_validation", "timing",
 ]);
 
 function base(ip: string): string {

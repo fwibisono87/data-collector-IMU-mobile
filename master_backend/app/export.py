@@ -93,6 +93,8 @@ def _classify(name: str) -> str:
         return "consolidation"
     if name.endswith("_consolidated_validation.json"):
         return "consolidated_validation"
+    if name.endswith("_timing.json"):
+        return "timing"
     if name.endswith("_consolidated.csv"):
         return "consolidated"
     if name.endswith("_merged.csv"):

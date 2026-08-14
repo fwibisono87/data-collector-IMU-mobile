@@ -329,6 +329,11 @@ class IntegrityValidator:
                     "true_sensor_hz": stats["true_sensor_hz"],
                     "held_row_pct": stats["held_row_pct"],
                     "reference_hz": stats["reference_hz"],
+                    # The span these rows actually cover. Without it a reader has the rate
+                    # but no way to check it against wall-clock, which is how a file whose
+                    # rows spanned 575.9s came to be labelled 75hz.
+                    "first_timestamp_ms": stats.get("first_timestamp_ms"),
+                    "last_timestamp_ms": stats.get("last_timestamp_ms"),
                     "dt_ms": stats["dt_ms"],
                     "sequence": stats["sequence"],
                 }
@@ -584,5 +589,48 @@ class IntegrityValidator:
                 )
             except OSError as exc:
                 await audit.log("ERROR", "sampling_report_write_failed", {"error": str(exc)})
+
+            # Per-role timing sidecar. CSV filenames deliberately no longer carry a rate
+            # token, because no single number describes these files: rows are emitted by a
+            # ~100 Hz timer while the sensor updates at its own rate, and neither is
+            # uniform. Everything an analyst needs to place the rows on a real time axis
+            # is stated here explicitly, next to the data.
+            for dev in report["devices"]:
+                sampling = dev.get("sampling") or {}
+                first_ts = sampling.get("first_timestamp_ms")
+                last_ts = sampling.get("last_timestamp_ms")
+                span_s = (
+                    round((last_ts - first_ts) / 1000, 3)
+                    if isinstance(first_ts, int) and isinstance(last_ts, int) else None
+                )
+                timing = {
+                    "session_id": session_id,
+                    "role": dev["role"],
+                    "device_id": dev["device_id"],
+                    "csv": Path(dev["csv_path"]).name,
+                    "first_ts_ms": first_ts,
+                    "last_ts_ms": last_ts,
+                    "span_s": span_s,
+                    "rows": dev["row_count"],
+                    # rows/span — the rate that actually describes the rows in this file.
+                    "row_hz": sampling.get("nominal_hz"),
+                    # distinct hardware readings/second; lower than row_hz by held_pct.
+                    "true_hz": sampling.get("true_sensor_hz"),
+                    "held_pct": sampling.get("held_row_pct"),
+                    "note": (
+                        "Irregularly sampled: timestamp_ms is the authoritative time axis. "
+                        "Do NOT reconstruct time from a fixed rate — rows/row_hz is an "
+                        "average, not a grid, and row counts differ between devices over "
+                        "the same wall-clock window."
+                    ),
+                }
+                try:
+                    (first_path.parent / f"{session_id}_{dev['role']}_timing.json").write_text(
+                        json.dumps(timing, indent=2)
+                    )
+                except OSError as exc:
+                    await audit.log("ERROR", "timing_sidecar_write_failed", {
+                        "role": dev["role"], "error": str(exc),
+                    })
 
         return report
