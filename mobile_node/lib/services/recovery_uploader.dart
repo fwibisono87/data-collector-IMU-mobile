@@ -35,23 +35,33 @@ class RecoveryUploader {
 
   Future<int> uploadPending({String? onlySessionId}) async {
     if (!isConfigured) return 0;
-    final files = await LocalSessionRecorder().listSessions();
     int uploaded = 0;
-    for (final f in files) {
-      try {
-        if (await _isOpenFile(f)) continue;          // still recording this session
-        final meta = await _parseMeta(f);
-        if (meta == null) continue;
-        if (onlySessionId != null && meta['session_id'] != onlySessionId) continue;
-        if (await _isMarked(meta['session_id']!)) continue;
-        final ok = await _uploadOne(f, meta);
-        if (ok) {
-          uploaded++;
-          await _markDone(meta['session_id']!, f, meta['sha256'] ?? '');
+    try {
+      final files = await LocalSessionRecorder().listSessions();
+      for (final f in files) {
+        try {
+          if (await _isOpenFile(f)) continue; // still recording this session
+          final meta = await _parseMeta(f);
+          if (meta == null) continue;
+          if (onlySessionId != null && meta['session_id'] != onlySessionId) {
+            continue;
+          }
+          if (await _isMarked(meta['session_id']!, meta['device_id']!, f)) {
+            continue;
+          }
+          final ok = await _uploadOne(f, meta);
+          if (ok) {
+            uploaded++;
+            await _markDone(meta['session_id']!, meta['device_id']!, f,
+                meta['sha256'] ?? '');
+          }
+        } catch (_) {
+          // Keep going; a later reconnect retries this file.
         }
-      } catch (e) {
-        // Keep going; a later reconnect retries.
       }
+    } catch (_) {
+      // Directory enumeration/storage failures are recoverable on the next
+      // reconnect and must not escape an unawaited upload task.
     }
     return uploaded;
   }
@@ -104,7 +114,33 @@ class RecoveryUploader {
       var offset = (status['received_bytes'] as num?)?.toInt() ?? 0;
       if (offset < 0 || offset > total) return false;
       if (offset == total) {
-        return status['complete'] == true && status['sha256_verified'] == true;
+        if (status['complete'] == true && status['sha256_verified'] == true) {
+          return true;
+        }
+        // The server may have durably appended the final bytes before a Wi-Fi drop took
+        // the response. Send an idempotent zero-byte final request so it can run the digest
+        // check and mark the upload verified instead of leaving a permanently "receiving"
+        // file that every reconnect silently skips.
+        final response = await _postChunk(
+          client,
+          deviceId,
+          sessionId,
+          meta,
+          const <int>[],
+          offset,
+          total,
+          last: true,
+          sha: sha,
+        );
+        final body = await response.transform(utf8.decoder).join();
+        try {
+          final finalized = jsonDecode(body) as Map<String, dynamic>;
+          return response.statusCode == 200 &&
+              finalized['complete'] == true &&
+              finalized['sha256_verified'] == true;
+        } catch (_) {
+          return false;
+        }
       }
       reader = await f.open();
 
@@ -114,18 +150,32 @@ class RecoveryUploader {
         final chunk = await reader.read(end - offset);
         if (chunk.length != end - offset) return false;
         final response = await _postChunk(
-          client, deviceId, sessionId, meta, chunk, offset, total,
-          last: end >= total, sha: sha,
+          client,
+          deviceId,
+          sessionId,
+          meta,
+          chunk,
+          offset,
+          total,
+          last: end >= total,
+          sha: sha,
         );
         final statusCode = response.statusCode;
         final responseText = await response.transform(utf8.decoder).join();
         Map<String, dynamic>? server;
-        try { server = jsonDecode(responseText) as Map<String, dynamic>; } catch (_) {}
+        try {
+          server = jsonDecode(responseText) as Map<String, dynamic>;
+        } catch (_) {}
         if (statusCode == 409) {
           final expected = (server?['expected_offset'] as num?)?.toInt();
           // The backend is authoritative after an interrupted request. Resume exactly where
           // it says, but reject a nonsensical/non-progressing response to avoid an infinite loop.
-          if (expected == null || expected < 0 || expected > total || expected == offset) return false;
+          if (expected == null ||
+              expected < 0 ||
+              expected > total ||
+              expected == offset) {
+            return false;
+          }
           offset = expected;
           continue;
         }
@@ -136,7 +186,8 @@ class RecoveryUploader {
         if (end >= total) {
           // Do not create the local completion marker until the backend has both the
           // complete byte count and the digest match.
-          return server?['complete'] == true && server?['sha256_verified'] == true;
+          return server?['complete'] == true &&
+              server?['sha256_verified'] == true;
         }
       }
 
@@ -189,7 +240,8 @@ class RecoveryUploader {
       String deviceId, String sessionId, HttpClient client) async {
     for (int i = 0; i < _maxRetries; i++) {
       try {
-        final uri = Uri.parse('$_baseUrl/upload/status').replace(queryParameters: {
+        final uri =
+            Uri.parse('$_baseUrl/upload/status').replace(queryParameters: {
           'device_id': deviceId,
           'session_id': sessionId,
         });
@@ -208,24 +260,34 @@ class RecoveryUploader {
 
   // ── Local completion markers ───────────────────────────────────────────────
 
-  Future<File> _markerFile(String sessionId) async {
+  Future<File> _markerFile(String sessionId, String deviceId) async {
     final dir = await getApplicationDocumentsDirectory();
-    return File('${dir.path}/recovery_uploaded_${sessionId.replaceAll(RegExp(r'[^\w-]'), '_')}.json');
+    final sid = sessionId.replaceAll(RegExp(r'[^\w-]'), '_');
+    final dev = deviceId.replaceAll(RegExp(r'[^\w-]'), '_');
+    return File('${dir.path}/recovery_uploaded_${sid}_$dev.json');
   }
 
-  Future<bool> _isMarked(String sessionId) async {
+  Future<bool> _isMarked(String sessionId, String deviceId, File source) async {
     try {
-      return await (await _markerFile(sessionId)).exists();
+      final marker = await _markerFile(sessionId, deviceId);
+      if (!await marker.exists()) return false;
+      final data =
+          jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
+      return data['file'] == source.path &&
+          data['bytes'] == await source.length();
     } catch (_) {
       return false;
     }
   }
 
-  Future<void> _markDone(String sessionId, File src, String sha) async {
+  Future<void> _markDone(
+      String sessionId, String deviceId, File src, String sha) async {
     try {
-      await (await _markerFile(sessionId)).writeAsString(jsonEncode({
+      await (await _markerFile(sessionId, deviceId)).writeAsString(jsonEncode({
         'session_id': sessionId,
+        'device_id': deviceId,
         'file': src.path,
+        'bytes': await src.length(),
         'sha256': sha,
         'uploaded_at_ms': DateTime.now().millisecondsSinceEpoch,
       }));

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'pipeline_controller.dart';
 
@@ -50,12 +51,18 @@ class ForegroundServiceHandler {
   // the two biggest levers against OEM (MIUI/HyperOS) background-killing the foreground
   // service. Idempotent: safe to call repeatedly, only prompts when not already granted.
   Future<void> ensurePermissions() async {
-    final np = await FlutterForegroundTask.checkNotificationPermission();
-    if (np != NotificationPermission.granted) {
-      await FlutterForegroundTask.requestNotificationPermission();
-    }
-    if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
-      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+    try {
+      final np = await FlutterForegroundTask.checkNotificationPermission();
+      if (np != NotificationPermission.granted) {
+        await FlutterForegroundTask.requestNotificationPermission();
+      }
+      if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
+        await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+      }
+    } catch (error) {
+      // Permission prompts are best effort. A denied/unsupported OEM request must
+      // not become an unhandled exception on the connection screen.
+      debugPrint('ForegroundServiceHandler: permission setup failed: $error');
     }
   }
 

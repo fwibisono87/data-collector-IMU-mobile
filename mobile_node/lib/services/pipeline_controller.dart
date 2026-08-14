@@ -50,18 +50,23 @@ class PipelineController {
     _sendSnapshot();
 
     // task_ready handshake: the UI waits for this before issuing connect.
-    FlutterForegroundTask.sendDataToMain({'k': 'task_ready', 'engineId': _engineId});
+    FlutterForegroundTask.sendDataToMain(
+        {'k': 'task_ready', 'engineId': _engineId});
 
     await _autoReconnect();
   }
 
   Future<void> _autoReconnect() async {
-    final desired = await SessionPersistence().loadDesired();
-    final ip = desired?['server_ip']?.toString() ?? '';
-    if (ip.isNotEmpty) {
-      // Idempotent; also resumes an interrupted recording via
-      // WebSocketClient._restoreSequenceIfInterrupted().
-      await WebSocketClient().connect(ip);
+    try {
+      final desired = await SessionPersistence().loadDesired();
+      final ip = desired?['server_ip']?.toString() ?? '';
+      if (ip.isNotEmpty) {
+        // Idempotent; also resumes an interrupted recording via
+        // WebSocketClient._restoreSequenceIfInterrupted().
+        await WebSocketClient().connect(ip);
+      }
+    } catch (error) {
+      ConnDebug.log('auto reconnect failed: $error');
     }
   }
 
@@ -69,11 +74,11 @@ class PipelineController {
     final t = DateTime.now().millisecondsSinceEpoch;
     switch (event['type']) {
       case 'start_session':
-        LocalSessionRecorder()
-            .logEvent({'type': 'service_start', 'engine_id': _engineId, 'time_ms': t});
+        LocalSessionRecorder().logEvent(
+            {'type': 'service_start', 'engine_id': _engineId, 'time_ms': t});
       case 'session_resumed':
-        LocalSessionRecorder()
-            .logEvent({'type': 'service_restart', 'engine_id': _engineId, 'time_ms': t});
+        LocalSessionRecorder().logEvent(
+            {'type': 'service_restart', 'engine_id': _engineId, 'time_ms': t});
       default:
         break;
     }
@@ -90,18 +95,34 @@ class PipelineController {
     } else if (cmd == 'disconnect') {
       // WebSocketClient refuses this while a session is active; keep the authoritative
       // recorder/sensor pipeline alive instead of silently creating a local-only stop.
-      unawaited(WebSocketClient().disconnect());
+      unawaited(_disconnectSafely());
+    }
+  }
+
+  Future<void> _disconnectSafely() async {
+    try {
+      await WebSocketClient().disconnect();
+    } catch (error) {
+      ConnDebug.log('disconnect failed: $error');
     }
   }
 
   Future<void> _connectAndReport(String ip) async {
     ConnDebug.log('task: connect command -> $ip');
-    final ok = await WebSocketClient().connect(ip);
-    ConnDebug.log('task: connect($ip) ok=$ok err=${WebSocketClient().lastConnectError}');
+    bool ok = false;
+    String? thrownError;
+    try {
+      ok = await WebSocketClient().connect(ip);
+    } catch (e) {
+      thrownError = '$e';
+      ConnDebug.log('task: connect threw -> $e');
+    }
+    ConnDebug.log(
+        'task: connect($ip) ok=$ok err=${WebSocketClient().lastConnectError}');
     FlutterForegroundTask.sendDataToMain({
       'k': 'connect_result',
       'ok': ok,
-      'error': ok ? null : WebSocketClient().lastConnectError,
+      'error': ok ? null : (thrownError ?? WebSocketClient().lastConnectError),
     });
   }
 
@@ -161,7 +182,8 @@ class PipelineController {
   }
 
   static String _randomHex(int len) {
-    final b = List.generate(len, (_) => Random().nextInt(16).toRadixString(16)).join();
+    final b = List.generate(len, (_) => Random().nextInt(16).toRadixString(16))
+        .join();
     return b;
   }
 

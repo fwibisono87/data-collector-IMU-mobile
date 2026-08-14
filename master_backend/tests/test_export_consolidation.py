@@ -403,3 +403,52 @@ def test_bundle_unknown_session_is_404_not_500(store: dict):
     with pytest.raises(HTTPException) as exc:
         _run(export_bundle("no-such-session"))
     assert exc.value.status_code == 404
+
+
+def test_partial_session_bundle_is_downloadable(store: dict):
+    """A FAIL/PARTIAL verdict warns the operator; it must never hide captured CSVs."""
+    from fastapi.responses import FileResponse
+    from master_backend.app.export import export_bundle, export_bundle_file
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [_row(1, 1, "DEV-CHEST")])
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status":"PARTIAL"}', encoding="utf-8")
+
+    _run(export_bundle(SESSION_ID))
+    response = _run(export_bundle_file(SESSION_ID))
+
+    assert isinstance(response, FileResponse)
+    assert str(response.path).endswith(f"{SESSION_ID}_bundle.zip")
+
+
+def test_consolidation_revalidates_the_files_delivered_to_analysis(store: dict):
+    """The final verdict must cover merged/late/recovery rows, not only STOP-time files."""
+    from master_backend.app.session_ledger import SessionLedger
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(i + 1, i, "DEV-CHEST") for i in range(100)
+    ])
+    SessionLedger(store["ssd"] / ".sessions").write(SESSION_ID, {
+        "session_id": SESSION_ID,
+        "state": "IDLE",
+        "terminal": True,
+        "subject_name": "Alice",
+        "session_tag": "T1",
+        "operator": "operator",
+        "scheduled_start_ms": 0,
+        "recording_started_ms": 0,
+        "label_timeline": [],
+        "devices": [{
+            "device_id": "DEV-CHEST", "role": "chest", "packets": 100,
+            "offline_intervals": [], "first_packet_ts": None,
+        }],
+        "integrity_report": {"status": "PARTIAL", "devices": []},
+    })
+
+    result = _run(export_consolidate(SESSION_ID))
+    assert result["integrity_report"]["validation_scope"] == "consolidated_sources"
+    updated = SessionLedger(store["ssd"] / ".sessions").read(SESSION_ID)
+    assert updated is not None
+    assert updated["revalidated_after_consolidation_ms"] > 0

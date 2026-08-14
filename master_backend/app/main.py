@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI):
     _ensure_dirs()
     await _start_audit()
     await _start_mdns()
+    await session_manager.recover_interrupted_sessions()
     _check_interrupted_sessions()
     asyncio.create_task(_live_broadcaster_loop())
     asyncio.create_task(session_manager.run_idle_reaper())
@@ -155,6 +156,24 @@ async def session_info():
         "subject": session_manager.subject_name,
         "devices": devices,
     }
+
+
+@app.get("/session/recovery")
+async def session_recovery_list():
+    """List terminal/interrupted sessions for a dashboard that just reconnected."""
+    return {
+        "sessions": session_manager.list_recovery_sessions(),
+    }
+
+
+@app.get("/session/recovery/{session_id}")
+async def session_recovery(session_id: str):
+    """Return the durable lifecycle record even when no live WebSocket exists."""
+    record = session_manager.get_recovery_session(session_id)
+    if record is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="session ledger record not found")
+    return record
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

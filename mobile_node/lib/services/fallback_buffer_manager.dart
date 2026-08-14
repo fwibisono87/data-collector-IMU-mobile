@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -28,14 +29,20 @@ class FallbackBufferManager {
   // un-awaited writeFrom() calls (the previous behaviour) both dropped packets and could
   // emit a length prefix without its payload, desynchronising the reader for the rest of
   // the file (plan D4).
-  final List<Uint8List> _pending = [];
+  final Queue<Uint8List> _pending = Queue<Uint8List>();
   Future<void> _chain = Future.value();
-  static const int _maxPending = 200000;   // ~12 MB; only reachable if storage stalls
+  static const int _maxPending =
+      200000; // ~12 MB; only reachable if storage stalls
   int _droppedOverflow = 0;
+  int _truncatedRecords = 0;
+  int _malformedRecords = 0;
+  final List<File> _flushSnapshots = [];
 
-  String? _sessionId;                       // the session these bytes belong to
+  String? _sessionId; // the session these bytes belong to
   String? get sessionId => _sessionId;
   int get droppedOverflow => _droppedOverflow;
+  int get truncatedRecords => _truncatedRecords;
+  int get malformedRecords => _malformedRecords;
 
   int get bufferedCount => _bufferedCount;
   bool get isActive => _isActive;
@@ -55,22 +62,42 @@ class FallbackBufferManager {
   /// death is still attributable to its session before we decide whether to flush,
   /// quarantine, or keep it (plan T17 / R3).
   Future<void> loadMeta() async {
-    if (_sessionId != null) return; // already known (active, or already loaded this run)
+    if (_sessionId != null) {
+      return; // already known (active, or already loaded this run)
+    }
     try {
       final f = await _metaFile();
       if (!await f.exists()) return;
       final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
       _sessionId = data['session_id']?.toString();
+      final index = (data['current_file_index'] as num?)?.toInt();
+      if (index != null && index >= 1 && index <= _maxRotations) {
+        _currentFileIndex = index;
+      }
+      final dir = await getApplicationDocumentsDirectory();
+      _flushSnapshots
+        ..clear()
+        ..addAll(dir
+            .listSync()
+            .whereType<File>()
+            .where((file) =>
+                file.path.contains('fallback_buffer') &&
+                file.path.contains('.bin.flush.'))
+            .toList()
+          ..sort((a, b) => a.path.compareTo(b.path)));
     } catch (_) {}
   }
 
   Future<void> _writeMeta() async {
     try {
       final f = await _metaFile();
-      await f.writeAsString(jsonEncode({
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(jsonEncode({
         'session_id': _sessionId,
+        'current_file_index': _currentFileIndex,
         'started_at_ms': DateTime.now().millisecondsSinceEpoch,
       }));
+      await tmp.rename(f.path);
     } catch (_) {}
   }
 
@@ -81,6 +108,8 @@ class FallbackBufferManager {
     if (_isActive) return;
     _bufferedCount = 0;
     _droppedOverflow = 0;
+    _truncatedRecords = 0;
+    _malformedRecords = 0;
     // Mark active synchronously: sensor callbacks may enqueue before asynchronous storage
     // setup completes. _pending retains those first packets until _openCurrentFile() kicks.
     _isActive = true;
@@ -93,7 +122,9 @@ class FallbackBufferManager {
     await _writeMeta();
     _fsyncTimer = Timer.periodic(
       const Duration(milliseconds: _fsyncIntervalMs),
-      (_) => _chain = _chain.then((_) async { await _raf?.flush(); }).catchError((_) {}),
+      (_) => _chain = _chain.then((_) async {
+        await _raf?.flush();
+      }).catchError((_) {}),
     );
     _kick();
   }
@@ -119,6 +150,7 @@ class FallbackBufferManager {
     }
     _raf = await (await _fileForIndex(_currentFileIndex))
         .open(mode: FileMode.append);
+    await _writeMeta();
   }
 
   /// Synchronous, non-blocking, never drops while under the cap. Safe to call from
@@ -143,7 +175,7 @@ class FallbackBufferManager {
   Future<void> _drain() async {
     if (_raf == null || _pending.isEmpty) return;
     while (_pending.isNotEmpty) {
-      final b = _pending.removeAt(0);
+      final b = _pending.removeFirst();
       final len = ByteData(4)..setUint32(0, b.length, Endian.big);
       await _raf!.writeFrom(len.buffer.asUint8List());
       await _raf!.writeFrom(b);
@@ -152,47 +184,102 @@ class FallbackBufferManager {
     if (pos >= _maxFileSizeBytes) await _rotate();
   }
 
-  // Yields each buffered packet in order from all rotation files.
-  Stream<Uint8List> flushStream() async* {
-    await _chain;              // ensure nothing is still queued in memory
+  Future<Uint8List> _readExact(RandomAccessFile raf, int length) async {
+    final out = BytesBuilder(copy: false);
+    var remaining = length;
+    while (remaining > 0) {
+      final part = await raf.read(remaining);
+      if (part.isEmpty) break;
+      out.add(part);
+      remaining -= part.length;
+    }
+    return out.takeBytes();
+  }
+
+  Future<void> _snapshotBufferFiles() async {
+    await _chain;
+    // Everything currently on disk will move into immutable snapshots below. New enqueue
+    // calls after this point belong to the fresh live file and must remain countable.
+    _bufferedCount = 0;
     await _raf?.flush();
     await _raf?.close();
     _raf = null;
 
+    final stamp = DateTime.now().microsecondsSinceEpoch;
     for (int idx = 1; idx <= _maxRotations; idx++) {
       final f = await _fileForIndex(idx);
-      if (!await f.exists()) continue;
-      final bytes = await f.readAsBytes();
-      int pos = 0;
-      while (pos + 4 <= bytes.length) {
-        final len = ByteData.sublistView(bytes, pos, pos + 4).getUint32(0, Endian.big);
-        pos += 4;
-        if (pos + len > bytes.length) break;
-        yield Uint8List.sublistView(bytes, pos, pos + len);
-        pos += len;
+      if (!await f.exists() || await f.length() == 0) continue;
+      final snapshot = File('${f.path}.flush.$stamp.$idx');
+      await f.rename(snapshot.path);
+      _flushSnapshots.add(snapshot);
+    }
+    _currentFileIndex = 1;
+    await _openCurrentFile();
+    await _writeMeta();
+    _kick();
+  }
+
+  // Yields each buffered packet in order from immutable snapshots without loading a
+  // complete rotation file into the Dart heap. New sensor packets continue into a fresh
+  // live file while these snapshots are replayed, so a reconnect cannot silently drop
+  // samples that arrive during the HTTP/WebSocket flush.
+  Stream<Uint8List> flushStream() async* {
+    await _snapshotBufferFiles();
+    for (final f in List<File>.from(_flushSnapshots)) {
+      final raf = await f.open();
+      try {
+        while (true) {
+          final prefix = await _readExact(raf, 4);
+          if (prefix.isEmpty) break;
+          if (prefix.length != 4) {
+            _truncatedRecords++;
+            break;
+          }
+          final len = ByteData.sublistView(prefix).getUint32(0, Endian.big);
+          if (len == 0 || len > 4 * 1024 * 1024) {
+            _malformedRecords++;
+            break;
+          }
+          final payload = await _readExact(raf, len);
+          if (payload.length != len) {
+            _truncatedRecords++;
+            break;
+          }
+          yield payload;
+        }
+      } finally {
+        await raf.close();
       }
     }
   }
 
   Future<void> clearAfterFlush() async {
-    for (int idx = 1; idx <= _maxRotations; idx++) {
-      final f = await _fileForIndex(idx);
-      if (await f.exists()) await f.writeAsBytes([], mode: FileMode.write);
+    for (final snapshot in _flushSnapshots) {
+      try {
+        if (await snapshot.exists()) await snapshot.delete();
+      } catch (_) {}
     }
-    try {
-      final m = await _metaFile();
-      if (await m.exists()) await m.delete();
-    } catch (_) {}
-    _bufferedCount = 0;
-    _currentFileIndex = 1;
-    _isActive = false;
-    _sessionId = null;
-    _fsyncTimer?.cancel();
+    _flushSnapshots.clear();
+    await _writeMeta();
+    _droppedOverflow = 0;
+    _truncatedRecords = 0;
+    _malformedRecords = 0;
+    // This is a reconnect flush during an active recording. Keep the live fallback writer
+    // open for the next network drop; only the session's STOP path/quarantine deactivates it.
+    _isActive = _sessionId != null;
+    if (_isActive && _fsyncTimer == null) {
+      _fsyncTimer = Timer.periodic(
+        const Duration(milliseconds: _fsyncIntervalMs),
+        (_) => _chain = _chain.then((_) async {
+          await _raf?.flush();
+        }).catchError((_) {}),
+      );
+    }
   }
 
   Future<void> deactivate() async {
     _fsyncTimer?.cancel();
-    await _chain;      // drain anything still queued before closing the file (plan R8)
+    await _chain; // drain anything still queued before closing the file (plan R8)
     await _raf?.flush();
     await _raf?.close();
     _raf = null;
@@ -211,6 +298,14 @@ class FallbackBufferManager {
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final sid = _sessionId ?? 'unknown';
     final moved = <String>[];
+    for (final snapshot in _flushSnapshots) {
+      if (!await snapshot.exists()) continue;
+      final target =
+          File('${dir.path}/orphan_${sid}_${stamp}_flush_${moved.length}.bin');
+      await snapshot.rename(target.path);
+      moved.add(target.path);
+    }
+    _flushSnapshots.clear();
     for (int idx = 1; idx <= _maxRotations; idx++) {
       final f = await _fileForIndex(idx);
       if (!await f.exists()) continue;
@@ -224,6 +319,8 @@ class FallbackBufferManager {
       if (await m.exists()) await m.delete();
     } catch (_) {}
     _bufferedCount = 0;
+    _pending.clear();
+    _droppedOverflow = 0;
     _currentFileIndex = 1;
     _isActive = false;
     _sessionId = null;
@@ -242,6 +339,9 @@ class FallbackBufferManager {
       final f = await _fileForIndex(idx);
       if (await f.exists()) total += await f.length();
     }
+    for (final snapshot in _flushSnapshots) {
+      if (await snapshot.exists()) total += await snapshot.length();
+    }
     return total;
   }
 
@@ -257,7 +357,8 @@ class FallbackBufferManager {
 
   Future<void> _pruneOrphans() async {
     final orphans = await listOrphans();
-    orphans.sort((a, b) => b.path.compareTo(a.path));   // filenames are epoch-stamped
+    orphans.sort(
+        (a, b) => b.path.compareTo(a.path)); // filenames are epoch-stamped
     for (final f in orphans.skip(_maxOrphansKept)) {
       try {
         await f.delete();

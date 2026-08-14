@@ -1,7 +1,4 @@
-import 'dart:async';
 import 'dart:convert';
-import 'dart:math';
-import '../models/proto/commands.pb.dart';
 
 // NTP-lite clock synchronization (CLAUDE.md §5).
 class ClockSyncService {

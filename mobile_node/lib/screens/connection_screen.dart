@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import '../services/device_id_service.dart';
@@ -7,8 +9,14 @@ import '../services/task_bridge.dart';
 import 'preflight_screen.dart';
 
 const List<String> _roles = [
-  'chest', 'waist', 'thigh_left', 'thigh_right',
-  'ankle_left', 'ankle_right', 'wrist_left', 'wrist_right',
+  'chest',
+  'waist',
+  'thigh_left',
+  'thigh_right',
+  'ankle_left',
+  'ankle_right',
+  'wrist_left',
+  'wrist_right',
 ];
 
 class ConnectionScreen extends StatefulWidget {
@@ -34,8 +42,16 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   Future<void> _load() async {
-    final ip = await DeviceIdService().getLastServerIp();
-    final role = await DeviceIdService().getDeviceRole();
+    var ip = '';
+    var role = 'chest';
+    try {
+      ip = await DeviceIdService().getLastServerIp();
+      role = await DeviceIdService().getDeviceRole();
+    } catch (_) {
+      // Defaults are usable; a transient storage read failure must not strand the
+      // connection screen behind an unhandled Future from initState.
+    }
+    if (!mounted) return;
     setState(() {
       _ipController.text = ip;
       _selectedRole = _roles.contains(role) ? role : 'chest';
@@ -53,8 +69,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       _error = null;
     });
 
-    await DeviceIdService().setDeviceRole(_selectedRole);
-    final ok = await TaskBridge().connect(ip);
+    bool ok = false;
+    String? thrownError;
+    try {
+      await DeviceIdService().setDeviceRole(_selectedRole);
+      ok = await TaskBridge().connect(ip);
+    } catch (e) {
+      thrownError = '$e';
+    }
 
     if (!mounted) return;
     if (ok) {
@@ -65,8 +87,20 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     } else {
       setState(() {
         _connecting = false;
-        _error = TaskBridge().lastConnectError ?? 'Could not connect to $ip:8000';
+        _error = thrownError ??
+            TaskBridge().lastConnectError ??
+            'Could not connect to $ip:8000';
       });
+    }
+  }
+
+  Future<void> _saveRole(String role) async {
+    try {
+      await DeviceIdService().setDeviceRole(role);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Could not save device role: $e');
+      }
     }
   }
 
@@ -77,8 +111,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Reset device?',
-            style: TextStyle(color: Colors.white)),
+        title:
+            const Text('Reset device?', style: TextStyle(color: Colors.white)),
         content: const Text(
           'This clears this phone\'s device identity and role so it reconnects fresh. '
           'A new device ID will be generated. Select a role and connect again afterwards.',
@@ -91,20 +125,23 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               child: const Text('Cancel')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('RESET', style: TextStyle(color: Colors.redAccent))),
+              child: const Text('RESET',
+                  style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
     if (confirmed != true || !mounted) return;
     await DeviceIdService().resetConfig();
     await SessionPersistence().clearDesired();
+    if (!mounted) return;
     setState(() {
       _selectedRole = 'chest';
       _ipController.text = '';
       _error = null;
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Device reset — pick a role and connect again.')),
+      const SnackBar(
+          content: Text('Device reset — pick a role and connect again.')),
     );
   }
 
@@ -119,7 +156,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.sensors, size: 64, color: Colors.deepPurpleAccent),
+              const Icon(Icons.sensors,
+                  size: 64, color: Colors.deepPurpleAccent),
               const SizedBox(height: 16),
               const Text(
                 'IMU Telemetry Node',
@@ -140,14 +178,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
               // Role selector
               DropdownButtonFormField<String>(
-                value: _selectedRole,
+                initialValue: _selectedRole,
                 dropdownColor: const Color(0xFF16213E),
                 style: const TextStyle(color: Colors.white),
                 decoration: _inputDecoration('Device Role'),
                 items: _roles
                     .map((r) => DropdownMenuItem(
                           value: r,
-                          child: Text(r, style: const TextStyle(color: Colors.white)),
+                          child: Text(r,
+                              style: const TextStyle(color: Colors.white)),
                         ))
                     .toList(),
                 onChanged: _connecting
@@ -158,7 +197,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                         // Persist immediately so the choice survives an app stop before
                         // CONNECT (previously only saved on connect — lost if the app was
                         // killed in between, sending the phone back to its old role).
-                        DeviceIdService().setDeviceRole(v);
+                        unawaited(_saveRole(v));
                       },
               ),
               const SizedBox(height: 16),
@@ -203,8 +242,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
               ),
               const SizedBox(height: 12),
               TextButton(
-                onPressed: () =>
-                    FlutterForegroundTask.openIgnoreBatteryOptimizationSettings(),
+                onPressed: () => FlutterForegroundTask
+                    .openIgnoreBatteryOptimizationSettings(),
                 child: const Text(
                   'Phone keeps disconnecting? Tap to fix background limits',
                   textAlign: TextAlign.center,

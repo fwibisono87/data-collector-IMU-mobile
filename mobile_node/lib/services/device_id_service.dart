@@ -18,6 +18,7 @@ class DeviceIdService {
   DeviceIdService._internal();
 
   static const _fileName = 'device_config.json';
+  static int _tempCounter = 0;
 
   Future<File> _file() async {
     final dir = await getApplicationDocumentsDirectory();
@@ -37,12 +38,20 @@ class DeviceIdService {
 
   Future<void> _write(Map<String, dynamic> data) async {
     final f = await _file();
-    final tmp = File('${f.path}.tmp');
+    final tmp = File(
+      '${f.path}.${DateTime.now().microsecondsSinceEpoch}.${_tempCounter++}.tmp',
+    );
     await tmp.writeAsString(jsonEncode(data), flush: true);
-    if (Platform.isWindows && await f.exists()) {
-      await f.delete();
+    try {
+      if (Platform.isWindows && await f.exists()) {
+        await f.delete();
+      }
+      await tmp.rename(f.path);
+    } finally {
+      if (await tmp.exists()) {
+        await tmp.delete();
+      }
     }
-    await tmp.rename(f.path);
   }
 
   // One-time migration from the legacy SharedPreferences store (old build) so
@@ -51,7 +60,8 @@ class DeviceIdService {
   // silently reinstated "chest" on phones whose real role was different, causing
   // role-collision rejects with no in-app way to recover. device_id + ip are stable
   // non-colliding values, so only those carry over.
-  Future<void> _migrateFromPrefs(Map<String, dynamic> data, List<String> keys) async {
+  Future<void> _migrateFromPrefs(
+      Map<String, dynamic> data, List<String> keys) async {
     if (keys.every((k) => data[k] != null)) return;
     final prefs = await SharedPreferences.getInstance();
     var changed = false;

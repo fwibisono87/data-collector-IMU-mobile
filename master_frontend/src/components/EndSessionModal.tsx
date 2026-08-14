@@ -1,17 +1,24 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import JSZip from "jszip";
 import {
   fetchManifest,
-  fetchExportFile,
+  streamExportFile,
   postConsolidate,
   postBundle,
-  fetchRecoveryFile,
+  dataBundleUrl,
+  streamRecoveryFile,
   isDataKind,
   type ExportManifest,
 } from "@/lib/export_client";
 import { streamZipToDisk, canStreamSave, type StreamZipEntry } from "@/lib/zip_stream";
-import { streamChunks, markSessionSaved } from "@/lib/video_backup";
+import {
+  streamChunks,
+  markSessionSaved,
+  listAllChunkGroups,
+  listCameraEvents,
+  type ChunkGroup,
+  type CameraEvent,
+} from "@/lib/video_backup";
 
 // ── Public contract ───────────────────────────────────────────────────────
 
@@ -48,6 +55,25 @@ interface Props {
 const CONSOLIDATE_WAIT_MS = 60_000;
 const POLL_MS = 3000;
 
+async function waitFor<T>(
+  operation: () => Promise<T>,
+  deadline: number,
+  onRetry?: (secondsLeft: number) => void,
+): Promise<T> {
+  let lastError: unknown;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw lastError;
+      onRetry?.(Math.max(0, Math.ceil(remaining / 1000)));
+      await new Promise(resolve => setTimeout(resolve, Math.min(POLL_MS, remaining)));
+    }
+  }
+}
+
 function _ext(r: EndSessionVideoResult): string {
   return r.mime.includes("mp4") ? "mp4" : "webm";
 }
@@ -80,13 +106,62 @@ export default function EndSessionModal({
   const [downloaded, setDownloaded] = useState(false);
   const [bundlePhase, setBundlePhase] = useState<"idle" | "running">("idle");
   const [bundleResult, setBundleResult] = useState("");
+  const [cameraGroups, setCameraGroups] = useState<ChunkGroup[]>([]);
+  const [cameraEvents, setCameraEvents] = useState<CameraEvent[]>([]);
+
+  // After a browser reload there is no in-memory CameraResult, but IndexedDB still has
+  // the session's chunks. Reconstruct those cameras so the recovered footage is included
+  // in the final export instead of being shown only in the separate recovery dialog.
+  const eventsByCamera = new Map<string, CameraEvent[]>();
+  for (const event of cameraEvents) {
+    const list = eventsByCamera.get(event.camId) ?? [];
+    list.push(event);
+    eventsByCamera.set(event.camId, list);
+  }
+  const eventFor = (camId: string, type: CameraEvent["type"]): CameraEvent | undefined =>
+    (eventsByCamera.get(camId) ?? []).filter(e => e.type === type).slice(-1)[0];
+
+  const effectiveVideoResults: EndSessionVideoResult[] = [
+    ...videoResults,
+    ...cameraGroups
+      .filter(g => !videoResults.some(v => v.camId === g.camId))
+      .map(g => {
+        const started = eventFor(g.camId, "started");
+        const stopped = eventFor(g.camId, "stopped");
+        const mime = started?.detail?.match(/(?:^|;)mime=([^;]+)/)?.[1] ?? "video/webm";
+        return {
+          camId: g.camId,
+          deviceId: "unknown",
+          label: g.camId,
+          mime,
+          sessionId: g.sessionId,
+          chunkCount: g.chunks,
+          startedAtMs: started?.atMs ?? 0,
+          flashAtMs: started?.atMs ?? 0,
+          stoppedAtMs: stopped?.atMs ?? 0,
+        };
+      }),
+  ];
+  const cameraProblems = [
+    ...missed,
+    ...cameraGroups.filter(g => g.hasHole).map(g => `${g.camId}: missing video chunks`),
+    ...cameraEvents
+      .filter(e => e.type === "track_ended" || e.type === "write_error")
+      .map(e => `${e.camId}: ${e.type.replace("_", " ")}`),
+    ...cameraGroups
+      .filter(g => eventFor(g.camId, "started") && !eventFor(g.camId, "stopped"))
+      .map(g => `${g.camId}: no durable stop marker`),
+  ];
 
   const handleServerBundle = useCallback(async () => {
     if (!session) return;
     setBundlePhase("running");
     setBundleResult("");
     try {
-      const r = await postBundle(backendIp, session.sessionId);
+      const r = await waitFor(
+        () => postBundle(backendIp, session.sessionId),
+        Date.now() + CONSOLIDATE_WAIT_MS,
+      );
       const mb = (r.size / 1048576).toFixed(1);
       setBundleResult(
         `✓ Saved on backend: ${r.path} (${mb} MB, ${r.entries.length} files). ` +
@@ -99,15 +174,51 @@ export default function EndSessionModal({
     }
   }, [session, backendIp]);
 
+  const handleDataBundleDownload = useCallback(async () => {
+    if (!session || bundlePhase === "running") return;
+    setBundlePhase("running");
+    setBundleResult("");
+    try {
+      // Build on the backend first. Unlike the browser ZIP, this has no dependency on a
+      // PASS verdict or a manifest that happens to be available at this instant.
+      await waitFor(
+        () => postBundle(backendIp, session.sessionId),
+        Date.now() + CONSOLIDATE_WAIT_MS,
+      );
+      const a = document.createElement("a");
+      a.href = dataBundleUrl(backendIp, session.sessionId);
+      a.download = `${session.sessionId}_bundle.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setBundleResult("✓ Data bundle download started. It contains every CSV/artifact available on the backend, including incomplete-session data.");
+    } catch (e) {
+      setBundleResult(`✕ Could not build/download data bundle: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBundlePhase("idle");
+    }
+  }, [session, backendIp, bundlePhase]);
+
   const loadManifest = useCallback(async () => {
     if (!session) return;
     setDataError("");
     setConsolidateResult("");
+    setPhase("waiting");
+    setProgressText("Waiting for backend finalization and phone rescue uploads…");
     try {
-      setManifest(await fetchManifest(backendIp, session.sessionId));
+      const deadline = Date.now() + CONSOLIDATE_WAIT_MS;
+      const m = await waitFor(
+        () => fetchManifest(backendIp, session.sessionId),
+        deadline,
+        seconds => setProgressText(`Waiting for backend artifacts… ${seconds}s left`),
+      );
+      setManifest(m);
     } catch (e) {
       setManifest(null);
       setDataError(`Could not read session data from backend: ${e}`);
+    } finally {
+      setPhase("idle");
+      setProgressText("");
     }
   }, [session, backendIp]);
 
@@ -115,6 +226,12 @@ export default function EndSessionModal({
   useEffect(() => {
     if (!session) return;
     loadManifest();
+    listAllChunkGroups()
+      .then(groups => setCameraGroups(groups.filter(g => g.sessionId === session.sessionId)))
+      .catch(() => setCameraGroups([]));
+    listCameraEvents(session.sessionId)
+      .then(setCameraEvents)
+      .catch(() => setCameraEvents([]));
   }, [session, recheckTick, loadManifest]);
 
   // Reset the success/error state only when a NEW session is opened, not on re-check —
@@ -138,13 +255,18 @@ export default function EndSessionModal({
     let unchangedStreak = 0;
     try {
       while (Date.now() < deadline) {
-        const m = await fetchManifest(backendIp, session.sessionId);
+        const m = await waitFor(
+          () => fetchManifest(backendIp, session.sessionId),
+          deadline,
+          seconds => setProgressText(`Waiting for phone rescue uploads… ${seconds}s left`),
+        );
         setManifest(m);
-        const recTotal = m.recovery.reduce((s, r) => s + (r.csv_size ?? 0), 0);
+        const recovery = Array.isArray(m.recovery) ? m.recovery : [];
+        const recTotal = recovery.reduce((s, r) => s + (r.csv_size ?? 0), 0);
         const sig = JSON.stringify({
           late: m.late_pending,
           recTotal,
-          recComplete: m.recovery.filter(r => r.complete).length,
+          recComplete: recovery.filter(r => r.complete).length,
         });
         if (!m.late_pending && !m.recovery_pending) break;   // nothing more expected
         if (prevSig !== "" && sig === prevSig) {
@@ -207,7 +329,7 @@ export default function EndSessionModal({
     const entries: StreamZipEntry[] = [];
 
     // Video — streamed chunk-by-chunk straight from IndexedDB, never concatenated.
-    for (const r of videoResults) {
+    for (const r of effectiveVideoResults) {
       entries.push({
         path: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
         write: (sink) => streamChunks(sid, r.camId, (chunk) => trackBytes(sink, tally)(chunk)).then(() => {}),
@@ -221,8 +343,7 @@ export default function EndSessionModal({
         entries.push({
           path: `data/${f.name}`,
           write: async (sink) => {
-            const buf = await (await fetchExportFile(backendIp, sid, f.name)).arrayBuffer();
-            await trackBytes(sink, tally)(new Uint8Array(buf));
+            await streamExportFile(backendIp, sid, f.name, trackBytes(sink, tally));
           },
         });
       }
@@ -231,8 +352,7 @@ export default function EndSessionModal({
         entries.push({
           path: `data/recovery/${rec.device_id}.csv`,
           write: async (sink) => {
-            const buf = await (await fetchRecoveryFile(backendIp, sid, rec.device_id)).arrayBuffer();
-            await trackBytes(sink, tally)(new Uint8Array(buf));
+            await streamRecoveryFile(backendIp, sid, rec.device_id, trackBytes(sink, tally));
           },
         });
       }
@@ -253,7 +373,7 @@ export default function EndSessionModal({
       });
     }
 
-    const cameras = videoResults.map(r => ({
+    const cameras = effectiveVideoResults.map(r => ({
       session_id: sid,
       cam_id: r.camId,
       device_id: r.deviceId,
@@ -264,10 +384,10 @@ export default function EndSessionModal({
       flash_at_ms: r.flashAtMs,
       stopped_at_ms: r.stoppedAtMs,
     }));
-    entries.push({
-      path: "cameras.json",
-      write: async (sink) => {
-        await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify({ session_id: sid, cameras }, null, 2)));
+      entries.push({
+        path: "cameras.json",
+        write: async (sink) => {
+          await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify({ session_id: sid, cameras, camera_events: cameraEvents }, null, 2)));
       },
     });
     if (missed.length > 0) {
@@ -279,65 +399,6 @@ export default function EndSessionModal({
       });
     }
     return entries;
-  };
-
-  // Kept only for recovery from older sessions. New recordings are blocked on browsers without
-  // File System Access because this path necessarily assembles the archive in memory.
-  const legacyDownload = async (m: ExportManifest | null, sid: string, prefix: string) => {
-    setDownloadProgress("Legacy in-memory build — memory-bound on long sessions…");
-    const zip = new JSZip();
-    const videos = zip.folder("videos")!;
-    for (const r of videoResults) {
-      const blobs: Blob[] = [];
-      await streamChunks(sid, r.camId, (b) => { blobs.push(b); });
-      videos.file(`${sid}_${r.camId}_video_sync.${_ext(r)}`, new Blob(blobs, { type: r.mime || "video/webm" }));
-      setDownloadProgress(`Adding ${r.camId}…`);
-      await new Promise(res => setTimeout(res, 0));   // keep UI responsive
-    }
-    const data = zip.folder("data")!;
-    if (m) {
-      for (const f of m.files) {
-        if (!isDataKind(f.kind)) continue;
-        const buf = await (await fetchExportFile(backendIp, sid, f.name)).arrayBuffer();
-        data.file(f.name, buf);
-      }
-      const rec = data.folder("recovery")!;
-      for (const r of m.recovery) {
-        if (!r.complete || !r.csv_exists) continue;
-        const buf = await (await fetchRecoveryFile(backendIp, sid, r.device_id)).arrayBuffer();
-        rec.file(`${r.device_id}.csv`, buf);
-      }
-      data.file("manifest.json", JSON.stringify(m, null, 2));
-    } else {
-      data.file("export_error.txt",
-        `Backend data unavailable (${dataError || "not reachable"}).\n` +
-        "This ZIP contains video only — pull/rescue CSVs from the Recovery screen.\n");
-    }
-    const cameras = videoResults.map(r => ({
-      session_id: sid,
-      cam_id: r.camId,
-      device_id: r.deviceId,
-      browser_label: r.label,
-      mime: r.mime,
-      file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
-      started_at_ms: r.startedAtMs,
-      flash_at_ms: r.flashAtMs,
-      stopped_at_ms: r.stoppedAtMs,
-    }));
-    zip.file("cameras.json", JSON.stringify({ session_id: sid, cameras }, null, 2));
-    if (missed.length > 0) zip.file("missed_cameras.txt", missed.join("\n") + "\n");
-
-    const blob = await zip.generateAsync(
-      { type: "blob", compression: "STORE", streamFiles: true },
-      meta => setDownloadProgress(`Compressing… ${Math.round(meta.percent)}%`),
-    );
-    // Delay the revoke so it cannot race the (unverifiable) start of the download.
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${prefix}.zip`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 30_000);
   };
 
   const handleDownload = async () => {
@@ -388,9 +449,14 @@ export default function EndSessionModal({
   // omits or renames a list crashes the render — at end of session, after the recording,
   // right when the operator is saving. `totalLabels` already defended itself; the JSX
   // below did not. Normalise both lists once, here.
-  const labelsUsed = Array.isArray(m?.labels_used) ? m.labels_used : [];
+  const labelsUsed = (Array.isArray(m?.labels_used) ? m.labels_used : []).map(l => ({
+    label_id: Number(l?.label_id ?? 0),
+    label_name: String(l?.label_name ?? "0"),
+    row_count: Number(l?.row_count ?? 0),
+  }));
   const reasons = Array.isArray(m?.reasons) ? m.reasons : [];
-  const totalLabels = labelsUsed.reduce((s, l) => s + (l?.row_count ?? 0), 0);
+  const dataRows = Number(m?.data_rows ?? 0);
+  const totalLabels = labelsUsed.reduce((s, l) => s + l.row_count, 0);
 
   return (
     <div
@@ -419,8 +485,8 @@ export default function EndSessionModal({
             <span className="text-gray-200">{session.sessionTag || "—"}</span> · Operator{" "}
             <span className="text-gray-200">{session.operator || "—"}</span>
           </div>
-          {m && <div>Data rows: <span className="text-gray-200 tabular-nums">{m.data_rows.toLocaleString()}</span></div>}
-          <div>Videos: <span className="text-gray-200 tabular-nums">{videoResults.length}</span>{missed.length > 0 && <span className="text-red-400"> ({missed.length} missed)</span>}</div>
+          {m && <div>Data rows: <span className="text-gray-200 tabular-nums">{dataRows.toLocaleString()}</span></div>}
+          <div>Videos: <span className="text-gray-200 tabular-nums">{effectiveVideoResults.length}</span>{cameraProblems.length > 0 && <span className="text-red-400"> ({cameraProblems.length} issue(s))</span>}</div>
         </div>
 
         {/* Labels used */}
@@ -447,16 +513,18 @@ export default function EndSessionModal({
 
         {/* Wholeness */}
         <div className="shrink-0">
-          {m?.whole ? (
+          {m?.whole && m.analysis_ready_imu !== false && cameraProblems.length === 0 ? (
             <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2 text-sm text-green-300 font-bold">
               ✓ Data considered whole
             </div>
           ) : (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
-              <div className="text-amber-300 font-bold mb-1">Data not yet whole</div>
+              <div className="text-amber-300 font-bold mb-1">Data requires review before analysis</div>
               <ul className="list-disc list-inside text-[11px] text-amber-200/90 space-y-0.5">
                 {(m ? reasons : ["session data not found on backend"]).map((r, i) => <li key={i}>{r}</li>)}
                 {!m && dataError && <li>{dataError}</li>}
+                {m && m.analysis_ready_imu === false && <li>IMU acceptance checks failed — export remains available, but this data is not analysis-ready.</li>}
+                {cameraProblems.length > 0 && <li>Camera integrity issue: {cameraProblems.join("; ")}</li>}
               </ul>
               {(m?.late_pending || m?.recovery_pending) && (
                 <p className="text-[10px] text-gray-500 mt-1">
@@ -525,6 +593,14 @@ export default function EndSessionModal({
               {bundleResult}
             </div>
           )}
+          <button
+            onClick={handleDataBundleDownload}
+            disabled={bundlePhase === "running"}
+            className="btn-primary w-full mt-2 py-2 text-xs disabled:opacity-50"
+            title="Downloads all backend CSV/artifacts even when integrity is PARTIAL or FAIL"
+          >
+            {bundlePhase === "running" ? "Preparing data bundle…" : "⬇ Download CSV/data bundle (even if incomplete)"}
+          </button>
         </div>
         {progressText && <div className="shrink-0 text-[11px] text-gray-500">{progressText}</div>}
         {consolidateResult && (

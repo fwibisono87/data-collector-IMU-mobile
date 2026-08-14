@@ -70,7 +70,8 @@ class _FakeIo:
 def run_validator(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(iv_mod, "io_manager", _FakeIo())
 
-    def _run(session_id, device_specs, devices, scheduled_start_ms=0):
+    def _run(session_id, device_specs, devices, scheduled_start_ms=0,
+            label_timeline=None, session_start_ms=0, session_end_ms=0):
         file_results = {}
         for device_id, csv_path in device_specs.items():
             text = csv_path.read_text(encoding="utf-8").splitlines()
@@ -82,7 +83,8 @@ def run_validator(tmp_path: Path, monkeypatch):
                 "reordered": 0,
             }
         return asyncio.run(iv_mod.IntegrityValidator().run(
-            session_id, file_results, devices, scheduled_start_ms
+            session_id, file_results, devices, scheduled_start_ms,
+            label_timeline, session_start_ms, session_end_ms
         ))
 
     return _run
@@ -222,3 +224,34 @@ def test_all_devices_completed_false_when_a_device_wrote_nothing(tmp_path: Path,
     ))
 
     assert report["cross_device_checks"]["all_devices_completed"] is False
+
+
+def test_short_gap_returning_to_zero_is_analysis_ready(tmp_path: Path, run_validator):
+    rows = [_row(i * 10, float(i), i if i < 1000 else i + 1, "DEV1") for i in range(2000)]
+    csv = _write_csv(tmp_path / "s_waist_sensor_data.csv", rows)
+    report = run_validator(
+        "s", {"DEV1": csv}, [_device("DEV1")],
+        label_timeline=[
+            {"timestamp_ms": 9_990, "label_id": 1, "label_name": "1"},
+            {"timestamp_ms": 10_000, "label_id": 0, "label_name": "0"},
+        ],
+        session_start_ms=0,
+        session_end_ms=20_000,
+    )
+    device = _device_report(report, "DEV1")
+    assert device["label_aware_sequence_gaps"][0]["waived"] is True
+    assert report["analysis_ready"] is True
+
+
+def test_gap_over_task_label_is_not_analysis_ready(tmp_path: Path, run_validator):
+    rows = [_row(i * 10, float(i), i if i < 1000 else i + 1, "DEV1") for i in range(2000)]
+    csv = _write_csv(tmp_path / "s_waist_sensor_data.csv", rows)
+    report = run_validator(
+        "s", {"DEV1": csv}, [_device("DEV1")],
+        label_timeline=[{"timestamp_ms": 5_000, "label_id": 1, "label_name": "1"}],
+        session_start_ms=0,
+        session_end_ms=20_000,
+    )
+    device = _device_report(report, "DEV1")
+    assert device["label_aware_sequence_gaps"][0]["waived"] is False
+    assert report["analysis_ready"] is False

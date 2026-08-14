@@ -8,10 +8,24 @@
 // consults it. The previous unconditional `clearAllChunks()` at the start of each session
 // came within one click of destroying a 26-minute 3-camera session.
 const DB_NAME = "imu-video-backup";
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 const STORE = "chunks";
 const SAVED = "saved";
+const SAVED_CAMERAS = "saved_cameras";
+const CAMERA_EVENTS = "camera_events";
 let dbPromise: Promise<IDBDatabase> | null = null;
+
+function newId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
 
 interface ChunkRecord {
   key: string;
@@ -25,6 +39,23 @@ interface SavedRecord {
   sessionId: string;
   savedAtMs: number;
   bytes: number;
+}
+
+interface SavedCameraRecord {
+  key: string;
+  sessionId: string;
+  camId: string;
+  savedAtMs: number;
+  bytes: number;
+}
+
+export interface CameraEvent {
+  key: string;
+  sessionId: string;
+  camId: string;
+  type: "started" | "stopped" | "track_ended" | "write_error";
+  atMs: number;
+  detail?: string;
 }
 
 /** One camera's footage within one session, as it currently exists on disk. */
@@ -52,6 +83,12 @@ async function openDb(): Promise<IDBDatabase> {
       }
       if (!req.result.objectStoreNames.contains(SAVED)) {
         req.result.createObjectStore(SAVED, { keyPath: "sessionId" });
+      }
+      if (!req.result.objectStoreNames.contains(SAVED_CAMERAS)) {
+        req.result.createObjectStore(SAVED_CAMERAS, { keyPath: "key" });
+      }
+      if (!req.result.objectStoreNames.contains(CAMERA_EVENTS)) {
+        req.result.createObjectStore(CAMERA_EVENTS, { keyPath: "key" });
       }
     };
     req.onsuccess = () => {
@@ -87,6 +124,65 @@ export async function saveChunk(
     tx.objectStore(STORE).put(rec);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Continue a camera's chunk sequence after a browser reload/reconnect. */
+export async function nextChunkIndex(sessionId: string, camId: string): Promise<number> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAllKeys();
+    req.onsuccess = () => {
+      let next = 0;
+      for (const key of req.result as string[]) {
+        const parsed = parseKey(key);
+        if (parsed?.sessionId === sessionId && parsed.camId === camId) {
+          next = Math.max(next, parsed.index + 1);
+        }
+      }
+      resolve(next);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** Persist camera lifecycle failures so a gap is explainable after a renderer crash. */
+export async function recordCameraEvent(
+  sessionId: string,
+  camId: string,
+  type: CameraEvent["type"],
+  detail?: string,
+): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const atMs = Date.now();
+    const rec: CameraEvent = {
+      key: `${sessionId}__${camId}__${atMs}__${newId()}`,
+      sessionId,
+      camId,
+      type,
+      atMs,
+      ...(detail ? { detail } : {}),
+    };
+    const tx = db.transaction(CAMERA_EVENTS, "readwrite");
+    tx.objectStore(CAMERA_EVENTS).put(rec);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function listCameraEvents(sessionId: string): Promise<CameraEvent[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CAMERA_EVENTS, "readonly");
+    const req = tx.objectStore(CAMERA_EVENTS).getAll();
+    req.onsuccess = () => resolve(
+      (req.result as CameraEvent[])
+        .filter(e => e.sessionId === sessionId)
+        .sort((a, b) => a.atMs - b.atMs),
+    );
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -155,6 +251,7 @@ export async function streamChunks(
 export async function listAllChunkGroups(): Promise<ChunkGroup[]> {
   const db = await openDb();
   const savedIds = new Set(await listSavedSessions());
+  const savedCameras = new Set(await listSavedCameras());
   const acc = new Map<string, { g: ChunkGroup; idx: number[] }>();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
@@ -171,7 +268,7 @@ export async function listAllChunkGroups(): Promise<ChunkGroup[]> {
       if (!e) {
         e = { g: { sessionId: r.sessionId, camId: r.camId, chunks: 0, bytes: 0,
                     firstIndex: r.index, lastIndex: r.index, hasHole: false,
-                    saved: savedIds.has(r.sessionId) }, idx: [] };
+                    saved: savedIds.has(r.sessionId) || savedCameras.has(`${r.sessionId}__${r.camId}`) }, idx: [] };
         acc.set(k, e);
       }
       e.g.chunks++;
@@ -188,7 +285,7 @@ export async function listAllChunkGroups(): Promise<ChunkGroup[]> {
   const out: ChunkGroup[] = [];
   Array.from(acc.values()).forEach(({ g, idx }) => {
     const distinct = new Set(idx).size;
-    g.hasHole = distinct !== g.lastIndex - g.firstIndex + 1;
+    g.hasHole = g.firstIndex !== 0 || distinct !== g.lastIndex - g.firstIndex + 1;
     out.push(g);
   });
   out.sort((a, b) =>
@@ -202,12 +299,22 @@ export async function listAllChunkGroups(): Promise<ChunkGroup[]> {
 export async function clearChunks(sessionId: string, camId?: string): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
+    const tx = db.transaction([STORE, CAMERA_EVENTS], "readwrite");
     const req = tx.objectStore(STORE).openCursor();
     req.onsuccess = () => {
       const cursor = req.result;
       if (!cursor) return;
       const v = cursor.value as ChunkRecord;
+      if (v.sessionId === sessionId && (camId === undefined || v.camId === camId)) {
+        cursor.delete();
+      }
+      cursor.continue();
+    };
+    const events = tx.objectStore(CAMERA_EVENTS).openCursor();
+    events.onsuccess = () => {
+      const cursor = events.result;
+      if (!cursor) return;
+      const v = cursor.value as CameraEvent;
       if (v.sessionId === sessionId && (camId === undefined || v.camId === camId)) {
         cursor.delete();
       }
@@ -235,6 +342,20 @@ export async function markSessionSaved(sessionId: string, bytes = 0): Promise<vo
   });
 }
 
+/** Confirm one camera's file reached disk. This lets recovery be completed camera-by-camera. */
+export async function markCameraSaved(sessionId: string, camId: string, bytes = 0): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SAVED_CAMERAS, "readwrite");
+    const rec: SavedCameraRecord = {
+      key: `${sessionId}__${camId}`, sessionId, camId, savedAtMs: Date.now(), bytes,
+    };
+    tx.objectStore(SAVED_CAMERAS).put(rec);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 export async function isSessionSaved(sessionId: string): Promise<boolean> {
   return (await listSavedSessions()).includes(sessionId);
 }
@@ -245,6 +366,16 @@ export async function listSavedSessions(): Promise<string[]> {
     const tx = db.transaction(SAVED, "readonly");
     const req = tx.objectStore(SAVED).getAll();
     req.onsuccess = () => resolve((req.result as SavedRecord[]).map(r => r.sessionId));
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function listSavedCameras(): Promise<string[]> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SAVED_CAMERAS, "readonly");
+    const req = tx.objectStore(SAVED_CAMERAS).getAll();
+    req.onsuccess = () => resolve((req.result as SavedCameraRecord[]).map(r => r.key));
     req.onerror = () => reject(req.error);
   });
 }
@@ -265,17 +396,14 @@ export async function listUnconfirmedSessions(): Promise<string[]> {
  */
 export async function clearConfirmedChunks(): Promise<{ cleared: string[]; kept: string[] }> {
   const groups = await listAllChunkGroups();
-  const sessions = Array.from(new Set(groups.map(g => g.sessionId)));
-  const savedIds = new Set(await listSavedSessions());
-
   const cleared: string[] = [];
   const kept: string[] = [];
-  for (const sid of sessions) {
-    if (savedIds.has(sid)) {
-      await clearChunks(sid);
-      cleared.push(sid);
-    } else {
-      kept.push(sid);
+  for (const group of groups) {
+    if (group.saved) {
+      await clearChunks(group.sessionId, group.camId);
+      if (!cleared.includes(group.sessionId)) cleared.push(group.sessionId);
+    } else if (!kept.includes(group.sessionId)) {
+      kept.push(group.sessionId);
     }
   }
   return { cleared, kept };

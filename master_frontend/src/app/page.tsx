@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 import { wsClient, type SessionState, type DeviceInfo, type StateUpdate } from "@/lib/ws_client";
@@ -33,6 +33,20 @@ const RealtimeChart = dynamic(() => import("@/components/RealtimeChart"), { ssr:
 type AppView = "connect" | "dashboard";
 type Sample = { acc: number[]; gyro: number[]; ts: number };
 
+const PENDING_END_KEY = "imu.pending-end-session.v1";
+const ACKED_END_KEY = "imu.acked-end-session.v1";
+
+function readPendingEnd(): EndSessionInfo | null {
+  try {
+    const raw = localStorage.getItem(PENDING_END_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as EndSessionInfo;
+    return value?.sessionId ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   // Connection
   const [view, setView] = useState<AppView>("connect");
@@ -63,7 +77,8 @@ export default function Home() {
   const [labelError, setLabelError] = useState("");
 
   // Cameras (1–5, dynamic)
-  const [camStatus, setCamStatus] = useState<CameraStatus>({ ready: 0, total: 0, ok: false });
+  const [camStatus, setCamStatus] = useState<CameraStatus>({ ready: 0, total: 0, ok: false, restoring: false });
+  const [cameraStartError, setCameraStartError] = useState("");
   const camRef = useRef<MultiCameraRecorderHandle>(null);
 
   // Guards a second STOP click from re-entering stop_recording ("Not recording" throw).
@@ -87,8 +102,71 @@ export default function Home() {
   const [endVideoResults, setEndVideoResults] = useState<EndSessionVideoResult[]>([]);
   const [endMissed, setEndMissed] = useState<string[]>([]);
   const [endRecheckTick, setEndRecheckTick] = useState(0);
+  const [scheduledStartMs, setScheduledStartMs] = useState(0);
+  const [cameraStartRetry, setCameraStartRetry] = useState(0);
   const endSessionOpenRef = useRef(false);
+  const finalizationInFlightRef = useRef("");
+  const lastSeenStateRef = useRef<SessionState>("IDLE");
+  const cameraStartedSessionRef = useRef("");
+  const cameraStartInFlightRef = useRef("");
   useEffect(() => { endSessionOpenRef.current = endSession !== null; }, [endSession]);
+
+  const recoverTerminalSession = useCallback(async (ended: EndSessionInfo) => {
+    if (!ended.sessionId || finalizationInFlightRef.current === ended.sessionId) return;
+    if (endSessionOpenRef.current && endSession?.sessionId === ended.sessionId) return;
+    finalizationInFlightRef.current = ended.sessionId;
+    let results: EndSessionVideoResult[] = [];
+    let missed: string[] = [];
+    try {
+      const out = await (camRef.current?.stopRecording() ?? Promise.resolve({ results: [], missed: [] }));
+      results = out.results;
+      missed = out.missed;
+    } catch (e) {
+      console.error("terminal camera finalisation failed", e);
+      missed = ["camera finalisation failed — recover IndexedDB footage before a new session"];
+    }
+    setEndSession(ended);
+    setEndVideoResults(results);
+    setEndMissed(missed);
+    setIsStopping(false);
+    finalizationInFlightRef.current = "";
+  }, [endSession]);
+
+  // A terminal dialog is a recoverable workflow, not transient React state. Restore the
+  // local pending session first; if the browser lost localStorage as well, ask the backend
+  // ledger for the newest terminal record and reconstruct the same identity from disk.
+  useEffect(() => {
+    if (!isWsConnected || !backendIp || sessionState === "RECORDING" || endSession) return;
+    const pending = readPendingEnd();
+    const acked = localStorage.getItem(ACKED_END_KEY);
+    if (pending && pending.sessionId !== acked) {
+      setEndSession(pending);
+      return;
+    }
+    let cancelled = false;
+    fetch(`http://${backendIp}:8000/session/recovery`)
+      .then(r => r.ok ? r.json() as Promise<{ sessions?: Array<Record<string, unknown>> }> : null)
+      .then(data => {
+        if (cancelled || !data?.sessions?.length) return;
+        const terminal = data.sessions.find(s => {
+          const state = String(s.state ?? "");
+          return (s.terminal === true || s.startup_in_progress === true ||
+            ["RECORDING", "FINALIZING", "VALIDATING", "ERROR"].includes(state)) &&
+            String(s.session_id ?? "") !== acked;
+        });
+        if (!terminal) return;
+        const restored: EndSessionInfo = {
+          sessionId: String(terminal.session_id),
+          subject: String(terminal.subject_name ?? ""),
+          sessionTag: String(terminal.session_tag ?? ""),
+          operator: String(terminal.operator ?? ""),
+        };
+        localStorage.setItem(PENDING_END_KEY, JSON.stringify(restored));
+        setEndSession(restored);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [backendIp, endSession, isWsConnected, sessionState]);
 
   const isRecording = sessionState === "RECORDING";
   const supportsDurableVideoExport = typeof window !== "undefined" && "showSaveFilePicker" in window;
@@ -116,6 +194,7 @@ export default function Home() {
     sessionTag.trim().length > 0 &&
     operator.trim().length > 0 &&
     camStatus.ok &&
+    !camStatus.restoring &&
     supportsDurableVideoExport &&
     !hasBuildMismatch;
 
@@ -139,8 +218,11 @@ export default function Home() {
           quorum?: { connected: number; roles: string[] };
           scheduled_start_ms?: number;
         };
+        const previousState = lastSeenStateRef.current;
+        lastSeenStateRef.current = su.state;
         setSessionState(su.state);
         setSessionId(su.session_id ?? "");
+        setScheduledStartMs(su.scheduled_start_ms ?? 0);
         // STATE_UPDATE always carries the authoritative, complete device list. Apply it
         // verbatim — including an empty list — so pruned/offline devices and a backend
         // restart clear stale cards instead of lingering until a manual reload.
@@ -148,13 +230,29 @@ export default function Home() {
         if (su.quorum) setQuorum(su.quorum);
         if (su.integrity_report) setIntegrityReport(su.integrity_report);
 
-        // Coordinated webcam start (CLAUDE.md §22.5)
-        if (su.state === "RECORDING" && su.scheduled_start_ms) {
-          const delay = su.scheduled_start_ms - Date.now();
-          setTimeout(() => {
-            camRef.current?.startRecording(su.session_id || String(Date.now()));
-          }, Math.max(0, delay));
+        if (su.state === "RECORDING" && su.session_id) {
+          const active: EndSessionInfo = {
+            sessionId: su.session_id,
+            subject: su.subject ?? subject,
+            sessionTag: su.session_tag ?? sessionTag,
+            operator: su.operator ?? operator,
+          };
+          localStorage.setItem(PENDING_END_KEY, JSON.stringify(active));
         }
+
+        if (
+          su.state === "IDLE" && su.session_id &&
+          (previousState === "RECORDING" || previousState === "FINALIZING" ||
+            previousState === "VALIDATING" || readPendingEnd()?.sessionId === su.session_id)
+        ) {
+          void recoverTerminalSession({
+            sessionId: su.session_id,
+            subject: su.subject ?? subject,
+            sessionTag: su.session_tag ?? sessionTag,
+            operator: su.operator ?? operator,
+          });
+        }
+
       } else if (msg.type === "LATE_DELIVERY") {
         // A phone flushed its buffered tail after STOP, into a *_late.csv sidecar
         // (plan DD-4). If the export modal is open it re-checks itself; otherwise the
@@ -175,7 +273,39 @@ export default function Home() {
     const unsubConn = wsClient.onConnectionChange(setIsWsConnected);
 
     return () => { unsub(); unsubLive(); unsubConn(); };
-  }, []);
+  }, [operator, recoverTerminalSession, sessionTag, subject]);
+
+  // Camera acquisition is asynchronous. On a reload during RECORDING, the authoritative
+  // state can arrive before getUserMedia has recreated the tiles; a one-shot timer at that
+  // point used to silently produce a session with no video. Wait for all selected cameras to
+  // be ready, then retry a failed start until the session ends.
+  useEffect(() => {
+    if (
+      sessionState !== "RECORDING" || !sessionId || !scheduledStartMs || !camStatus.ok || camStatus.restoring ||
+      cameraStartedSessionRef.current === sessionId || cameraStartInFlightRef.current === sessionId
+    ) return;
+    const delay = Math.max(0, scheduledStartMs - Date.now());
+    const timer = window.setTimeout(() => {
+      const recorder = camRef.current;
+      if (!recorder) {
+        setCameraStartRetry(n => n + 1);
+        return;
+      }
+      cameraStartInFlightRef.current = sessionId;
+      recorder.startRecording(sessionId)
+        .then(() => {
+          cameraStartedSessionRef.current = sessionId;
+          setCameraStartError("");
+        })
+        .catch(error => {
+          console.error("camera recording start failed", error);
+          setCameraStartError(`Camera recording could not start: ${error}`);
+          setCameraStartRetry(n => n + 1);
+        })
+        .finally(() => { cameraStartInFlightRef.current = ""; });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [camStatus.ok, camStatus.restoring, cameraStartRetry, scheduledStartMs, sessionId, sessionState]);
 
   // ── Auto-reconnect on mount ────────────────────────────────────────────────
   useEffect(() => {
@@ -252,6 +382,7 @@ export default function Home() {
     setIntegrityReport(null);
     setActiveLabel(0);
     setLabelError("");
+    setCameraStartError("");
     try {
       await wsClient.startSession(
         subject, sessionTag, operator,
@@ -270,11 +401,6 @@ export default function Home() {
     // Capture identity BEFORE the stop call — a late STATE_UPDATE broadcast after the ACK
     // could otherwise describe the session differently than the one we just ended.
     const ended = { sessionId, subject, sessionTag, operator };
-    let results: EndSessionVideoResult[] = [];
-    let missed: string[] = [];
-    // Stop the shared session immediately. Camera finalisation is independent and bounded by
-    // its own timeout, so a broken MediaRecorder cannot strand phones/backend in RECORDING.
-    const cameraStop = camRef.current?.stopRecording() ?? Promise.resolve({ results: [], missed: [] });
     let stopError = "";
     try {
       await wsClient.stopSession("operator_stop");
@@ -282,20 +408,10 @@ export default function Home() {
       stopError = String(e);
       console.error("session stop on backend failed", e);
     }
-    try {
-      const out = await cameraStop;
-      results = out.results;
-      missed = out.missed;
-    } catch (e) {
-      console.error("camera finalisation failed", e);
-      missed = ["camera finalisation failed — recover IndexedDB footage before a new session"];
-    }
-    // No immediate downloads — the end-of-session modal handles artifacts+video as one
-    // zip, and cannot be dismissed until a download has completed.
-    setEndSession(ended);
-    setEndVideoResults(results);
-    setEndMissed(missed);
-    setIsStopping(false);
+    // The state-update path normally opens this modal. Calling the same idempotent
+    // recovery helper here covers a lost ACK/broadcast and guarantees the manual Stop
+    // path cannot strand camera finalisation in a separate code path.
+    await recoverTerminalSession(ended);
     if (stopError) alert(`Session stop reported a problem: ${stopError}`);
   };
 
@@ -564,7 +680,15 @@ export default function Home() {
                 {camStatus.ready}/{camStatus.total}
               </span>
             </div>
-            <MultiCameraRecorder ref={camRef} onStatusChange={setCamStatus} disabled={isRecording} />
+            <MultiCameraRecorder
+              ref={camRef}
+              onStatusChange={setCamStatus}
+              onRecordingError={message => setCameraStartError(`Camera recording could not start: ${message}`)}
+              backendIp={backendIp}
+              sessionId={isRecording ? sessionId : ""}
+              disabled={isRecording}
+            />
+            {cameraStartError && <p className="text-xs text-red-400">{cameraStartError}</p>}
             {!camStatus.ok && (
               <p className="text-xs text-red-400">
                 {camStatus.total === 0
@@ -631,7 +755,10 @@ export default function Home() {
           The cleared video backup only happens AFTER a successful download so footage
           survives a failed/aborted download until the next session anyway (see
           video_backup.ts clearAllChunks). */}
-      <SafeBoundary what="end-of-session export dialog">
+      <SafeBoundary
+        what="end-of-session export dialog"
+        recoveryHref={endSession ? `http://${backendIp}:8000/export/${encodeURIComponent(endSession.sessionId)}/bundle/file` : undefined}
+      >
         <EndSessionModal
           session={endSession}
           videoResults={endVideoResults}
@@ -639,7 +766,11 @@ export default function Home() {
           backendIp={backendIp}
           recheckTick={endRecheckTick}
           onClose={() => setEndSession(null)}
-          onDownloadComplete={(sid) => { void clearChunks(sid); }}
+          onDownloadComplete={(sid) => {
+            localStorage.setItem(ACKED_END_KEY, sid);
+            localStorage.removeItem(PENDING_END_KEY);
+            void clearChunks(sid);
+          }}
         />
       </SafeBoundary>
     </>

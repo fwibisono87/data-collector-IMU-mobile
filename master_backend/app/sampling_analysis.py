@@ -30,6 +30,8 @@ def _zero() -> dict:
         "role": "",
         "rows": 0,
         "span_s": 0.0,
+        "first_timestamp_ms": None,
+        "last_timestamp_ms": None,
         "nominal_hz": 0.0,
         "true_sensor_hz": 0.0,
         "held_row_pct": 0.0,
@@ -50,7 +52,9 @@ def _zero() -> dict:
             "missing_pct": 0.0,
             "largest_gap": 0,
             "duplicates": 0,
+            "gaps": [],
         },
+        "invalid_rows": 0,
         "declared": None,
         "reference_hz": 0.0,
     }
@@ -65,17 +69,22 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
 
     timestamps = []
     seqs = []
+    seq_timestamp_rows = []
     # Parsed independently: a row with a readable timestamp but an unreadable sequence
     # (or vice versa) must not silently drop the other value, which `continue` did.
     for row in rows:
         try:
-            timestamps.append(int(row[0]))
+            timestamp = int(row[0])
+            timestamps.append(timestamp)
         except (ValueError, IndexError):
-            pass
+            timestamp = None
         try:
-            seqs.append(int(row[COL_SEQUENCE]))
+            sequence = int(row[COL_SEQUENCE])
+            seqs.append(sequence)
         except (ValueError, IndexError):
-            pass
+            sequence = None
+        if timestamp is not None and sequence is not None:
+            seq_timestamp_rows.append((timestamp, sequence))
 
     usable = len(timestamps)
     if usable < 2:
@@ -85,6 +94,8 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
 
     first_ts = timestamps[0]
     last_ts = timestamps[-1]
+    stats["first_timestamp_ms"] = min(timestamps)
+    stats["last_timestamp_ms"] = max(timestamps)
     span_s = (last_ts - first_ts) / 1000.0
     stats["span_s"] = span_s
     stats["nominal_hz"] = usable / span_s if span_s else 0.0
@@ -160,7 +171,27 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
         "missing_pct": missing_pct,
         "largest_gap": largest_gap,
         "duplicates": duplicates,
+        "gaps": [],
     }
+
+    # The percentage above is useful as a summary, but acceptance needs exact time spans
+    # so a gap can be compared with the durable label timeline. CSVs are timestamp-sorted
+    # on close; ignore replay/order reversals here and only describe forward sequence loss.
+    gaps = []
+    for (previous_ts, previous_seq), (current_ts, current_seq) in zip(
+        seq_timestamp_rows, seq_timestamp_rows[1:]
+    ):
+        missing_in_run = current_seq - previous_seq - 1
+        if missing_in_run > 0 and current_ts >= previous_ts:
+            gaps.append({
+                "start_ms": previous_ts,
+                "end_ms": current_ts,
+                "duration_ms": current_ts - previous_ts,
+                "missing": missing_in_run,
+                "previous_sequence": previous_seq,
+                "next_sequence": current_seq,
+            })
+    stats["sequence"]["gaps"] = gaps
 
     declared_rows = [r for r in rows if len(r) > COL_SAMPLE_KIND and r[COL_SAMPLE_KIND] != ""]
     if declared_rows:

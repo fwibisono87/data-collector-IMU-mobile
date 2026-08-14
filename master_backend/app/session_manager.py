@@ -19,6 +19,7 @@ from .audit_logger import audit
 from .dedup_store import dedup
 from .io_manager import io_manager
 from .integrity_validator import IntegrityValidator
+from .session_ledger import SessionLedger
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,12 @@ class SessionManager:
         self.scheduled_start_ms: int = 0
         self._devices: dict[str, DeviceInfo] = {}
         self._state_path = Path(os.getenv("SSD_PATH", "./data")) / ".sessions"
+        self._ledger = SessionLedger(self._state_path)
         self._offline_check_task: asyncio.Task | None = None
         self._recording_started_at: float = 0.0
+        self._recording_started_epoch_ms: int = 0
+        self._preflight_failed: list[str] = []
+        self._stop_reason: str = ""
 
     # ── Device registry ──────────────────────────────────────────────────────
 
@@ -259,6 +264,7 @@ class SessionManager:
         # and open_session stamps it into the CSV metadata line. A half-rate recording is
         # then self-documenting instead of looking indistinguishable from a clean one.
         preflight_failed = [str(x) for x in (payload.get("preflight_failed") or [])]
+        self._preflight_failed = preflight_failed
         if preflight_failed:
             await audit.log("WARN", "preflight_failed_at_start", {
                 "session_id": self.session_id,
@@ -267,22 +273,43 @@ class SessionManager:
 
         # Coordinated start: all devices start at the same ms (CLAUDE.md §22.5)
         self.scheduled_start_ms = int(time.time() * 1000) + _COORDINATED_START_LEAD_MS
+        self._recording_started_epoch_ms = int(time.time() * 1000)
 
         device_roles = {d.device_id: d.device_role for d in self.online_devices}
         # Preflight's smoothed measurement names the file. It is provisional — close_session
         # re-tiers from the session-wide average — but it means a file is never unlabelled,
         # not even if the backend dies mid-session.
         device_rates = {d.device_id: d.true_hz_avg for d in self.online_devices}
-        await io_manager.open_session(
-            session_id=self.session_id,
-            subject_name=self.subject_name,
-            session_tag=self.session_tag,
-            operator=self.operator,
-            device_roles=device_roles,
-            device_rates=device_rates,
-            preflight_failed=preflight_failed,
-        )
+        # Persist the identity before opening any writer. If the process dies during
+        # startup, the next dashboard can still discover a session was attempted and
+        # inspect the exact metadata rather than seeing a blank IDLE state.
+        await self._save_state()
+        try:
+            await io_manager.open_session(
+                session_id=self.session_id,
+                subject_name=self.subject_name,
+                session_tag=self.session_tag,
+                operator=self.operator,
+                device_roles=device_roles,
+                device_rates=device_rates,
+                preflight_failed=preflight_failed,
+            )
+        except Exception as exc:
+            # open_session can fail after opening only a subset of device writers. Close
+            # whatever was acquired so a failed START cannot leak file descriptors or leave
+            # a half-open writer that contaminates the next session.
+            try:
+                await io_manager.close_session()
+            except Exception as close_exc:
+                await audit.log("ERROR", "startup_cleanup_failed", {
+                    "session_id": self.session_id,
+                    "error": str(close_exc),
+                })
+            await self._transition(SessionState.ERROR)
+            await self._save_state(reason=f"open_session_failed: {exc}")
+            raise
         self._recording_started_at = time.monotonic()
+        self._recording_started_epoch_ms = int(time.time() * 1000)
         dedup.clear()
 
         # Reset per-device session state
@@ -310,6 +337,7 @@ class SessionManager:
 
         # Arm late delivery before STOP reaches phones. Once we transition out of RECORDING,
         # a reconnecting phone may immediately flush its buffered tail.
+        self._stop_reason = reason
         io_manager.arm_late_window()
         await self._transition(SessionState.FINALIZING)
         # Notify mobile nodes while their control sockets are still live.
@@ -328,20 +356,61 @@ class SessionManager:
                 dev.offline_intervals[-1]["end_ms"] = int(time.time() * 1000)
             dev.substate = DeviceSubstate.FINALIZED
 
-        file_results = await io_manager.close_session(self._session_true_hz())
+        try:
+            file_results = await io_manager.close_session(self._session_true_hz())
+        except Exception as exc:
+            # Finalization must produce a terminal ledger even if one artifact close or
+            # rename fails. The surviving files remain exportable and the report makes the
+            # close failure explicit instead of leaving the dashboard waiting forever.
+            file_results = {}
+            await audit.log("ERROR", "session_close_failed", {
+                "session_id": self.session_id,
+                "error": str(exc),
+            })
         await audit.log("INFO", "session_finalizing", {"reason": reason, "files": file_results})
 
         await self._transition(SessionState.VALIDATING)
-        report = await IntegrityValidator().run(
-            session_id=self.session_id,
-            file_results=file_results,
-            devices=list(self._devices.values()),
-            scheduled_start_ms=self.scheduled_start_ms,
-        )
+        try:
+            report = await IntegrityValidator().run(
+                session_id=self.session_id,
+                file_results=file_results,
+                devices=list(self._devices.values()),
+                scheduled_start_ms=self.scheduled_start_ms,
+                label_timeline=io_manager.label_timeline,
+                session_start_ms=self._recording_started_epoch_ms,
+                session_end_ms=int(time.time() * 1000),
+            )
+        except Exception as exc:
+            report = {
+                "session_id": self.session_id,
+                "status": "FAIL",
+                "analysis_ready": False,
+                "analysis_ready_reasons": [f"validator exception: {exc}"],
+                "devices": [],
+                "cross_device_checks": {},
+            }
+            await audit.log("ERROR", "validation_failed", {
+                "session_id": self.session_id,
+                "error": str(exc),
+            })
         await audit.log("INFO", "validation_complete", {"status": report.get("status")})
 
         await self._transition(SessionState.IDLE)
-        await self._clear_state()
+        try:
+            await self._save_state(
+                terminal=True,
+                report=report,
+                file_results=file_results,
+                reason=reason,
+            )
+        except Exception as exc:
+            # A ledger write failure must not turn a successfully closed/validated CSV into
+            # a frontend STOP exception. The report file and data remain authoritative; the
+            # next startup can still discover them from the session folder.
+            await audit.log("ERROR", "terminal_ledger_write_failed", {
+                "session_id": self.session_id,
+                "error": str(exc),
+            })
         dedup.clear()
 
         # Re-assert state for anyone who reconnected during finalisation (plan D1).
@@ -403,6 +472,7 @@ class SessionManager:
                     await dev.control_ws.close(code=4000, reason="operator_reset")
                 except Exception:
                     pass
+        previous_session_id = self.session_id
         self._devices.clear()
         self.session_id = ""
         self.subject_name = ""
@@ -412,47 +482,269 @@ class SessionManager:
         if self.state != SessionState.IDLE:
             await self._transition(SessionState.IDLE)
         dedup.clear()
-        await self._clear_state()
+        if previous_session_id:
+            data = self._ledger.read(previous_session_id) or {"session_id": previous_session_id}
+            data["state"] = SessionState.IDLE.value
+            data["reset_at_ms"] = int(time.time() * 1000)
+            self._ledger.write(previous_session_id, data)
 
     # ── Persistence ──────────────────────────────────────────────────────────
 
-    async def _save_state(self) -> None:
-        self._state_path.mkdir(parents=True, exist_ok=True)
-        state_file = self._state_path / f"{self.session_id}.state.json"
+    async def _save_state(
+        self,
+        *,
+        terminal: bool = False,
+        report: dict | None = None,
+        file_results: dict | None = None,
+        reason: str | None = None,
+    ) -> None:
+        await self._persist_state(
+            terminal=terminal,
+            report=report,
+            file_results=file_results,
+            reason=reason,
+        )
+
+    async def _persist_state(
+        self,
+        *,
+        terminal: bool = False,
+        report: dict | None = None,
+        file_results: dict | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if not self.session_id:
+            return
+        existing = self._ledger.read(self.session_id) or {}
         data = {
+            **existing,
             "session_id": self.session_id,
-            "state": self.state,
+            "state": self.state.value,
             "subject_name": self.subject_name,
             "session_tag": self.session_tag,
             "operator": self.operator,
             "scheduled_start_ms": self.scheduled_start_ms,
+            "recording_started_ms": self._recording_started_epoch_ms,
+            # This remains true during the narrow START/open_session window. If the backend
+            # dies before it can publish RECORDING, the next dashboard must still surface the
+            # attempted session instead of treating the ledger as an ordinary idle snapshot.
+            "startup_in_progress": (
+                not terminal
+                and self.state in (SessionState.IDLE, SessionState.PREFLIGHT, SessionState.READY)
+                and bool(self.session_id)
+            ),
+            "preflight_failed": self._preflight_failed,
+            "stop_reason": reason or self._stop_reason or existing.get("stop_reason", ""),
+            "updated_at_ms": int(time.time() * 1000),
             "devices": [
-                {"device_id": d.device_id, "role": d.device_role}
+                {
+                    "device_id": d.device_id,
+                    "role": d.device_role,
+                    "model": d.device_model,
+                    "app_version": d.app_version,
+                    "packets": d.packets_received,
+                    "first_packet_ts": d.first_packet_ts,
+                    "offline_intervals": d.offline_intervals,
+                    "substate": d.substate.value,
+                }
                 for d in self._devices.values()
             ],
-            "saved_at_ms": int(time.time() * 1000),
+            "label_timeline": (
+                io_manager.label_timeline
+                if io_manager.session_id == self.session_id
+                else existing.get("label_timeline", [])
+            ),
         }
-        state_file.write_text(json.dumps(data, indent=2))
+        if report is not None:
+            data["integrity_report"] = report
+        if file_results is not None:
+            data["file_results"] = file_results
+        if terminal:
+            data["terminal"] = True
+            data["finalized_at_ms"] = int(time.time() * 1000)
+        self._ledger.write(self.session_id, data)
 
     async def _clear_state(self) -> None:
-        state_file = self._state_path / f"{self.session_id}.state.json"
-        if state_file.exists():
-            data = json.loads(state_file.read_text())
-            data["state"] = "IDLE"
-            state_file.write_text(json.dumps(data, indent=2))
+        if not self.session_id:
+            return
+        data = self._ledger.read(self.session_id) or {}
+        data["state"] = SessionState.IDLE.value
+        data["startup_in_progress"] = False
+        data["updated_at_ms"] = int(time.time() * 1000)
+        self._ledger.write(self.session_id, data)
 
     def get_interrupted_sessions(self) -> list[dict]:
-        if not self._state_path.exists():
-            return []
-        results = []
-        for f in self._state_path.glob("*.state.json"):
+        return [
+            data for data in self._ledger.list()
+            if (
+                data.get("startup_in_progress")
+                or data.get("state") in ("RECORDING", "FINALIZING", "VALIDATING")
+            )
+            and not data.get("terminal", False)
+            and not (
+                data.get("startup_in_progress")
+                and data.get("session_id") == self.session_id
+                and self.state in (SessionState.IDLE, SessionState.PREFLIGHT, SessionState.READY)
+            )
+        ]
+
+    def get_recovery_session(self, session_id: str) -> dict | None:
+        return self._ledger.read(session_id)
+
+    def list_recovery_sessions(self) -> list[dict]:
+        return [
+            data for data in self._ledger.list()
+            if (
+                data.get("terminal", False)
+                or data.get("startup_in_progress", False)
+                or data.get("state") in ("RECORDING", "FINALIZING", "VALIDATING", "ERROR")
+            )
+            and not (
+                data.get("startup_in_progress")
+                and data.get("session_id") == self.session_id
+                and self.state in (SessionState.IDLE, SessionState.PREFLIGHT, SessionState.READY)
+            )
+        ]
+
+    async def recover_interrupted_sessions(self) -> None:
+        """Finalize sessions left non-terminal by a backend process death.
+
+        The old startup check only logged the session id. That preserved the bytes but left
+        the operator with no integrity verdict and no end-of-session workflow. Recovery is
+        deliberately conservative: it merges every on-disk source available at startup,
+        validates the resulting per-role files, and records a terminal ledger entry. Phone
+        rescue uploads that arrive later remain visible as pending in the export manifest and
+        can be consolidated again.
+        """
+        interrupted = self.get_interrupted_sessions()
+        for record in interrupted:
+            session_id = str(record.get("session_id", ""))
+            if not session_id:
+                continue
             try:
-                data = json.loads(f.read_text())
-                if data.get("state") in ("RECORDING", "FINALIZING"):
-                    results.append(data)
-            except Exception:
-                pass
-        return results
+                file_results, devices = await asyncio.get_event_loop().run_in_executor(
+                    None, self._collect_recovery_artifacts, record
+                )
+                report = await IntegrityValidator().run(
+                    session_id=session_id,
+                    file_results=file_results,
+                    devices=devices,
+                    scheduled_start_ms=int(record.get("scheduled_start_ms", 0) or 0),
+                    label_timeline=list(record.get("label_timeline", [])),
+                    session_start_ms=int(record.get("recording_started_ms", 0) or 0),
+                    session_end_ms=int(time.time() * 1000),
+                )
+                updated = self._ledger.read(session_id) or dict(record)
+                updated.update({
+                    "state": SessionState.IDLE.value,
+                    "terminal": True,
+                    "startup_in_progress": False,
+                    "stop_reason": "backend_restart_recovery",
+                    "finalized_at_ms": int(time.time() * 1000),
+                    "integrity_report": report,
+                    "file_results": file_results,
+                    "recovered_after_backend_restart": True,
+                })
+                self._ledger.write(session_id, updated)
+                await audit.log("WARN", "interrupted_session_recovered", {
+                    "session_id": session_id,
+                    "status": report.get("status"),
+                    "analysis_ready": report.get("analysis_ready"),
+                })
+            except Exception as exc:
+                # Keep it discoverable and non-terminal so a later startup/retry or the
+                # operator's direct bundle link cannot mistake a failed recovery for success.
+                failed = self._ledger.read(session_id) or dict(record)
+                failed.update({
+                    "state": SessionState.ERROR.value,
+                    "recovery_error": str(exc),
+                    "updated_at_ms": int(time.time() * 1000),
+                })
+                self._ledger.write(session_id, failed)
+                await audit.log("ERROR", "interrupted_session_recovery_failed", {
+                    "session_id": session_id, "error": str(exc),
+                })
+
+    @staticmethod
+    def _collect_recovery_artifacts(record: dict) -> tuple[dict, list[DeviceInfo]]:
+        """Merge and inventory interrupted-session files; blocking work runs in an executor."""
+        from .csv_schema import is_valid_data_row, parse_row
+        from .export import (
+            _ORIGINAL_KINDS, _recovery_manifest, _recovery_role, _role_from_name,
+            _session_files, _session_folders, _slug,
+        )
+        from .io_manager import _sha256
+        from .upload import merge_csv_sources_per_role
+
+        session_id = str(record.get("session_id", ""))
+        recovery = _recovery_manifest(session_id)
+        verified_recovery = [
+            r for r in recovery
+            if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists")
+        ]
+        files = _session_files(session_id)
+        sources: list[tuple[str, str, Path]] = []
+        for f in files:
+            if f["kind"] in _ORIGINAL_KINDS:
+                role = _slug(_role_from_name(f["name"], session_id)) or "unknown"
+                sources.append((role, f["kind"], Path(f["path"])))
+        for r in verified_recovery:
+            sources.append((_slug(_recovery_role(r)), "recovery", Path(r["csv_path"])))
+
+        folders = _session_folders(session_id)
+        if folders:
+            output = folders[0]
+        elif verified_recovery:
+            first = verified_recovery[0]
+            subject = str(first.get("subject") or "Unknown").replace(" ", "_")
+            tag = str(first.get("session_tag") or "Session").replace(" ", "_")
+            output = Path(os.getenv("SSD_PATH", "./data")) / "Data_Riset_IMU" / f"{subject}_{tag}"
+        else:
+            output = Path(os.getenv("SSD_PATH", "./data")) / "Data_Riset_IMU" / "_recovered" / session_id
+
+        per_role = merge_csv_sources_per_role(
+            sources,
+            output,
+            session_id,
+            metadata_prefix=f"session_id={session_id},source=backend_restart_recovery",
+        ) if sources else {"per_role": {}}
+
+        file_results: dict[str, dict] = {}
+        devices: list[DeviceInfo] = []
+        for raw in record.get("devices", []):
+            device_id = str(raw.get("device_id", ""))
+            role = str(raw.get("role", "unknown"))
+            dev = DeviceInfo(
+                device_id=device_id,
+                device_role=role,
+                device_model=str(raw.get("model", "")),
+                app_version=str(raw.get("app_version", "")),
+                is_online=False,
+                packets_received=int(raw.get("packets", 0) or 0),
+                first_packet_ts=raw.get("first_packet_ts"),
+                offline_intervals=list(raw.get("offline_intervals", [])),
+                substate=DeviceSubstate.FINALIZED,
+            )
+            devices.append(dev)
+            role_result = per_role.get("per_role", {}).get(_slug(role))
+            if not role_result:
+                continue
+            path = Path(role_result["path"])
+            rows = 0
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parsed = parse_row(line)
+                    if parsed is not None and is_valid_data_row(
+                        parsed, expected_device_id=device_id
+                    ):
+                        rows += 1
+            file_results[device_id] = {
+                "path": str(path),
+                "rows": rows,
+                "sha256": _sha256(path),
+                "reordered": 0,
+            }
+        return file_results, devices
 
     def _session_true_hz(self) -> dict[str, float]:
         """Session-wide average of DISTINCT readings per second, per device.
@@ -519,6 +811,16 @@ class SessionManager:
             # which is a large part of why a healthy session looks like nothing is
             # happening (plan D17).
             await broadcast_to_frontends(_state_snapshot())
+            # Checkpoint device counters, first-packet timestamps, and offline intervals at
+            # the same cadence. After a backend crash, restart reconciliation then has the
+            # last known connectivity boundary instead of only a stale session identity.
+            try:
+                await self._save_state()
+            except Exception as exc:
+                await audit.log("ERROR", "recording_checkpoint_failed", {
+                    "session_id": self.session_id,
+                    "error": str(exc),
+                })
 
     # ── Idle reaper ──────────────────────────────────────────────────────────
 
@@ -551,10 +853,14 @@ class SessionManager:
 
             if self.state != SessionState.IDLE:
                 continue
+            # A successfully registered, still-open control WebSocket is retained.  The
+            # control handler now emits server heartbeats and will clean up immediately
+            # on a send failure; pruning an open channel merely because a client PING is
+            # late creates a false disconnect and loses the operator's device state.
             dead = [
                 device_id
                 for device_id, dev in self._devices.items()
-                if dev.control_ws is None or not dev.is_alive
+                if dev.control_ws is None
             ]
             if not dead:
                 continue

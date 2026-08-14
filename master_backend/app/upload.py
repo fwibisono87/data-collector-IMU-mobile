@@ -24,6 +24,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -188,62 +189,100 @@ def _int_header(request: Request, name: str, default: int) -> int:
         return default
 
 
+def _merge_csv_to_output(
+    sources: list[tuple[str, Path]],
+    output: Path,
+    *,
+    metadata_prefix: str = "",
+) -> dict:
+    """Deduplicate and timestamp-sort sources with bounded Python memory.
+
+    The previous implementation kept every row and dedup key in the Python heap. Long
+    sessions could therefore fail during consolidation even when capture and the CSV
+    writers had succeeded. SQLite stores the working set on disk and streams the final
+    ordered file.
+    """
+    output.parent.mkdir(parents=True, exist_ok=True)
+    db_path = output.with_name(output.name + ".merge.sqlite")
+    try:
+        db_path.unlink()
+    except OSError:
+        pass
+    conn = sqlite3.connect(db_path)
+    src_rows: dict[str, int] = {}
+    source_files: list[dict] = []
+    read_total = 0
+    try:
+        conn.execute(
+            "CREATE TABLE rows (device_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+            "timestamp INTEGER NOT NULL, payload TEXT NOT NULL, "
+            "PRIMARY KEY (device_id, sequence))"
+        )
+        conn.execute("CREATE INDEX rows_timestamp ON rows(timestamp)")
+        for label, path in sources:
+            if path is None or not path.exists():
+                continue
+            count = 0
+            with open(path, "r", encoding="utf-8", errors="replace") as source:
+                for line in source:
+                    fields = parse_row(line)
+                    if fields is None:
+                        continue
+                    read_total += 1
+                    try:
+                        sequence = int(fields[COL_SEQUENCE])
+                        timestamp = int(fields[0])
+                    except (ValueError, IndexError):
+                        continue
+                    cursor = conn.execute(
+                        "INSERT OR IGNORE INTO rows(device_id, sequence, timestamp, payload) "
+                        "VALUES (?, ?, ?, ?)",
+                        (fields[COL_DEVICE_ID], sequence, timestamp, ",".join(fields)),
+                    )
+                    count += cursor.rowcount
+                    if read_total % 2000 == 0:
+                        conn.commit()
+            conn.commit()
+            src_rows[label] = src_rows.get(label, 0) + count
+            source_files.append({"path": str(path), "label": label, "rows": count})
+
+        row_count = int(conn.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
+        tmp_output = output.with_name(output.name + ".tmp")
+        with open(tmp_output, "w", encoding="utf-8", newline="") as target:
+            if metadata_prefix:
+                target.write(f"# {metadata_prefix}\n")
+            target.write(_CSV_HEADER)
+            for (payload,) in conn.execute("SELECT payload FROM rows ORDER BY timestamp, rowid"):
+                target.write(payload + "\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(tmp_output, output)
+        return {
+            "path": str(output),
+            "rows": row_count,
+            "sources": src_rows,
+            "source_files": source_files,
+            "duplicates_dropped": read_total - row_count,
+        }
+    finally:
+        conn.close()
+        try:
+            db_path.unlink()
+        except OSError:
+            pass
+        try:
+            output.with_name(output.name + ".tmp").unlink()
+        except OSError:
+            pass
+
+
 def merge_csv_sources(
     sources: list[tuple[str, Path]],
     output: Path,
     *,
     metadata_prefix: str = "",
 ) -> dict:
-    """Merge CSVs sharing the sensor schema into one file.
-
-    Dedups rows on (device_id, sequence_number) — the same physical sample can arrive
-    through several paths (live WS writes, late delivery sidecars, phone rescue
-    uploads), all of which share the backend sequence numbers. Rows are then
-    re-sorted by timestamp so the downstream segmentation sees a monotonic series.
-
-    `sources` is a list of (source_label, path). The metadata prefix (when given) is
-    written above the header so the merged file stays self-describing.
-    """
-    seen: set[str] = set()
-    rows: list[list[str]] = []
-    src_rows: dict[str, int] = {}
-    source_files: list[dict] = []
-    read_total = 0
-
-    for label, path in sources:
-        if path is None or not path.exists():
-            continue
-        count = 0
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            fields = parse_row(line)
-            if fields is None:
-                continue
-            read_total += 1
-            key = f"{fields[COL_DEVICE_ID]}\t{fields[COL_SEQUENCE]}"
-            if key in seen:
-                continue
-            seen.add(key)
-            rows.append(fields)
-            count += 1
-        src_rows[label] = src_rows.get(label, 0) + count
-        source_files.append({"path": str(path), "label": label, "rows": count})
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    rows.sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
-    with open(output, "w", encoding="utf-8", newline="") as f:
-        if metadata_prefix:
-            f.write(f"# {metadata_prefix}\n")
-        f.write(_CSV_HEADER)
-        for p in rows:
-            f.write(",".join(p) + "\n")
-
-    return {
-        "path": str(output),
-        "rows": len(rows),
-        "sources": src_rows,
-        "source_files": source_files,
-        "duplicates_dropped": read_total - len(rows),
-    }
+    return _merge_csv_to_output(sources, output, metadata_prefix=metadata_prefix)
 
 
 def merge_csv_sources_per_role(
@@ -261,52 +300,24 @@ def merge_csv_sources_per_role(
     operators can hand one device's full series (live + late + rescue + recovery) to a
     subject without the other devices' rows mixed in.
     """
-    buckets: dict[str, dict] = {}
-    read_total = 0
+    buckets: dict[str, list[tuple[str, Path]]] = {}
     for role_key, label, path in sources:
         if path is None or not path.exists():
             continue
-        b = buckets.setdefault(role_key, {
-            "seen": set(),
-            "rows": [],
-            "src_rows": {},
-            "source_files": [],
-            "read_total": 0,
-        })
-        count = 0
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            fields = parse_row(line)
-            if fields is None:
-                continue
-            b["read_total"] += 1
-            read_total += 1
-            key = f"{fields[COL_DEVICE_ID]}\t{fields[COL_SEQUENCE]}"
-            if key in b["seen"]:
-                continue
-            b["seen"].add(key)
-            b["rows"].append(fields)
-            count += 1
-        b["src_rows"][label] = b["src_rows"].get(label, 0) + count
-        b["source_files"].append({"path": str(path), "label": label, "rows": count})
+        buckets.setdefault(role_key, []).append((label, path))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     per_role: dict[str, dict] = {}
     written: list[str] = []
-    for role_key, b in sorted(buckets.items()):
-        b["rows"].sort(key=lambda p: int(p[0]) if p[0].isdigit() else 0)
+    for role_key, role_sources in sorted(buckets.items()):
         out_path = output_dir / f"{session_id}_{role_key}_consolidated.csv"
-        with open(out_path, "w", encoding="utf-8", newline="") as f:
-            if metadata_prefix:
-                f.write(f"# {metadata_prefix}\n")
-            f.write(_CSV_HEADER)
-            for p in b["rows"]:
-                f.write(",".join(p) + "\n")
+        result = _merge_csv_to_output(role_sources, out_path, metadata_prefix=metadata_prefix)
         per_role[role_key] = {
             "path": str(out_path),
-            "rows": len(b["rows"]),
-            "sources": b["src_rows"],
-            "source_files": b["source_files"],
-            "duplicates_dropped": b["read_total"] - len(b["rows"]),
+            "rows": result["rows"],
+            "sources": result["sources"],
+            "source_files": result["source_files"],
+            "duplicates_dropped": result["duplicates_dropped"],
         }
         written.append(str(out_path))
 
@@ -333,8 +344,14 @@ async def recovery_sessions(include_done: bool = False):
         for d in sorted(RECOVERY_PATH.iterdir()):
             if not d.is_dir():
                 continue
-            infos = [json.loads(p.read_text(encoding="utf-8"))
-                     for p in d.glob("*.info.json")]
+            infos = []
+            for p in d.glob("*.info.json"):
+                try:
+                    value = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(value, dict):
+                    infos.append(value)
             if not infos:
                 continue
             all_done = all(i.get("done", False) for i in infos)
@@ -358,8 +375,7 @@ def _set_done(session_id: str, done: bool) -> list[dict]:
         except Exception:
             continue
         info["done"] = done
-        info["updated_at_ms"] = int(time.time() * 1000)
-        p.write_text(json.dumps(info, indent=2), encoding="utf-8")
+        _save_info(info)
         updated.append(info.get("device_id"))
     return updated
 
@@ -391,7 +407,12 @@ async def recovery_files(session_id: str):
     d = _session_dir(session_id)
     infos = []
     for p in sorted(d.glob("*.info.json")):
-        info = json.loads(p.read_text(encoding="utf-8"))
+        try:
+            info = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(info, dict):
+            continue
         info["file"] = p.name.replace(".info.json", ".csv")
         csv = d / (info["file"])
         info["size"] = csv.stat().st_size if csv.exists() else 0
@@ -420,26 +441,41 @@ async def recovery_merge(session_id: str):
     d = _session_dir(session_id)
     sources: list[tuple[str, Path]] = []
     for p in d.glob("*.info.json"):
-        info = json.loads(p.read_text(encoding="utf-8"))
+        try:
+            info = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(info, dict):
+            continue
         csv = d / f"{_slug(info['device_id'])}.csv"
         if csv.exists() and info.get("complete") and info.get("sha256_verified"):
             sources.append((info["device_id"], csv))
     if not sources:
         raise HTTPException(status_code=404, detail="no complete recovery files to merge")
 
-    infos = [
-        json.loads(p.read_text(encoding="utf-8"))
-        for p in d.glob("*.info.json")
-    ]
+    infos = []
+    for p in d.glob("*.info.json"):
+        try:
+            value = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            infos.append(value)
     subject = infos[0].get("subject", "Unknown") if infos else "Unknown"
     tag = infos[0].get("session_tag", "Session") if infos else "Session"
 
     ssd = Path(os.getenv("SSD_PATH", "./data")) / "Data_Riset_IMU" / f"{subject}_{tag}".replace(" ", "_")
     out_path = ssd / f"{session_id}_merged.csv"
-    result = merge_csv_sources(
-        sources,
-        out_path,
-        metadata_prefix=f"session_id={session_id},subject={subject},session_tag={tag},source=recovery_merge",
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: merge_csv_sources(
+            sources,
+            out_path,
+            metadata_prefix=(
+                f"session_id={session_id},subject={subject},session_tag={tag},"
+                "source=recovery_merge"
+            ),
+        ),
     )
 
     await audit.log("INFO", "recovery_merged", {

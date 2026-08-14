@@ -63,22 +63,23 @@ class WebSocketClient {
   String _sessionTag = '';
   String _sessionOperator = '';
 
-  String? _serverState;          // authoritative backend session state, from PONG
-  String? _serverLateSid;        // session still accepting late telemetry, or null
-  DateTime? _lastStateAtMs;      // when we last heard authoritative state
-  DateTime? _offlineSince;       // for the UI's "offline for 00:24" timer
-  DateTime? _lostAtMs;           // when the last connection gap began (sidecar)
+  String? _serverState; // authoritative backend session state, from PONG
+  String? _serverLateSid; // session still accepting late telemetry, or null
+  DateTime? _lastStateAtMs; // when we last heard authoritative state
+  DateTime? _offlineSince; // for the UI's "offline for 00:24" timer
+  DateTime? _lostAtMs; // when the last connection gap began (sidecar)
 
   String? get serverState => _serverState;
   String? get serverLateSid => _serverLateSid;
   DateTime? get lastStateAt => _lastStateAtMs;
   DateTime? get offlineSince => _offlineSince;
+
   /// True when we believe we are recording but have not heard from the backend
   /// for >15 s — the UI must show this as "unconfirmed", never as a confident red.
   bool get isRecordingUnconfirmed =>
       _activeSessionId != null &&
       (_lastStateAtMs == null ||
-       DateTime.now().difference(_lastStateAtMs!).inSeconds > 15);
+          DateTime.now().difference(_lastStateAtMs!).inSeconds > 15);
 
   // Pending CLOCK_SYNC requests: commandId → t0Ms
   final Map<String, int> _pendingSyncs = {};
@@ -109,20 +110,29 @@ class WebSocketClient {
     _setState(WsState.connecting);
     ConnDebug.log('connect begin -> $serverIp, state=connecting');
 
-    // Cancel any stale subscriptions from a previous (now-dead) connection so their
-    // onDone/onError cannot fire against the new connection (Defect D).
-    await _controlSub?.cancel();
-    await _telemetrySub?.cancel();
-    _controlSub = null;
-    _telemetrySub = null;
+    try {
+      // Cancel any stale subscriptions from a previous (now-dead) connection so their
+      // onDone/onError cannot fire against the new connection (Defect D).
+      await _controlSub?.cancel();
+      await _telemetrySub?.cancel();
+      _controlSub = null;
+      _telemetrySub = null;
 
-    _deviceId = await DeviceIdService().getDeviceId();
-    _deviceRole = await DeviceIdService().getDeviceRole();
-    await DeviceIdService().saveServerIp(serverIp);
-    // Persist the desired endpoint so a restarted foreground-task engine can
-    // reconnect without the UI re-issuing a connect command.
-    await SessionPersistence().saveDesired(serverIp: serverIp, deviceRole: _deviceRole);
-    await _restoreSequenceIfInterrupted();
+      _deviceId = await DeviceIdService().getDeviceId();
+      _deviceRole = await DeviceIdService().getDeviceRole();
+      await DeviceIdService().saveServerIp(serverIp);
+      // Persist the desired endpoint so a restarted foreground-task engine can
+      // reconnect without the UI re-issuing a connect command.
+      await SessionPersistence()
+          .saveDesired(serverIp: serverIp, deviceRole: _deviceRole);
+      await _restoreSequenceIfInterrupted();
+    } catch (e) {
+      _lastConnectError = _describeConnectError(e);
+      ConnDebug.log('connect preparation failed -> $serverIp: $e');
+      _setState(WsState.offline);
+      _scheduleReconnect();
+      return false;
+    }
 
     try {
       _control = WebSocketChannel.connect(
@@ -135,7 +145,7 @@ class WebSocketClient {
       ConnDebug.log('control socket open (ws/control)');
 
       _controlSub = _control!.stream.listen(
-        (raw) => _handleControlMessage(raw),
+        _handleControlMessageSafe,
         onDone: _onControlDisconnect,
         onError: (_) => _onControlDisconnect(),
       );
@@ -154,8 +164,12 @@ class WebSocketClient {
       // on the next reconnect (Defect D).
       _telemetrySub = _telemetry!.stream.listen(
         null,
-        onDone: () { if (_state == WsState.connected) _onControlDisconnect(); },
-        onError: (_) { if (_state == WsState.connected) _onControlDisconnect(); },
+        onDone: () {
+          if (_state == WsState.connected) _onControlDisconnect();
+        },
+        onError: (_) {
+          if (_state == WsState.connected) _onControlDisconnect();
+        },
         cancelOnError: true,
       );
 
@@ -189,10 +203,18 @@ class WebSocketClient {
 
   String _describeConnectError(Object e) {
     final s = e.toString().toLowerCase();
-    if (s.contains('timeout')) return 'Timed out — laptop unreachable. Same Wi-Fi? Backend running? IP correct?';
-    if (s.contains('refused')) return 'Connection refused — backend not started on :8000 at this IP.';
-    if (s.contains('failed host lookup') || s.contains('no address')) return 'Bad IP address — re-check the number.';
-    if (s.contains('network is unreachable')) return 'Phone not on the same network as the laptop.';
+    if (s.contains('timeout')) {
+      return 'Timed out — laptop unreachable. Same Wi-Fi? Backend running? IP correct?';
+    }
+    if (s.contains('refused')) {
+      return 'Connection refused — backend not started on :8000 at this IP.';
+    }
+    if (s.contains('failed host lookup') || s.contains('no address')) {
+      return 'Bad IP address — re-check the number.';
+    }
+    if (s.contains('network is unreachable')) {
+      return 'Phone not on the same network as the laptop.';
+    }
     return 'Could not connect. Check Wi-Fi, backend status, and the IP.';
   }
 
@@ -209,6 +231,26 @@ class WebSocketClient {
   }
 
   // ── Sensor packet handling ───────────────────────────────────────────────
+
+  void _bufferPacket(Uint8List bytes) {
+    if (_activeSessionId == null) return;
+    final buf = FallbackBufferManager();
+    if (!buf.isActive) {
+      // activate() marks the manager active before its asynchronous file setup,
+      // so packets arriving during that setup remain in the in-memory queue.
+      unawaited(buf.activate(sessionId: _activeSessionId).catchError((error) {
+        ConnDebug.log('fallback buffer activation failed: $error');
+      }));
+    }
+    buf.enqueue(bytes);
+    _packetsBuffered = buf.bufferedCount;
+    try {
+      ForegroundServiceHandler()
+          .updateNotification(_packetsSent, _packetsBuffered);
+    } catch (error) {
+      ConnDebug.log('buffer notification failed: $error');
+    }
+  }
 
   void _onSensorPacket(SensorPacket raw) {
     final rawNow = DateTime.now().millisecondsSinceEpoch;
@@ -236,8 +278,11 @@ class WebSocketClient {
 
     // Local guarantee: this write happens whether or not the network exists (plan T12).
     LocalSessionRecorder().write(raw,
-        timestampMs: correctedNow, sequence: seq, deviceId: _deviceId,
-        labelId: _activeLabelId, labelName: _activeLabelName,
+        timestampMs: correctedNow,
+        sequence: seq,
+        deviceId: _deviceId,
+        labelId: _activeLabelId,
+        labelName: _activeLabelName,
         accTsMs: _hwTsToCorrectedMs(raw.accTs, correctedNow),
         gyroTsMs: _hwTsToCorrectedMs(raw.gyroTs, correctedNow),
         sampleKind: raw.isHeld ? 1 : 0);
@@ -246,26 +291,27 @@ class WebSocketClient {
     // while connected meant a process kill during an offline stretch restored a sequence
     // number stale by the whole outage, defeating the D5 fix's +5000 margin (plan R5).
     if (_activeSessionId != null && seq % 250 == 0) {
-      _persistSequence(seq);
+      unawaited(_persistSequence(seq));
     }
 
     if (_state == WsState.connected && _telemetry != null) {
-      _telemetry!.sink.add(bytes);
-      _packetsSent++;
+      try {
+        _telemetry!.sink.add(bytes);
+        _packetsSent++;
+      } catch (error) {
+        // A socket can close between the state check and sink.add(). Never let
+        // that synchronous exception terminate the sensor stream; preserve the
+        // packet locally and enter the normal reconnect path.
+        ConnDebug.log('telemetry write failed: $error');
+        _onControlDisconnect();
+        _bufferPacket(bytes);
+      }
     } else {
       // Only buffer while a session is actually running. Buffering during idle offline
       // periods filled storage with data nobody asked for; and _activeSessionId is
       // exactly the tag we need to prove, later, which session these bytes belong to
       // (plan T10).
-      if (_activeSessionId == null) return;
-      final buf = FallbackBufferManager();
-      if (!buf.isActive) {
-        // fire-and-forget open; enqueue() below queues in memory until the file is ready
-        buf.activate(sessionId: _activeSessionId);
-      }
-      buf.enqueue(bytes);
-      _packetsBuffered = buf.bufferedCount;
-      ForegroundServiceHandler().updateNotification(_packetsSent, _packetsBuffered);
+      _bufferPacket(bytes);
     }
   }
 
@@ -275,12 +321,28 @@ class WebSocketClient {
   /// rather than trusting a wrong number.
   int _hwTsToCorrectedMs(DateTime? ts, int correctedNow) {
     if (ts == null) return 0;
-    final candidate = ts.millisecondsSinceEpoch + ClockSyncService().clockOffsetMs;
-    if ((candidate - correctedNow).abs() > 3600000) return 0;   // > 1h off => not epoch-based
+    final candidate =
+        ts.millisecondsSinceEpoch + ClockSyncService().clockOffsetMs;
+    if ((candidate - correctedNow).abs() > 3600000) {
+      return 0; // > 1h off => not epoch-based
+    }
     return candidate;
   }
 
   // ── Control channel ──────────────────────────────────────────────────────
+
+  void _handleControlMessageSafe(dynamic raw) {
+    unawaited(() async {
+      try {
+        await _handleControlMessage(raw);
+      } catch (error) {
+        // Stream listeners do not await an async callback. Contain unexpected
+        // command/storage failures so one malformed command cannot kill control
+        // processing or the acquisition isolate.
+        ConnDebug.log('control message failed: $error');
+      }
+    }());
+  }
 
   Future<void> _handleControlMessage(dynamic raw) async {
     Uint8List bytes;
@@ -330,8 +392,9 @@ class WebSocketClient {
           final sid = payload['session_id']?.toString();
           _sessionSubject = payload['subject']?.toString() ?? _sessionSubject;
           _sessionTag = payload['session_tag']?.toString() ?? _sessionTag;
-          _sessionOperator = payload['operator']?.toString() ?? _sessionOperator;
-          _sequence = 0;   // Reset sequence counter for new session
+          _sessionOperator =
+              payload['operator']?.toString() ?? _sessionOperator;
+          _sequence = 0; // Reset sequence counter for new session
           await _setActiveSession(sid);
 
           // Coordinated start: wait until scheduled_start_ms (CLAUDE.md §22.5)
@@ -359,8 +422,10 @@ class WebSocketClient {
       case CommandType.SET_LABEL:
         try {
           final payload = jsonDecode(cmd.payload) as Map<String, dynamic>;
-          _activeLabelId = int.tryParse(payload['label_id'].toString()) ?? _activeLabelId;
-          _activeLabelName = payload['label_name']?.toString() ?? _activeLabelId.toString();
+          _activeLabelId =
+              int.tryParse(payload['label_id'].toString()) ?? _activeLabelId;
+          _activeLabelName =
+              payload['label_name']?.toString() ?? _activeLabelId.toString();
         } catch (_) {}
         _emitEvent({'type': 'set_label', 'payload': cmd.payload});
 
@@ -377,7 +442,9 @@ class WebSocketClient {
   // missed a START or a STOP while offline is corrected within ~1 s of reconnecting
   // instead of staying wrong forever (plan D1).
   Future<void> _applyServerState(String payload) async {
-    if (payload.isEmpty) return;            // old backend → no information, keep today's behaviour
+    if (payload.isEmpty) {
+      return; // old backend → no information, keep today's behaviour
+    }
     Map<String, dynamic> p;
     try {
       p = jsonDecode(payload) as Map<String, dynamic>;
@@ -404,13 +471,21 @@ class WebSocketClient {
       final ended = _activeSessionId!;
       await _setActiveSession(null);
       SessionPersistence().clear();
-      _emitEvent({'type': 'stop_session', 'reason': 'state_resync', 'session_id': ended});
+      _emitEvent({
+        'type': 'stop_session',
+        'reason': 'state_resync',
+        'session_id': ended
+      });
     } else if (serverRecording && sid != null && _activeSessionId != sid) {
       // A session is running that we are not part of — we missed the START, or a new
       // session began while we were dark. Adopt it and start a fresh dedup namespace.
       _sequence = 0;
       await _setActiveSession(sid);
-      _emitEvent({'type': 'start_session', 'reason': 'state_resync', 'session_id': sid});
+      _emitEvent({
+        'type': 'start_session',
+        'reason': 'state_resync',
+        'session_id': sid
+      });
     }
   }
 
@@ -418,7 +493,7 @@ class WebSocketClient {
   /// recorder (the data guarantee — plan T12) is always opened/closed in lockstep with
   /// the session the phone believes is active, whether that belief came from a direct
   /// START/STOP_SESSION push or from a PONG state resync.
-  Future<void> _setActiveSession(String? sid, {String subject = ''}) async {
+  Future<void> _setActiveSession(String? sid) async {
     if (_activeSessionId == sid) return;
     _activeSessionId = sid;
     if (sid == null) {
@@ -428,8 +503,12 @@ class WebSocketClient {
       await LocalSessionRecorder().stop();
     } else {
       await LocalSessionRecorder().start(
-        sessionId: sid, role: _deviceRole, deviceId: _deviceId, subject: _sessionSubject,
-        sessionTag: _sessionTag, operator: _sessionOperator);
+          sessionId: sid,
+          role: _deviceRole,
+          deviceId: _deviceId,
+          subject: _sessionSubject,
+          sessionTag: _sessionTag,
+          operator: _sessionOperator);
       // Sensors are acquired here — owned by the running isolate (the task
       // engine), gated to an active session, not by any widget lifecycle.
       InternalSensorManager().start(frequency: 100);
@@ -455,13 +534,14 @@ class WebSocketClient {
     // duplicate signal so reconnect attempts never stack (Defect C).
     if (_state != WsState.connected) return;
     _setState(WsState.offline);
-    _serverState = null;      // never gate a buffer flush on a stale "RECORDING"
+    _serverState = null; // never gate a buffer flush on a stale "RECORDING"
     _serverLateSid = null;
     _offlineSince = DateTime.now();
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
     if (_activeSessionId != null) {
-      ForegroundServiceHandler().updateStatus('⚠ DISCONNECTED — buffering locally');
+      ForegroundServiceHandler()
+          .updateStatus('⚠ DISCONNECTED — buffering locally');
     }
     _scheduleReconnect();
   }
@@ -469,18 +549,31 @@ class WebSocketClient {
   void _scheduleReconnect() {
     Future.delayed(const Duration(seconds: 3), () async {
       if (_state != WsState.offline) return;
-      await connect(_serverIp);
+      try {
+        await connect(_serverIp);
+      } catch (error) {
+        ConnDebug.log('reconnect failed: $error');
+        _setState(WsState.offline);
+        _scheduleReconnect();
+      }
       // Reconciliation + flush now happen inside connect()'s success path for every
       // entry point, not just this timer (plan R3).
     });
   }
 
   Future<void> _afterConnectReconcile() async {
-    await _waitForServerState(const Duration(seconds: 3));
-    await _flushFallbackBuffer();
-    // Also push any finished, not-yet-uploaded local rescue CSVs to the backend so the
-    // desktop can pull them (resumable HTTP, no adb).
-    unawaited(RecoveryUploader().uploadPending());
+    try {
+      await _waitForServerState(const Duration(seconds: 3));
+      await _flushFallbackBuffer();
+      // Also push any finished, not-yet-uploaded local rescue CSVs to the backend so the
+      // desktop can pull them (resumable HTTP, no adb).
+      unawaited(RecoveryUploader().uploadPending());
+    } catch (error) {
+      // Reconciliation is supplemental to the local recorder. Keep the bytes on
+      // disk and let the next reconnect retry instead of surfacing an unhandled
+      // Future from the successful socket handshake.
+      ConnDebug.log('post-connect reconcile failed: $error');
+    }
   }
 
   Future<void> _flushFallbackBuffer() async {
@@ -493,37 +586,80 @@ class WebSocketClient {
     // that does not match an open (or late-window) session, and the old code then erased
     // the local copy on "flush completed" — which only meant the socket accepted the
     // bytes, never that anything was written (plan D3).
-    final target = (_serverState == 'RECORDING') ? _activeSessionId : _serverLateSid;
+    final target =
+        (_serverState == 'RECORDING') ? _activeSessionId : _serverLateSid;
     if (target == null || buf.sessionId == null || buf.sessionId != target) {
+      final orphanSessionId = buf.sessionId;
       final moved = await buf.quarantine();
       _packetsBuffered = 0;
       LocalSessionRecorder().logEvent({
         'type': 'buffer_drop',
         'time_ms': DateTime.now().millisecondsSinceEpoch,
         'count': moved.length,
+        'session_id': orphanSessionId,
       });
-      _emitEvent({'type': 'buffer_orphaned', 'files': moved, 'session_id': buf.sessionId});
+      _emitEvent({
+        'type': 'buffer_orphaned',
+        'files': moved,
+        'session_id': orphanSessionId
+      });
       return;
     }
 
     bool completed = true;
     await for (final bytes in buf.flushStream()) {
-      if (_state != WsState.connected) { completed = false; break; }
-      _telemetry?.sink.add(bytes);
+      if (_state != WsState.connected) {
+        completed = false;
+        break;
+      }
+      try {
+        _telemetry?.sink.add(bytes);
+      } catch (error) {
+        completed = false;
+        ConnDebug.log('fallback replay failed: $error');
+        _onControlDisconnect();
+        break;
+      }
       if (++_flushCounter % 200 == 0) {
         // Re-check the target: a new session may have started mid-flush, and the rest of
         // this buffer does NOT belong to it (plan R6).
         final stillValid = (_serverState == 'RECORDING')
             ? (_activeSessionId == target)
             : (_serverLateSid == target);
-        if (!stillValid) { completed = false; break; }
-        await Future.delayed(const Duration(milliseconds: 2));   // pace the sink, no backpressure
+        if (!stillValid) {
+          completed = false;
+          break;
+        }
+        await Future.delayed(
+            const Duration(milliseconds: 2)); // pace the sink, no backpressure
       }
     }
     if (completed && _state == WsState.connected) {
-      await buf.clearAfterFlush();
-      _packetsBuffered = 0;
-      _emitEvent({'type': 'buffer_flushed'});
+      final parseClean = buf.truncatedRecords == 0 && buf.malformedRecords == 0;
+      if (buf.droppedOverflow > 0 || !parseClean) {
+        LocalSessionRecorder().logEvent({
+          'type': 'fallback_buffer_parse_warning',
+          'time_ms': DateTime.now().millisecondsSinceEpoch,
+          'dropped_overflow': buf.droppedOverflow,
+          'truncated_records': buf.truncatedRecords,
+          'malformed_records': buf.malformedRecords,
+        });
+      }
+      if (parseClean) {
+        await buf.clearAfterFlush();
+        _packetsBuffered = buf.bufferedCount;
+        _emitEvent({'type': 'buffer_flushed'});
+      } else {
+        // Keep the immutable snapshot. A malformed/truncated tail means the parser could
+        // not prove that every record in that file was delivered; deleting it here would
+        // turn a recoverable forensic copy into a silent loss. Valid prefixes are safe to
+        // replay on the next reconnect because backend dedup is sequence-keyed.
+        _emitEvent({
+          'type': 'buffer_flush_incomplete',
+          'truncated_records': buf.truncatedRecords,
+          'malformed_records': buf.malformedRecords
+        });
+      }
     }
     // If the socket dropped mid-flush, leave the buffer intact; the next reconnect
     // re-flushes it. Backend dedup (device_id, session_id, sequence_number) makes the
@@ -534,7 +670,12 @@ class WebSocketClient {
 
   Future<void> sendCommand(CommandProto cmd) async {
     if (_state != WsState.connected) return;
-    _control?.sink.add(cmd.toBytes());
+    try {
+      _control?.sink.add(cmd.toBytes());
+    } catch (error) {
+      ConnDebug.log('control write failed: $error');
+      _onControlDisconnect();
+    }
   }
 
   Future<void> _sendDeviceRegister() async {
@@ -558,7 +699,8 @@ class WebSocketClient {
 
   void _startPingTimer() {
     _pingTimer?.cancel();
-    _lastPong = DateTime.now();   // fresh grace window each time the timer (re)starts
+    _lastPong =
+        DateTime.now(); // fresh grace window each time the timer (re)starts
     _pingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       sendCommand(CommandProto(
         type: CommandType.PING,
@@ -600,14 +742,19 @@ class WebSocketClient {
 
   Future<void> _persistSequence(int seq) async {
     if (_activeSessionId == null) return;
-    await SessionPersistence().save(
-      sessionId: _activeSessionId!,
-      deviceId: _deviceId,
-      serverIp: _serverIp,
-      clockOffsetMs: ClockSyncService().clockOffsetMs,
-      lastSequenceNumber: seq,
-      deviceRole: _deviceRole,
-    );
+    try {
+      await SessionPersistence().save(
+        sessionId: _activeSessionId!,
+        deviceId: _deviceId,
+        serverIp: _serverIp,
+        clockOffsetMs: ClockSyncService().clockOffsetMs,
+        lastSequenceNumber: seq,
+        deviceRole: _deviceRole,
+      );
+    } catch (error) {
+      // A checkpoint is recovery metadata, not a reason to terminate acquisition.
+      ConnDebug.log('sequence checkpoint failed: $error');
+    }
   }
 
   // The backend dedups on (device_id, session_id, sequence_number). After a process kill
@@ -628,8 +775,13 @@ class WebSocketClient {
     // Resume the local recorder immediately, even before the control socket reconnects —
     // it is the guarantee that must not wait on the network (plan T12).
     await _setActiveSession(sid);
-    await FallbackBufferManager().loadMeta();     // re-attach any surviving buffer to its session
-    _emitEvent({'type': 'session_resumed', 'session_id': sid, 'from_sequence': _sequence});
+    await FallbackBufferManager()
+        .loadMeta(); // re-attach any surviving buffer to its session
+    _emitEvent({
+      'type': 'session_resumed',
+      'session_id': sid,
+      'from_sequence': _sequence
+    });
   }
 
   // ── Disconnect ───────────────────────────────────────────────────────────
@@ -639,7 +791,8 @@ class WebSocketClient {
       _emitEvent({
         'type': 'disconnect_refused',
         'session_id': _activeSessionId,
-        'reason': 'An active session can only be stopped by the backend operator.',
+        'reason':
+            'An active session can only be stopped by the backend operator.',
       });
       return;
     }
@@ -649,7 +802,8 @@ class WebSocketClient {
     _controlSub?.cancel();
     await _control?.sink.close();
     await _telemetry?.sink.close();
-    await LocalSessionRecorder().stop();   // close the file cleanly; no unflushed tail (plan R8)
+    await LocalSessionRecorder()
+        .stop(); // close the file cleanly; no unflushed tail (plan R8)
     _setState(WsState.disconnected);
     await FallbackBufferManager().deactivate();
     // Stop foreground service only on explicit disconnect, not on temporary drops.
@@ -666,7 +820,8 @@ class WebSocketClient {
       if (prev == WsState.connected && s != WsState.connected) {
         AlertService().startAlarm();
         _lostAtMs = DateTime.now();
-        LocalSessionRecorder().logEvent({'type': 'connection_lost', 'time_ms': nowMs});
+        LocalSessionRecorder()
+            .logEvent({'type': 'connection_lost', 'time_ms': nowMs});
       } else if (prev != WsState.connected && s == WsState.connected) {
         AlertService().stopAlarm();
         final dur = _lostAtMs != null

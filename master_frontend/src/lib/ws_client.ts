@@ -53,6 +53,18 @@ const ACK_MAX_RETRIES = 3;
 // the dashboard claim failure while the backend is correctly finalizing the session.
 const STOP_ACK_TIMEOUT_MS = 120_000;
 
+function newCommandId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
 class WsClient {
   private controlWs: WebSocket | null = null;
   private liveWs: WebSocket | null = null;
@@ -64,14 +76,17 @@ class WsClient {
     resolve: (v: AckMsg) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>;
   }>();
   private backendIp = "";
+  private connectionGeneration = 0;
 
   connect(ip: string): void {
     this.backendIp = ip;
-    this._connectControl(ip);
-    this._connectLive(ip);
+    const generation = ++this.connectionGeneration;
+    this._connectControl(ip, generation);
+    this._connectLive(ip, generation);
   }
 
   disconnect(): void {
+    this.connectionGeneration++;
     this.controlWs?.close();
     this.liveWs?.close();
     this.controlWs = null;
@@ -134,7 +149,7 @@ class WsClient {
 
   // ── Private ──────────────────────────────────────────────────────────────
 
-  private _connectControl(ip: string): void {
+  private _connectControl(ip: string, generation: number): void {
     const ws = new WebSocket(`ws://${ip}:8000/ws/frontend`);
     ws.onopen = () => {
       this._emitConn(true);
@@ -147,12 +162,19 @@ class WsClient {
         this.listeners.forEach(l => l(msg));
       } catch { /* ignore */ }
     };
-    ws.onclose = () => { this._emitConn(false); setTimeout(() => this._connectControl(ip), 3000); };
+    ws.onclose = () => {
+      this._emitConn(false);
+      if (generation === this.connectionGeneration) {
+        setTimeout(() => {
+          if (generation === this.connectionGeneration) this._connectControl(ip, generation);
+        }, 3000);
+      }
+    };
     ws.onerror = () => ws.close();
     this.controlWs = ws;
   }
 
-  private _connectLive(ip: string): void {
+  private _connectLive(ip: string, generation: number): void {
     const ws = new WebSocket(`ws://${ip}:8000/ws/live`);
     ws.onmessage = (e) => {
       try {
@@ -160,13 +182,19 @@ class WsClient {
         this.liveListeners.forEach(l => l(samples));
       } catch { /* ignore */ }
     };
-    ws.onclose = () => setTimeout(() => this._connectLive(ip), 3000);
+    ws.onclose = () => {
+      if (generation === this.connectionGeneration) {
+        setTimeout(() => {
+          if (generation === this.connectionGeneration) this._connectLive(ip, generation);
+        }, 3000);
+      }
+    };
     ws.onerror = () => ws.close();
     this.liveWs = ws;
   }
 
   private _send(type: string, payload: Record<string, unknown>, commandId?: string): string {
-    const id = commandId ?? crypto.randomUUID();
+    const id = commandId ?? newCommandId();
     const msg = JSON.stringify({ type, payload, command_id: id });
     if (this.controlWs?.readyState === WebSocket.OPEN) {
       this.controlWs.send(msg);
@@ -182,7 +210,7 @@ class WsClient {
     timeoutMs = ACK_TIMEOUT_MS,
   ): Promise<AckMsg> {
     return new Promise((resolve, reject) => {
-      const id = commandId ?? crypto.randomUUID();
+      const id = commandId ?? newCommandId();
       const msg = JSON.stringify({ type, payload, command_id: id });
 
       const timer = setTimeout(() => {

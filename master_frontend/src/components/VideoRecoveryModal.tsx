@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   clearChunks,
   listAllChunkGroups,
+  markCameraSaved,
   markSessionSaved,
   streamChunks,
   type ChunkGroup,
@@ -18,15 +19,13 @@ interface RowBusy {
   label: string;
 }
 
-const wait = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
-
 // File System Access typings live in src/types/file_system_access.d.ts — shared with
 // lib/zip_stream.ts, which needs the same API.
 
-// Per-camera save. Uses the File System Access API (showSaveFilePicker) when present so the
-// written data is confirmed to disk via a real handle; otherwise falls back to an in-memory
-// Blob + anchor download, which is memory-bound and cannot confirm the write, so it never
-// marks the session saved.
+// Per-camera save. Uses the File System Access API (showSaveFilePicker) so the written data is
+// confirmed to disk via a real handle. A browser without that API is rejected explicitly: an
+// in-memory Blob for a 40-minute camera stream is the same renderer-crash path this recovery
+// screen is meant to prevent.
 async function saveOneCamera(
   group: ChunkGroup,
   onProgress: (done: number, total: number) => void,
@@ -57,29 +56,9 @@ async function saveOneCamera(
     return { confirmed: true };
   }
 
-  // Fallback: no picker available — build a Blob and anchor download. Memory-bound, cannot
-  // report a confirmed write, and the object URL is revoked only after 15 s (never
-  // synchronously after .click()).
-  const parts: Blob[] = [];
-  let done = 0;
-  await streamChunks(group.sessionId, group.camId, async blob => {
-    parts.push(blob);
-    done += 1;
-    onProgress(done, total);
-  });
-  const url = URL.createObjectURL(new Blob(parts, { type: "video/webm" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  await wait(15000);
-  URL.revokeObjectURL(url);
-  // An anchor download cannot report whether the bytes ever reached disk. Treating this as
-  // success is exactly the 2026-08-07 defect — it let clearChunks run against footage that
-  // was never written. Never confirmed on this path.
-  return { confirmed: false };
+  throw new Error(
+    "This browser cannot safely save a long recording. Reopen the dashboard in Chrome or Edge."
+  );
 }
 
 export default function VideoRecoveryModal({ open, onClose }: Props) {
@@ -141,9 +120,11 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
     setError("");
     setProgress(p => ({ ...p, [k]: "" }));
     try {
-      await saveOneCamera(group, (done, total) =>
+      const result = await saveOneCamera(group, (done, total) =>
         setProgress(p => ({ ...p, [k]: `saving chunk ${done}/${total}…` })));
+      if (result.confirmed) await markCameraSaved(sessionId, camId, group.bytes);
       setProgress(p => ({ ...p, [k]: "" }));
+      await refresh();
     } catch (e) {
       const aborted = e instanceof DOMException && e.name === "AbortError";
       setProgress(p => ({ ...p, [k]: "" }));
@@ -188,6 +169,7 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
         if (!confirmed) allConfirmed = false;
         savedCams.set(cam.camId, cam.bytes);
         totalBytes += cam.bytes;
+        if (confirmed) await markCameraSaved(sessionId, cam.camId, cam.bytes);
       }
     } finally {
       mark(sessionId, undefined, undefined);
@@ -265,8 +247,8 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
 
         {pickedFallback && (
           <p className="shrink-0 text-[11px] text-amber-400">
-            File picker unavailable — saving uses an in-memory Blob anchor download (memory-bound) and
-            cannot confirm the write, so it will not mark the session saved.
+            This browser cannot safely stream a long recording to disk. Reopen the dashboard in
+            Chrome or Edge; the footage remains retained in IndexedDB.
           </p>
         )}
 

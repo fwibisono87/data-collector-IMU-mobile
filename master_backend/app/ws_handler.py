@@ -4,6 +4,7 @@ WebSocket endpoints for telemetry and control channels (CLAUDE.md §8).
 /ws/control   — Command binary channel (bidirectional)
 """
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -110,7 +111,12 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                     role = dev.device_role if dev else "unknown"
                     if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
                         dedup.add(device_id, late_sid, pkt.sequence_number)
-                        await io_manager.write_late(pkt, role)
+                        try:
+                            await io_manager.write_late(pkt, role)
+                        except OSError as exc:
+                            await audit.log("ERROR", "late_write_failed", {
+                                "device_id": device_id, "error": str(exc),
+                            })
                 continue
 
             if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
@@ -160,6 +166,7 @@ async def telemetry_ws(websocket: WebSocket) -> None:
 async def control_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     device_id: str | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
 
     try:
         # First binary message must be DeviceRegister.
@@ -200,6 +207,23 @@ async def control_ws(websocket: WebSocket) -> None:
         # stuck showing "RECORDING" forever (plan D1).
         await websocket.send_bytes(_state_pong())
 
+        async def heartbeat() -> None:
+            """Keep the control channel alive even if a phone misses its own PING timer.
+
+            The app treats a PONG as proof that the backend is reachable.  Previously the
+            backend only sent one in response to a client PING; when that timer was
+            delayed, both sides declared a healthy open WebSocket dead after eight
+            seconds and the idle reaper removed the device from the dashboard.
+            """
+            while True:
+                await asyncio.sleep(2)
+                await websocket.send_bytes(_state_pong())
+                session_manager.mark_ping(device_id)
+
+        heartbeat_task = asyncio.create_task(
+            heartbeat(), name=f"control-heartbeat-{device_id[:8]}"
+        )
+
         # Subsequent messages are Commands.
         async for raw in websocket.iter_bytes():
             try:
@@ -219,6 +243,10 @@ async def control_ws(websocket: WebSocket) -> None:
     except Exception as exc:
         await audit.log("ERROR", "control_ws_error", {"error": str(exc), "device_id": device_id})
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat_task
         session_manager.unregister_device(device_id)
         await audit.log("INFO", "ws_disconnect", {"channel": "control", "device_id": device_id})
         # Notify frontend so device shows as offline immediately.
@@ -259,6 +287,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                     type=CommandType.START_SESSION,
                     payload=json.dumps({
                         "session_id": session_manager.session_id,
+                        "scheduled_start_ms": session_manager.scheduled_start_ms,
                         "subject": session_manager.subject_name,
                         "session_tag": session_manager.session_tag,
                         "operator": session_manager.operator,
@@ -289,6 +318,11 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
                 await ws.send_bytes(make_ack(cmd.command_id, "fail", "Bad SET_LABEL payload"))
                 return
             io_manager.set_label(label_id, label_name)
+            if session_manager.state == SessionState.RECORDING:
+                # The label timeline is part of the crash-recovery contract: if the backend
+                # dies before STOP, the next validator still knows which sequence gaps were
+                # inside task labels versus the permitted zero-label boundary.
+                await session_manager._save_state()
             await ws.send_bytes(make_ack(cmd.command_id, "ok"))
             await audit.log(
                 "INFO",
@@ -376,6 +410,8 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
             label_id = int(payload.get("label_id", 0))
             label_name = str(payload.get("label_name", str(label_id)))
             io_manager.set_label(label_id, label_name)
+            if session_manager.state == SessionState.RECORDING:
+                await session_manager._save_state()
             await audit.log("INFO", "label_injected", {
                 "label_id": label_id,
                 "label_name": label_name,
@@ -418,6 +454,9 @@ def _state_snapshot() -> dict:
         "subject": session_manager.subject_name,
         "session_tag": session_manager.session_tag,
         "operator": session_manager.operator,
+        # Include the original coordinated start on every snapshot so a dashboard that
+        # reloads during RECORDING can resume camera capture against the same session.
+        "scheduled_start_ms": session_manager.scheduled_start_ms or None,
         # Use control_ws presence as source of truth for online status.
         "devices": [
             {

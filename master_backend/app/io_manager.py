@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -145,23 +146,70 @@ def _sort_rows_by_timestamp(path: Path) -> dict:
     """
     if not path.exists():
         return {"reordered": 0}
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if len(lines) <= 2:
-        return {"reordered": 0}
-    head, body = lines[:2], lines[2:]
 
-    def ts(line: str) -> int:
+    # Do the detection and reorder on disk.  The old splitlines()+sort path created a
+    # second Python string for every row at STOP, which could take hundreds of MB for a
+    # long three-device session — exactly when the operator needs finalisation to be the
+    # most reliable operation.
+    db_path = path.with_name(path.name + ".sort.sqlite")
+    tmp = path.with_name(path.name + ".sort.tmp")
+    out_of_order = 0
+    previous_ts: int | None = None
+    head: list[str] = []
+    try:
         try:
-            return int(line.split(",", 1)[0])
-        except Exception:
-            return -1
+            db_path.unlink()
+        except OSError:
+            pass
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rows (arrival INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "timestamp INTEGER NOT NULL, payload TEXT NOT NULL)"
+            )
+            with open(path, "r", encoding="utf-8", errors="replace", newline="") as source:
+                head = [next(source, ""), next(source, "")]
+                for line in source:
+                    try:
+                        timestamp = int(line.split(",", 1)[0])
+                    except (TypeError, ValueError, IndexError):
+                        timestamp = -1
+                    if previous_ts is not None and timestamp < previous_ts:
+                        out_of_order += 1
+                    previous_ts = timestamp
+                    conn.execute(
+                        "INSERT INTO rows(timestamp, payload) VALUES (?, ?)",
+                        (timestamp, line),
+                    )
+                    if out_of_order and out_of_order % 2000 == 0:
+                        conn.commit()
+            conn.commit()
+            if out_of_order == 0:
+                return {"reordered": 0}
 
-    out_of_order = sum(1 for a, b in zip(body, body[1:]) if ts(a) > ts(b))
-    if out_of_order == 0:
-        return {"reordered": 0}
-    body.sort(key=ts)                     # Python's sort is stable → ties keep arrival order
-    path.write_text("".join(head + body), encoding="utf-8")
-    return {"reordered": out_of_order}
+            # Never truncate the only good CSV in place. A process death during the rewrite
+            # leaves the original intact and the temporary file is removed on restart.
+            with open(tmp, "w", encoding="utf-8", newline="") as out:
+                out.writelines(head)
+                for (payload,) in conn.execute(
+                    "SELECT payload FROM rows ORDER BY timestamp, arrival"
+                ):
+                    out.write(payload)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp, path)
+            return {"reordered": out_of_order}
+        finally:
+            conn.close()
+    finally:
+        try:
+            db_path.unlink()
+        except OSError:
+            pass
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class IoManager:
@@ -233,6 +281,23 @@ class IoManager:
         if time.monotonic() - self._late_closed_at > _LATE_ACCEPT_SEC:
             return ""
         return self._late_session_id
+
+    @property
+    def session_id(self) -> str:
+        """Session currently owned by the writer/late-delivery pipeline."""
+        return self._session_id
+
+    @property
+    def label_timeline(self) -> list[dict]:
+        """JSON-safe label transitions for the current/just-ended session."""
+        return [
+            {
+                "timestamp_ms": timestamp,
+                "label_id": value[0],
+                "label_name": value[1],
+            }
+            for timestamp, value in zip(self._label_ts, self._label_val)
+        ]
 
     def has_writer(self, device_id: str) -> bool:
         return device_id in self._writers or device_id in self._rescue_writers
@@ -434,7 +499,30 @@ class IoManager:
         """
         results = {}
         for device_id, writer in {**self._writers, **self._rescue_writers}.items():
-            results[device_id] = await writer.close()
+            try:
+                results[device_id] = await writer.close()
+            except Exception as exc:
+                # One failing handle must not prevent every other device from being
+                # closed and included in the terminal bundle. Preserve the path and row
+                # count we know, then let integrity mark this artifact as failed.
+                await audit.log("ERROR", "csv_close_failed", {
+                    "device_id": device_id,
+                    "path": str(writer._path),
+                    "error": str(exc),
+                })
+                await writer.abandon()
+                try:
+                    sha = _sha256(writer._path)
+                except OSError:
+                    sha = ""
+                results[device_id] = {
+                    "path": str(writer._path),
+                    "rows": writer._rows_written,
+                    "sha256": sha,
+                    "close_failed": True,
+                    "close_error": str(exc),
+                    "reordered": 0,
+                }
 
         # Rename only after every file is flushed, fsynced and closed. Failure to rename is
         # logged and swallowed: a file under the provisional name is complete and correct
@@ -488,8 +576,19 @@ class IoManager:
             return None
         summary = {"session_id": self._late_session_id, "devices": {}}
         for device_id, w in self._late_writers.items():
+            try:
+                closed = await w.close()
+            except Exception as exc:
+                await audit.log("ERROR", "late_csv_close_failed", {
+                    "device_id": device_id, "error": str(exc),
+                })
+                await w.abandon()
+                closed = {
+                    "path": str(w._path), "rows": w._rows_written, "sha256": "",
+                    "close_failed": True, "close_error": str(exc), "reordered": 0,
+                }
             summary["devices"][device_id] = {
-                **(await w.close()),
+                **closed,
                 "rows_appended": self._late_rows.get(device_id, 0),
             }
         if summary["devices"] and self._late_base is not None:

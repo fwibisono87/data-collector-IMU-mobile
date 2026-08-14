@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 import time
 import zipfile
 from pathlib import Path
@@ -55,6 +56,8 @@ _LABEL_COL_ID = 7
 _LABEL_COL_NAME = 8
 _DEV_COL = 10
 _SEQ_COL = 9
+_consolidate_locks: dict[str, asyncio.Lock] = {}
+_bundle_locks: dict[str, asyncio.Lock] = {}
 
 
 def _session_folders(session_id: str) -> list[Path]:
@@ -159,15 +162,37 @@ def _session_files(session_id: str) -> list[dict]:
     files: list[dict] = []
     for folder in _session_folders(session_id):
         for p in sorted(folder.iterdir()):
-            if not p.is_file() or not p.name.startswith(f"{session_id}_"):
+            if (
+                not p.is_file()
+                or not p.name.startswith(f"{session_id}_")
+                or p.name.endswith((".tmp", ".sort.tmp", ".sort.sqlite", ".merge.sqlite"))
+            ):
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
                 continue
             files.append({
                 "name": p.name,
                 "path": str(p),
-                "size": p.stat().st_size,
+                "size": size,
                 "kind": _classify(p.name),
                 "folder": str(folder),
             })
+    # Camera anchors may arrive before the first CSV creates a session folder. Include the
+    # pending copy in manifests/bundles until cameras.py migrates it into the real folder.
+    pending_camera = SSD_PATH / "Data_Riset_IMU" / "_pending_cameras" / f"{session_id}_cameras.json"
+    if pending_camera.is_file() and not any(f["path"] == str(pending_camera) for f in files):
+        try:
+            files.append({
+                "name": pending_camera.name,
+                "path": str(pending_camera),
+                "size": pending_camera.stat().st_size,
+                "kind": "cameras",
+                "folder": str(pending_camera.parent),
+            })
+        except OSError:
+            pass
     files.sort(key=lambda f: f["name"])
     return files
 
@@ -208,40 +233,54 @@ def _scan_rows(csv_paths: list[Path]) -> tuple[int, list[dict]]:
     AND a merged/consolidated superset on disk, plain line counts would double count; the
     seen-set makes the numbers exact regardless of which artifacts are present.
     """
-    seen: set[str] = set()
-    counts: dict[tuple[int, str], int] = {}
-    row_count = 0
-    for p in csv_paths:
-        if not p.exists():
-            continue
+    db_path = SSD_PATH / ".sessions" / f".manifest-scan-{os.getpid()}-{time.time_ns()}.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE rows (device_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+            "label_id INTEGER, label_name TEXT, PRIMARY KEY(device_id, sequence))"
+        )
+        for p in csv_paths:
+            if not p.exists():
+                continue
+            try:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        parts = parse_row(line)
+                        if parts is None:
+                            continue
+                        try:
+                            sequence = int(parts[_SEQ_COL])
+                        except (ValueError, IndexError):
+                            continue
+                        try:
+                            label_id = int(parts[_LABEL_COL_ID])
+                        except (ValueError, IndexError):
+                            label_id = 0
+                        conn.execute(
+                            "INSERT OR IGNORE INTO rows(device_id, sequence, label_id, label_name) "
+                            "VALUES (?, ?, ?, ?)",
+                            (parts[_DEV_COL], sequence, label_id, parts[_LABEL_COL_NAME].strip()),
+                        )
+            except OSError:
+                continue
+        conn.commit()
+        row_count = int(conn.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
+        labels = [
+            {"label_id": int(lid), "label_name": lname or str(lid), "row_count": int(count)}
+            for lid, lname, count in conn.execute(
+                "SELECT label_id, label_name, COUNT(*) FROM rows "
+                "GROUP BY label_id, label_name ORDER BY label_id"
+            )
+        ]
+        return row_count, labels
+    finally:
+        conn.close()
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    # Version-agnostic: an exact-match test against one header constant
-                    # let an older file's header through as a data row once the schema
-                    # gained columns, inflating row_count by one per v1 file.
-                    parts = parse_row(line)
-                    if parts is None:
-                        continue
-                    key = f"{parts[_DEV_COL]}\t{parts[_SEQ_COL]}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    row_count += 1
-                    try:
-                        lid = int(parts[_LABEL_COL_ID])
-                    except ValueError:
-                        continue
-                    lname = parts[_LABEL_COL_NAME].strip()
-                    counts[(lid, lname)] = counts.get((lid, lname), 0) + 1
+            db_path.unlink()
         except OSError:
-            continue
-    labels = sorted(
-        ({"label_id": lid, "label_name": lname, "row_count": cnt}
-         for (lid, lname), cnt in counts.items()),
-        key=lambda x: x["label_id"],
-    )
-    return row_count, labels
+            pass
 
 
 def _mtime(path: Path | None) -> float:
@@ -271,6 +310,125 @@ def _session_meta(session_id: str) -> dict:
     return meta
 
 
+def _ledger_record(session_id: str) -> dict:
+    path = SSD_PATH / ".sessions" / f"{session_id}.state.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+class _LedgerIoMetrics:
+    """Expose the original write-loss counters while revalidating an old session.
+
+    IntegrityValidator normally reads the live IoManager. A later operator consolidation can
+    happen while another session is recording, so reading that mutable singleton would attach
+    the new session's counters to the old report. The terminal ledger already contains the
+    original per-device evidence; use that immutable snapshot instead.
+    """
+
+    def __init__(self, report: dict) -> None:
+        self._devices = {
+            str(d.get("device_id")): d
+            for d in report.get("devices", [])
+            if isinstance(d, dict)
+        }
+
+    def _value(self, device_id: str, key: str) -> int:
+        try:
+            return int(self._devices.get(device_id, {}).get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def dropped_no_writer(self, device_id: str) -> int:
+        return self._value(device_id, "packets_dropped_no_writer")
+
+    def write_failures(self, device_id: str) -> int:
+        return self._value(device_id, "csv_write_failures")
+
+    def rows_lost_after_failover(self, device_id: str) -> int:
+        return self._value(device_id, "rows_lost_after_failover")
+
+
+async def _revalidate_consolidated(session_id: str, per_role: dict[str, dict]) -> dict | None:
+    """Re-run quality checks over the exact merged files that will be handed to analysis."""
+    ledger = _ledger_record(session_id)
+    raw_devices = ledger.get("devices", [])
+    if not isinstance(raw_devices, list) or not raw_devices:
+        return None
+
+    from .integrity_validator import IntegrityValidator
+    from .io_manager import _sha256
+    from .session_manager import DeviceInfo, DeviceSubstate
+
+    devices: list[DeviceInfo] = []
+    file_results: dict[str, dict] = {}
+    for raw in raw_devices:
+        if not isinstance(raw, dict):
+            continue
+        device_id = str(raw.get("device_id", ""))
+        role = str(raw.get("role", "unknown"))
+        first = raw.get("first_packet_ts")
+        try:
+            first = int(first) if first is not None else None
+        except (TypeError, ValueError):
+            first = None
+        devices.append(DeviceInfo(
+            device_id=device_id,
+            device_role=role,
+            device_model=str(raw.get("model", "")),
+            app_version=str(raw.get("app_version", "")),
+            is_online=False,
+            packets_received=int(raw.get("packets", 0) or 0),
+            first_packet_ts=first,
+            offline_intervals=list(raw.get("offline_intervals", [])),
+            substate=DeviceSubstate.FINALIZED,
+        ))
+        result = per_role.get(_slug(role))
+        if not result:
+            continue
+        path = Path(result["path"])
+        if not path.exists():
+            continue
+        file_results[device_id] = {
+            "path": str(path),
+            "rows": int(result.get("rows", 0) or 0),
+            "sha256": _sha256(path),
+            "reordered": 0,
+        }
+
+    prior = ledger.get("integrity_report") or {}
+    report = await IntegrityValidator().run(
+        session_id=session_id,
+        file_results=file_results,
+        devices=devices,
+        scheduled_start_ms=int(ledger.get("scheduled_start_ms", 0) or 0),
+        label_timeline=list(ledger.get("label_timeline", [])),
+        session_start_ms=int(ledger.get("recording_started_ms", 0) or 0),
+        session_end_ms=int(
+            ledger.get("finalized_at_ms") or ledger.get("updated_at_ms") or time.time() * 1000
+        ),
+        io_source=_LedgerIoMetrics(prior),
+        validation_scope="consolidated_sources",
+    )
+    ledger["integrity_report"] = report
+    ledger["file_results"] = file_results
+    ledger["revalidated_after_consolidation_ms"] = int(time.time() * 1000)
+    # _ledger_record returns a detached JSON object; write it through the same atomic ledger
+    # contract used by SessionManager so the next dashboard sees the same verdict.
+    from .session_ledger import SessionLedger
+    try:
+        SessionLedger(SSD_PATH / ".sessions").write(session_id, ledger)
+    except OSError as exc:
+        # The consolidated files and the report sidecar are already durable. Keep the
+        # export usable even if a full SSD prevents the lifecycle index from being updated.
+        await audit.log("ERROR", "consolidated_ledger_write_failed", {
+            "session_id": session_id, "error": str(exc),
+        })
+    return report
+
+
 @router.get("/export/{session_id}/manifest")
 async def export_manifest(session_id: str):
     """Authoritative snapshot of every artifact a session produced on this backend."""
@@ -296,6 +454,7 @@ async def export_manifest(session_id: str):
             continue
 
     recovery = _recovery_manifest(session_id)
+    ledger = _ledger_record(session_id)
     late_sources = [f for f in files if f["kind"] in ("late", "late_summary")]
     consolidated_files = [Path(f["path"]) for f in files if f["kind"] == "consolidated"]
     session_mtime = max((_mtime(p) for p in consolidated_files), default=0.0)
@@ -338,7 +497,9 @@ async def export_manifest(session_id: str):
             or max(_mtime(csv) for _, csv in recovery_sources) > session_mtime
         )
 
-    status = (integrity or {}).get("status", "") or ("NONE" if not folders else "UNKNOWN")
+    status = (integrity or ledger.get("integrity_report") or {}).get("status", "") or (
+        "NONE" if not folders else "UNKNOWN"
+    )
 
     reasons: list[str] = []
     if status != "PASS":
@@ -349,20 +510,31 @@ async def export_manifest(session_id: str):
     if recovery_pending:
         reasons.append("phone rescue CSVs have not been consolidated yet")
     whole = status == "PASS" and not late_pending and not recovery_pending
+    consolidated = bool(consolidated_files) and not late_pending and not recovery_pending
+    analysis_ready_imu = bool(
+        (integrity or ledger.get("integrity_report") or {}).get("analysis_ready", False)
+    )
 
     data_paths = [Path(f["path"]) for f in files if f["kind"] in _SCAN_KINDS]
     recovery_paths = [Path(r["csv_path"]) for r in recovery if r.get("csv_exists")]
-    data_rows, labels = _scan_rows(data_paths + recovery_paths)
+    data_rows, labels = await asyncio.get_event_loop().run_in_executor(
+        None, _scan_rows, data_paths + recovery_paths
+    )
 
     meta = _session_meta(session_id)
     return {
         "session_id": session_id,
-        "found": bool(folders),
+        "found": bool(folders or recovery),
         "subject": meta["subject"],
         "session_tag": meta["session_tag"],
         "operator": meta["operator"],
         "status": status,
         "whole": whole,
+        "exportable": bool(folders or recovery),
+        "consolidated": consolidated,
+        "analysis_ready_imu": analysis_ready_imu,
+        "terminal": bool(ledger.get("terminal", False)),
+        "lifecycle_state": ledger.get("state", ""),
         "reasons": reasons,
         "late_pending": late_pending,
         "recovery_pending": recovery_pending,
@@ -374,6 +546,7 @@ async def export_manifest(session_id: str):
         "late_summary": late_summary,
         "files": files,
         "recovery": recovery,
+        "ledger": ledger,
     }
 
 
@@ -403,7 +576,12 @@ async def export_consolidate(session_id: str):
         raise HTTPException(status_code=400, detail="invalid session_id")
 
     folders = _session_folders(session_id)
-    if not folders:
+    recovery = _recovery_manifest(session_id)
+    verified_recovery = [
+        r for r in recovery
+        if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists")
+    ]
+    if not folders and not verified_recovery:
         raise HTTPException(status_code=404, detail="session data not found")
 
     sources: list[tuple[str, str, Path]] = []
@@ -411,36 +589,55 @@ async def export_consolidate(session_id: str):
         if f["kind"] in _ORIGINAL_KINDS:
             role_key = _slug(_role_from_name(f["name"], session_id)) or "unknown"
             sources.append((role_key, f["kind"], Path(f["path"])))
-    for r in _recovery_manifest(session_id):
-        if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists"):
-            sources.append((_slug(_recovery_role(r)), "recovery", Path(r["csv_path"])))
+    for r in verified_recovery:
+        sources.append((_slug(_recovery_role(r)), "recovery", Path(r["csv_path"])))
 
     if not sources:
         raise HTTPException(status_code=404, detail="no data files to consolidate")
 
-    primary_folder = folders[0]
-    out_path = primary_folder / f"{session_id}_consolidated.csv"
-    result = merge_csv_sources(
-        [(label, path) for _, label, path in sources],
-        out_path,
-        metadata_prefix=f"session_id={session_id},source=consolidate",
-    )
-    per_role = merge_csv_sources_per_role(
-        sources,
-        primary_folder,
-        session_id,
-        metadata_prefix=f"session_id={session_id},source=consolidate",
-    )
+    if folders:
+        primary_folder = folders[0]
+    else:
+        first = verified_recovery[0]
+        subject = str(first.get("subject") or "Unknown").replace(" ", "_")
+        tag = str(first.get("session_tag") or "Session").replace(" ", "_")
+        primary_folder = SSD_PATH / "Data_Riset_IMU" / f"{subject}_{tag}"
 
-    summary_path = primary_folder / f"{session_id}_consolidation.json"
-    summary = {
-        "session_id": session_id,
-        "consolidated_at_ms": int(time.time() * 1000),
-        "per_role": per_role["per_role"],
-        "per_role_files": per_role["files"],
-        **result,
-    }
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    def consolidate_sync() -> tuple[dict, dict]:
+        primary_folder.mkdir(parents=True, exist_ok=True)
+        out_path = primary_folder / f"{session_id}_consolidated.csv"
+        result = merge_csv_sources(
+            [(label, path) for _, label, path in sources],
+            out_path,
+            metadata_prefix=f"session_id={session_id},source=consolidate",
+        )
+        per_role = merge_csv_sources_per_role(
+            sources,
+            primary_folder,
+            session_id,
+            metadata_prefix=f"session_id={session_id},source=consolidate",
+        )
+        summary_path = primary_folder / f"{session_id}_consolidation.json"
+        summary = {
+            "session_id": session_id,
+            "consolidated_at_ms": int(time.time() * 1000),
+            "per_role": per_role["per_role"],
+            "per_role_files": per_role["files"],
+            **result,
+        }
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        return result, per_role
+
+    lock = _consolidate_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        try:
+            result, per_role = await asyncio.get_event_loop().run_in_executor(
+                None, consolidate_sync
+            )
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"consolidation failed: {exc}") from exc
+
+    revalidated = await _revalidate_consolidated(session_id, per_role["per_role"])
 
     await audit.log("INFO", "session_consolidated", {
         "session_id": session_id,
@@ -449,7 +646,12 @@ async def export_consolidate(session_id: str):
         "sources": result["sources"],
         "per_role_files": per_role["files"],
     })
-    return {"session_id": session_id, **result, "per_role": per_role["per_role"]}
+    return {
+        "session_id": session_id,
+        **result,
+        "per_role": per_role["per_role"],
+        "integrity_report": revalidated,
+    }
 
 
 BUNDLE_SUFFIX = "_bundle.zip"
@@ -482,6 +684,7 @@ def _build_bundle(session_id: str, out: Path, files: list[dict], recovery: list[
             "session_id": session_id,
             "built_at_ms": int(time.time() * 1000),
             "entries": written,
+            "lifecycle": _ledger_record(session_id),
             "contains_video": False,
             "note": (
                 "Data artifacts only. Camera footage is recorded by the browser via "
@@ -495,6 +698,17 @@ def _build_bundle(session_id: str, out: Path, files: list[dict], recovery: list[
     return {"path": str(out), "entries": written, "size": out.stat().st_size}
 
 
+async def _build_bundle_locked(
+    session_id: str, out: Path, files: list[dict], recovery: list[dict]
+) -> dict:
+    """Serialize bundle rebuilds for one session so two download paths cannot share a .tmp."""
+    lock = _bundle_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, _build_bundle, session_id, out, files, recovery
+        )
+
+
 @router.post("/export/{session_id}/bundle")
 async def export_bundle(session_id: str):
     """Assemble the session's data artifacts into a zip on the SSD, server-side.
@@ -505,18 +719,19 @@ async def export_bundle(session_id: str):
     path: the operator can obtain a complete data bundle with the dashboard closed, crashed, or
     on a different machine.
     """
+    if not session_id or any(c in session_id for c in "/\\"):
+        raise HTTPException(status_code=400, detail="invalid session_id")
     folders = _session_folders(session_id)
     files = _session_files(session_id)
     recovery = _recovery_manifest(session_id)
-    if not folders or (not files and not any(r.get("csv_exists") for r in recovery)):
+    if (not folders and not recovery) or (not files and not any(r.get("csv_exists") for r in recovery)):
         raise HTTPException(status_code=404, detail=f"no artifacts found for session {session_id}")
 
-    out = folders[0] / f"{session_id}{BUNDLE_SUFFIX}"
+    output_folder = folders[0] if folders else _recovery_dir(session_id)
+    out = output_folder / f"{session_id}{BUNDLE_SUFFIX}"
     try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, _build_bundle, session_id, out, files, recovery
-        )
-    except OSError as exc:
+        result = await _build_bundle_locked(session_id, out, files, recovery)
+    except Exception as exc:
         await audit.log("ERROR", "bundle_failed", {"session_id": session_id, "error": str(exc)})
         raise HTTPException(status_code=500, detail=f"could not write bundle: {exc}") from exc
 
@@ -527,3 +742,33 @@ async def export_bundle(session_id: str):
         "size": result["size"],
     })
     return {"session_id": session_id, "contains_video": False, **result}
+
+
+@router.get("/export/{session_id}/bundle/file")
+async def export_bundle_file(session_id: str):
+    """Download the server-built data bundle, regardless of integrity verdict.
+
+    A PARTIAL or FAIL verdict is a warning about capture quality, never a reason to withhold
+    the CSVs that *were* captured. The operator explicitly builds the current bundle first;
+    this endpoint then streams that durable SSD artifact through the browser download manager.
+    """
+    if not session_id or any(c in session_id for c in "/\\"):
+        raise HTTPException(status_code=400, detail="invalid session_id")
+    folders = _session_folders(session_id)
+    # Always rebuild rather than returning an older archive. Late telemetry and verified
+    # phone rescue CSVs can arrive after the first bundle was requested; a stale ZIP is a
+    # silent data-loss mode for the crash-boundary download link.
+    # Make the direct recovery link self-sufficient. This is used by the error boundary
+    # when the dashboard itself failed to render before it could POST /bundle.
+    files = _session_files(session_id)
+    recovery = _recovery_manifest(session_id)
+    if (not folders and not recovery) or (not files and not any(r.get("csv_exists") for r in recovery)):
+        raise HTTPException(status_code=404, detail="no artifacts found for session")
+    output_folder = folders[0] if folders else _recovery_dir(session_id)
+    bundle = output_folder / f"{session_id}{BUNDLE_SUFFIX}"
+    try:
+        await _build_bundle_locked(session_id, bundle, files, recovery)
+    except Exception as exc:
+        await audit.log("ERROR", "bundle_failed", {"session_id": session_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"could not write bundle: {exc}") from exc
+    return FileResponse(bundle, filename=bundle.name, media_type="application/zip")

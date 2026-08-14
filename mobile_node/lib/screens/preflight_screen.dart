@@ -71,15 +71,17 @@ class _PreflightScreenState extends State<PreflightScreen> {
     _evtSub = TaskBridge().eventStream.listen((e) {
       if (e['type'] == 'error_alert') {
         final p = e['payload']?.toString() ?? 'unknown';
+        if (!mounted) return;
         setState(() => _fatalMsg =
             'Backend rejected this device ($p). Go back, change the Device Role, and reconnect.');
       }
     });
     _stateSub = TaskBridge().stateStream.listen((s) {
       if (s == WsState.offline && _fatalMsg == null) {
+        if (!mounted) return;
         setState(() => _fatalMsg =
             'Connection was lost — the backend may have rejected this phone (role conflict?). '
-            'Go back (←), change the Device Role, and reconnect.');
+                'Go back (←), change the Device Role, and reconnect.');
       }
     });
   }
@@ -101,6 +103,7 @@ class _PreflightScreenState extends State<PreflightScreen> {
     await _checkRtt();
     await _checkSensorSanity();
 
+    if (!mounted) return;
     final passed = _checks.every((c) => c.status == _Status.pass);
     setState(() {
       _allPassed = passed;
@@ -186,8 +189,11 @@ class _PreflightScreenState extends State<PreflightScreen> {
     double maxGyro = 0;
 
     final sub = mgr.dataStream.listen((pkt) {
-      final avm = sqrt(pkt.accX * pkt.accX + pkt.accY * pkt.accY + pkt.accZ * pkt.accZ);
-      final gvm = sqrt(pkt.gyroX * pkt.gyroX + pkt.gyroY * pkt.gyroY + pkt.gyroZ * pkt.gyroZ);
+      final avm =
+          sqrt(pkt.accX * pkt.accX + pkt.accY * pkt.accY + pkt.accZ * pkt.accZ);
+      final gvm = sqrt(pkt.gyroX * pkt.gyroX +
+          pkt.gyroY * pkt.gyroY +
+          pkt.gyroZ * pkt.gyroZ);
       accSamples.add(avm);
       gyroSamples.add(gvm);
       if (gvm > maxGyro) maxGyro = gvm;
@@ -208,7 +214,8 @@ class _PreflightScreenState extends State<PreflightScreen> {
       if (meanAcc >= 0.5 && meanAcc <= 1.5) {
         _setPass(4, 'avm=${meanAcc.toStringAsFixed(2)}g ($accEvents events)');
       } else {
-        _setFail(4, 'avm=${meanAcc.toStringAsFixed(2)}g — hold still or check sensor');
+        _setFail(4,
+            'avm=${meanAcc.toStringAsFixed(2)}g — hold still or check sensor');
       }
     }
 
@@ -227,22 +234,31 @@ class _PreflightScreenState extends State<PreflightScreen> {
     }
   }
 
-  void _setRunning(int i, {String hint = ''}) => setState(() {
-        _checks[i].status = _Status.running;
-        _checks[i].hint = hint;
-      });
+  void _setRunning(int i, {String hint = ''}) {
+    if (!mounted) return;
+    setState(() {
+      _checks[i].status = _Status.running;
+      _checks[i].hint = hint;
+    });
+  }
 
-  void _setPass(int i, String detail) => setState(() {
-        _checks[i].status = _Status.pass;
-        _checks[i].detail = detail;
-        _checks[i].hint = '';
-      });
+  void _setPass(int i, String detail) {
+    if (!mounted) return;
+    setState(() {
+      _checks[i].status = _Status.pass;
+      _checks[i].detail = detail;
+      _checks[i].hint = '';
+    });
+  }
 
-  void _setFail(int i, String detail) => setState(() {
-        _checks[i].status = _Status.fail;
-        _checks[i].detail = detail;
-        _checks[i].hint = '';
-      });
+  void _setFail(int i, String detail) {
+    if (!mounted) return;
+    setState(() {
+      _checks[i].status = _Status.fail;
+      _checks[i].detail = detail;
+      _checks[i].hint = '';
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -269,7 +285,7 @@ class _PreflightScreenState extends State<PreflightScreen> {
               margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.red.shade900.withOpacity(0.85),
+                color: Colors.red.shade900.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: Colors.redAccent),
               ),
@@ -307,8 +323,8 @@ class _PreflightScreenState extends State<PreflightScreen> {
               onPressed: _allPassed ? _proceed : null,
               child: Text(
                 _allPassed ? 'START RECORDING SESSION' : 'CHECKS PENDING',
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.bold),
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               ),
             ),
           ),
@@ -345,7 +361,7 @@ class _CheckTile extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(
           color: check.status == _Status.fail
-              ? Colors.redAccent.withOpacity(0.5)
+              ? Colors.redAccent.withValues(alpha: 0.5)
               : Colors.white10,
         ),
       ),
@@ -355,8 +371,8 @@ class _CheckTile extends StatelessWidget {
               ? SizedBox(
                   width: 24,
                   height: 24,
-                  child: CircularProgressIndicator(
-                      color: color, strokeWidth: 2),
+                  child:
+                      CircularProgressIndicator(color: color, strokeWidth: 2),
                 )
               : Icon(icon, color: color, size: 24),
           const SizedBox(width: 12),
@@ -370,11 +386,12 @@ class _CheckTile extends StatelessWidget {
                 if (check.status == _Status.running && check.hint.isNotEmpty)
                   Text(check.hint,
                       style: TextStyle(
-                          color: Colors.amber.withOpacity(0.9), fontSize: 12)),
+                          color: Colors.amber.withValues(alpha: 0.9),
+                          fontSize: 12)),
                 if (check.detail.isNotEmpty)
                   Text(check.detail,
                       style: TextStyle(
-                          color: color.withOpacity(0.8), fontSize: 12)),
+                          color: color.withValues(alpha: 0.8), fontSize: 12)),
               ],
             ),
           ),

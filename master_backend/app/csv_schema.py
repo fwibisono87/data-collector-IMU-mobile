@@ -5,6 +5,7 @@ column indices. Other modules (io_manager, upload, export, integrity_validator)
 should import from here instead of duplicating the header string.
 """
 
+import math
 import re
 
 CSV_HEADER_V1 = (
@@ -114,6 +115,53 @@ def parse_row(line: str) -> list | None:
     if len(fields) < V2_WIDTH:
         fields = fields + [""] * (V2_WIDTH - len(fields))
     return fields
+
+
+def is_valid_data_row(fields: list, *, expected_device_id: str | None = None) -> bool:
+    """Validate the scalar fields required for an analysis-ready IMU row.
+
+    ``parse_row`` intentionally remains a tolerant reader so old schema versions and
+    recovery files can be inventoried without throwing.  The validator uses this stricter
+    predicate before feeding rows to sampling analysis: a row with the right number of
+    commas but a non-numeric timestamp, NaN sensor value, missing device id, or impossible
+    provenance marker is not usable data and must be reported as malformed.
+    """
+    if len(fields) < V1_WIDTH:
+        return False
+    try:
+        int(fields[COL_TIMESTAMP_MS])
+        int(fields[COL_LABEL_ID])
+        int(fields[COL_SEQUENCE])
+        for index in (
+            COL_ACC_X, COL_ACC_Y, COL_ACC_Z,
+            COL_GYRO_X, COL_GYRO_Y, COL_GYRO_Z,
+        ):
+            value = float(fields[index])
+            if not math.isfinite(value):
+                return False
+    except (TypeError, ValueError, IndexError):
+        return False
+
+    device_id = str(fields[COL_DEVICE_ID]).strip()
+    if not device_id:
+        return False
+    if expected_device_id is not None and device_id != expected_device_id:
+        return False
+
+    acc_ts = fields[COL_ACC_TS_MS].strip() if len(fields) > COL_ACC_TS_MS else ""
+    gyro_ts = fields[COL_GYRO_TS_MS].strip() if len(fields) > COL_GYRO_TS_MS else ""
+    if acc_ts:
+        try:
+            int(acc_ts)
+        except ValueError:
+            return False
+    if gyro_ts:
+        try:
+            int(gyro_ts)
+        except ValueError:
+            return False
+    sample_kind = fields[COL_SAMPLE_KIND].strip() if len(fields) > COL_SAMPLE_KIND else ""
+    return sample_kind in ("", "0", "1")
 
 
 def schema_version_of(fields: list) -> int:

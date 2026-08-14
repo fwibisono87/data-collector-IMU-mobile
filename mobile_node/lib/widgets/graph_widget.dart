@@ -6,8 +6,8 @@ class GraphWidget extends StatefulWidget {
   final Size size;
   final int maxPoints;
   final Stream<SensorPacket> dataStream;
-    final String sensorType; 
-  final String axis;       
+  final String sensorType;
+  final String axis;
 
   const GraphWidget({
     super.key,
@@ -19,10 +19,11 @@ class GraphWidget extends StatefulWidget {
   });
 
   @override
-  _GraphWidgetState createState() => _GraphWidgetState();
+  State<GraphWidget> createState() => _GraphWidgetState();
 }
 
-class _GraphWidgetState extends State<GraphWidget> with AutomaticKeepAliveClientMixin {
+class _GraphWidgetState extends State<GraphWidget>
+    with AutomaticKeepAliveClientMixin {
   final List<double> _data = [];
   late StreamSubscription _sub;
   Timer? _renderTimer;
@@ -75,9 +76,9 @@ class _GraphWidgetState extends State<GraphWidget> with AutomaticKeepAliveClient
   @override
   Widget build(BuildContext context) {
     super.build(context);
-    double min = -12.0; 
+    double min = -12.0;
     double max = 12.0;
-    
+
     if (widget.sensorType == 'gyro') {
       min = -200;
       max = 200;
@@ -102,13 +103,15 @@ class _GraphWidgetState extends State<GraphWidget> with AutomaticKeepAliveClient
             ),
           ),
           Positioned(
-            left: 5, 
-            top: 5, 
-            child: Text(
-              "${widget.sensorType.toUpperCase()} - ${widget.axis.toUpperCase()}",
-              style: TextStyle(fontSize: 10, color: _getColor(), fontWeight: FontWeight.bold),
-            )
-          )
+              left: 5,
+              top: 5,
+              child: Text(
+                "${widget.sensorType.toUpperCase()} - ${widget.axis.toUpperCase()}",
+                style: TextStyle(
+                    fontSize: 10,
+                    color: _getColor(),
+                    fontWeight: FontWeight.bold),
+              ))
         ],
       ),
     );
@@ -131,9 +134,10 @@ class NewGraphPainter extends CustomPainter {
   final double maxVal;
   final Color lineColor;
 
-  NewGraphPainter(this.data, {
-    required this.maxPoints, 
-    required this.minVal, 
+  NewGraphPainter(
+    this.data, {
+    required this.maxPoints,
+    required this.minVal,
     required this.maxVal,
     required this.lineColor,
   });
@@ -157,8 +161,11 @@ class NewGraphPainter extends CustomPainter {
         double normalizedY = (data[i] - minVal) / range;
         double y = size.height - (normalizedY * size.height);
 
-        if (i == 0) path.moveTo(x, y);
-        else path.lineTo(x, y);
+        if (i == 0) {
+          path.moveTo(x, y);
+        } else {
+          path.lineTo(x, y);
+        }
       }
     }
     canvas.drawPath(path, paint);

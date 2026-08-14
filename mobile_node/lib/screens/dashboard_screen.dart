@@ -96,10 +96,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFF1A1A2E),
       appBar: AppBar(
-        backgroundColor: _isRecording ? Colors.red.shade900 : const Color(0xFF16213E),
+        backgroundColor:
+            _isRecording ? Colors.red.shade900 : const Color(0xFF16213E),
         title: Text(
           'IMU Node · ${TaskBridge().deviceRole.toUpperCase()}',
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          style:
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
         actions: [
           IconButton(
@@ -118,7 +120,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ),
       body: Column(
         children: [
-          if (_wsState != WsState.connected && _isRecording) _DisconnectBanner(_packetsBuffered),
+          if (_wsState != WsState.connected && _isRecording)
+            _DisconnectBanner(_packetsBuffered),
           _StatusBar(
             role: TaskBridge().deviceRole,
             isRecording: _isRecording,
@@ -196,7 +199,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (TaskBridge().activeSessionId != null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('Disconnect is disabled during recording. Stop the shared session from the dashboard.'),
+        content: Text(
+            'Disconnect is disabled during recording. Stop the shared session from the dashboard.'),
       ));
       return;
     }
@@ -223,7 +227,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             const Padding(
               padding: EdgeInsets.all(12),
               child: Text('Local session recordings',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
             ),
             if (files.isEmpty)
               const Padding(
@@ -241,11 +246,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   return ListTile(
                     dense: true,
                     title: Text(f.uri.pathSegments.last,
-                        style: const TextStyle(color: Colors.white, fontSize: 12)),
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 12)),
                     subtitle: SelectableText(f.path,
-                        style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 10)),
                     trailing: Text('${sizeMb.toStringAsFixed(1)} MB',
-                        style: const TextStyle(color: Colors.cyanAccent, fontSize: 11)),
+                        style: const TextStyle(
+                            color: Colors.cyanAccent, fontSize: 11)),
                   );
                 },
               ),
@@ -274,8 +282,7 @@ class _WsStatusDot extends StatelessWidget {
         Container(
             width: 8,
             height: 8,
-            decoration:
-                BoxDecoration(color: color, shape: BoxShape.circle)),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
         const SizedBox(width: 4),
         Text(label,
             style: TextStyle(
@@ -310,7 +317,8 @@ class _DisconnectBanner extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
             children: [
-              const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 16),
+              const Icon(Icons.warning_amber_rounded,
+                  color: Colors.white, size: 16),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
@@ -318,19 +326,24 @@ class _DisconnectBanner extends StatelessWidget {
                   '${buffered.toString()} packets buffered  ·  '
                   'local backup ${localOk ? 'OK' : 'FAILED'}',
                   style: const TextStyle(
-                      color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold),
                 ),
               ),
               TextButton(
                 onPressed: () => AlertService().silence(),
                 style: TextButton.styleFrom(
                   minimumSize: Size.zero,
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 ),
                 child: Text(
                   AlertService().isSilenced ? 'SILENCED' : 'SILENCE',
                   style: const TextStyle(
-                      color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                      color: Colors.white,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold),
                 ),
               ),
             ],
@@ -379,9 +392,10 @@ class _StatusBar extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
             decoration: BoxDecoration(
-              color: Colors.deepPurpleAccent.withOpacity(0.25),
+              color: Colors.deepPurpleAccent.withValues(alpha: 0.25),
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.6)),
+              border: Border.all(
+                  color: Colors.deepPurpleAccent.withValues(alpha: 0.6)),
             ),
             child: Text(
               role.toUpperCase(),
@@ -398,7 +412,9 @@ class _StatusBar extends StatelessWidget {
               Text(
                 !isRecording
                     ? '○ STANDBY'
-                    : (unconfirmed ? '● RECORDING (unconfirmed)' : '● RECORDING'),
+                    : (unconfirmed
+                        ? '● RECORDING (unconfirmed)'
+                        : '● RECORDING'),
                 style: TextStyle(
                     color: !isRecording
                         ? Colors.white38
@@ -411,17 +427,19 @@ class _StatusBar extends StatelessWidget {
                     ? Text(
                         'No confirmation from backend for '
                         '${DateTime.now().difference(TaskBridge().lastStateAt!).inSeconds}s',
-                        style: const TextStyle(color: Colors.amber, fontSize: 10),
+                        style:
+                            const TextStyle(color: Colors.amber, fontSize: 10),
                       )
                     : const Text('No confirmation from backend yet',
                         style: TextStyle(color: Colors.amber, fontSize: 10)),
               if (serverState != null && !(isRecording && unconfirmed))
                 Text('Backend: $serverState',
-                    style: const TextStyle(color: Colors.white24, fontSize: 10)),
+                    style:
+                        const TextStyle(color: Colors.white24, fontSize: 10)),
               if (sessionId != null)
                 Text('Session: ${sessionId!.substring(0, 8)}…',
-                    style: const TextStyle(
-                        color: Colors.white38, fontSize: 10)),
+                    style:
+                        const TextStyle(color: Colors.white38, fontSize: 10)),
             ],
           ),
           Column(
@@ -431,20 +449,24 @@ class _StatusBar extends StatelessWidget {
                   style: const TextStyle(color: Colors.white70, fontSize: 11)),
               if (buffered > 0)
                 Text('Buffered: $buffered',
-                    style: const TextStyle(
-                        color: Colors.orange, fontSize: 11)),
+                    style: const TextStyle(color: Colors.orange, fontSize: 11)),
               if (isRecording)
                 Text('Label: $activeLabel',
                     style: TextStyle(
-                        color: activeLabel == 0 ? Colors.white54 : Colors.greenAccent,
+                        color: activeLabel == 0
+                            ? Colors.white54
+                            : Colors.greenAccent,
                         fontSize: 11)),
               if (localError != null)
                 Text('Local backup FAILED: $localError',
                     style: const TextStyle(
-                        color: Colors.redAccent, fontSize: 10, fontWeight: FontWeight.bold))
+                        color: Colors.redAccent,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold))
               else if (localOpen)
                 Text('Local: ${localRows.toString()} rows',
-                    style: const TextStyle(color: Colors.cyanAccent, fontSize: 11)),
+                    style: const TextStyle(
+                        color: Colors.cyanAccent, fontSize: 11)),
             ],
           ),
         ],

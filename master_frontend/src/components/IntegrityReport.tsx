@@ -19,6 +19,8 @@ interface Report {
   status: "PASS" | "FAIL" | "PARTIAL";
   validated_at_ms: number;
   devices: DeviceReport[];
+  analysis_ready?: boolean;
+  analysis_ready_reasons?: string[];
 }
 
 const STATUS_STYLE: Record<string, string> = {
@@ -49,6 +51,14 @@ export default function IntegrityReport({ report }: { report: Report }) {
       </div>
 
       <p className="text-xs opacity-70 mb-2">Session: {report.session_id}</p>
+      <p className={report.analysis_ready ? "text-xs text-green-300 mb-2" : "text-xs text-amber-300 mb-2"}>
+        IMU analysis-ready: {report.analysis_ready ? "YES" : "NO — export remains available for review"}
+      </p>
+      {!report.analysis_ready && Array.isArray(report.analysis_ready_reasons) && (
+        <ul className="list-disc list-inside text-[11px] text-amber-200/90 mb-2">
+          {report.analysis_ready_reasons.slice(0, 8).map((reason, i) => <li key={i}>{reason}</li>)}
+        </ul>
+      )}
 
       <div className="space-y-2">
         {!Array.isArray(report?.devices) && (

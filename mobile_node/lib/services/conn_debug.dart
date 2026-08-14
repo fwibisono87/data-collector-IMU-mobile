@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
@@ -14,9 +15,14 @@ class ConnDebug {
   }
 
   static void log(String line) {
-    try {
+    // Logging is called from connection/error paths and must never create a
+    // second unhandled async exception when storage is temporarily unavailable.
+    unawaited(() async {
       final ts = DateTime.now().toIso8601String();
-      _logFile().then((f) => f.writeAsString('$ts  $line\n', mode: FileMode.append));
-    } catch (_) {}
+      try {
+        final file = await _logFile();
+        await file.writeAsString('$ts  $line\n', mode: FileMode.append);
+      } catch (_) {}
+    }());
   }
 }

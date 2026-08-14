@@ -22,6 +22,7 @@ interface Props {
   children: React.ReactNode;
   /** Short label for what failed, e.g. "integrity report". */
   what: string;
+  recoveryHref?: string;
 }
 
 interface State {
@@ -50,11 +51,20 @@ export default class SafeBoundary extends React.Component<Props, State> {
           Could not display the {this.props.what}
         </div>
         <p className="text-[11px] text-amber-200/90">
-          This is a display problem only — the session data was already written to disk and to
-          each phone before this view was drawn. Nothing has been lost. Copy the session folder
-          from the SSD, or use the Recovery screen to pull the phone copies.
+          This is a display problem only. Use the backend bundle link below, copy the session
+          folder from the SSD, or use the Recovery screen to pull the phone copies. The bundle
+          remains available even when this dashboard cannot render the summary.
         </p>
         <p className="text-[10px] text-gray-500 mt-1 font-mono break-all">{String(error?.message ?? error)}</p>
+        {this.props.recoveryHref && (
+          <a
+            href={this.props.recoveryHref}
+            download
+            className="inline-block mt-2 mr-3 text-[11px] text-cyan-300 underline"
+          >
+            Download backend data bundle
+          </a>
+        )}
         <button
           onClick={() => this.setState({ error: null })}
           className="mt-2 text-[11px] underline text-cyan-400 hover:text-cyan-300"

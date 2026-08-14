@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # protoc-generated enum names mirror the wire contract and cannot be lowerCamelCase.
+    constant_identifier_names: ignore

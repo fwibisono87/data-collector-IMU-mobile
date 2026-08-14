@@ -1,6 +1,11 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
-import { saveChunk, clearConfirmedChunks } from "@/lib/video_backup";
+import {
+  saveChunk,
+  clearConfirmedChunks,
+  nextChunkIndex,
+  recordCameraEvent,
+} from "@/lib/video_backup";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
 export interface CameraResult {
@@ -8,7 +13,7 @@ export interface CameraResult {
   sessionId: string; chunkCount: number;
   startedAtMs: number; flashAtMs: number; stoppedAtMs: number;
 }
-export interface CameraStatus { ready: number; total: number; ok: boolean; }
+export interface CameraStatus { ready: number; total: number; ok: boolean; restoring: boolean; }
 export interface StopOutcome { results: CameraResult[]; missed: string[]; }
 export interface MultiCameraRecorderHandle {
   startRecording: (sessionId: string) => Promise<void>;
@@ -16,6 +21,9 @@ export interface MultiCameraRecorderHandle {
 }
 interface Props {
   onStatusChange: (status: CameraStatus) => void;
+  onRecordingError?: (message: string) => void;
+  backendIp: string;
+  sessionId?: string;
   disabled: boolean; // true while RECORDING — lock camera selection
 }
 
@@ -35,6 +43,7 @@ const CODEC_PRIORITY = [
   "video/webm",
   "video/mp4",
 ];
+const CAMERA_SELECTION_KEY = "imu.camera-selection.v1";
 
 interface ActiveCam { camId: string; deviceId: string; label: string; }
 interface TileHandle {
@@ -50,9 +59,23 @@ interface TileProps {
   deviceEpoch: number; // bumped by manager on devicechange → lets a dead tile re-acquire
   register: (camId: string, handle: TileHandle | null) => void;
   onStatus: (camId: string, live: boolean) => void;
+  backendIp: string;
 }
 
-function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }: TileProps) {
+function postCameraMark(
+  backendIp: string,
+  sessionId: string,
+  body: Record<string, unknown>,
+): void {
+  if (!backendIp) return;
+  void fetch(`http://${backendIp}:8000/cameras/${encodeURIComponent(sessionId)}/mark`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(error => console.warn("camera anchor not persisted", error));
+}
+
+function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus, backendIp }: TileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
@@ -92,6 +115,12 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
         streamRef.current = null;
         setDetail("disconnected — retrying on reconnect");
         onStatus(camId, false);
+        if (sessionRef.current) {
+          void recordCameraEvent(sessionRef.current, camId, "track_ended", "MediaStreamTrack ended");
+          postCameraMark(backendIp, sessionRef.current, {
+            cam_id: camId, event: "track_ended", ts_ms: Date.now(), device_id: deviceId, label,
+          });
+        }
       });
       const s = track?.getSettings();
       setDetail(s?.width ? `${s.width}×${s.height}` : "live");
@@ -106,7 +135,7 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
         console.error(`cam ${camId} open failed`, e);
       }
     }
-  }, [deviceId, camId, onStatus]);
+  }, [deviceId, camId, label, onStatus, backendIp]);
 
   // Initial open (deviceId/camId/acquire are all stable, so this runs once per slot) +
   // teardown on unmount.
@@ -133,9 +162,10 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
 
   // start/stop read the latest stream/recorder via refs; the registered handle is stable.
   const startFn = async (sessionId: string) => {
-    if (!streamRef.current) return;
+    if (!streamRef.current) throw new Error(`${camId} camera stream is unavailable`);
+    if (mediaRef.current && mediaRef.current.state !== "inactive") return;
     sessionRef.current = sessionId;
-    chunkIndexRef.current = 0;
+    chunkIndexRef.current = await nextChunkIndex(sessionId, camId);
     pendingSavesRef.current.clear();
     writeErrorRef.current = null;
     const mime = CODEC_PRIORITY.find(m => MediaRecorder.isTypeSupported(m)) ?? "";
@@ -146,21 +176,45 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) {
         const write = saveChunk(sessionId, camId, chunkIndexRef.current++, e.data)
-          .catch((error) => { writeErrorRef.current ??= error; })
+          .catch((error) => {
+            writeErrorRef.current ??= error;
+            void recordCameraEvent(sessionId, camId, "write_error", String(error));
+          })
           .finally(() => pendingSavesRef.current.delete(write));
         pendingSavesRef.current.add(write);
       }
+    };
+    recorder.onerror = (event) => {
+      const detail = String((event as ErrorEvent).error ?? "MediaRecorder error");
+      writeErrorRef.current ??= new Error(detail);
+      void recordCameraEvent(sessionId, camId, "write_error", detail);
+      postCameraMark(backendIp, sessionId, {
+        cam_id: camId, event: "write_error", ts_ms: Date.now(), device_id: deviceId, label,
+      });
     };
     recorder.start(TIMESLICE_MS);
     startedAtRef.current = Date.now();
     setIsRecording(true);
     flashAtRef.current = Date.now();
+    void recordCameraEvent(sessionId, camId, "started", `mime=${mime};chunk_index=${chunkIndexRef.current}`);
+    postCameraMark(backendIp, sessionId, {
+      cam_id: camId, event: "started", ts_ms: startedAtRef.current,
+      device_id: deviceId, label, mime,
+    });
+    postCameraMark(backendIp, sessionId, {
+      cam_id: camId, event: "flash", ts_ms: flashAtRef.current,
+      device_id: deviceId, label, mime,
+    });
     setFlash(true);                          // operator-facing sync cue (parity with old)
     setTimeout(() => setFlash(false), 100);
   };
   const stopFn = async (): Promise<CameraResult | null> => {
     const recorder = mediaRef.current;
-    if (!recorder || recorder.state === "inactive") return null;
+    if (!recorder) return null;
+    if (recorder.state === "inactive") {
+      if (writeErrorRef.current) throw new Error(`${camId} video recorder failed: ${String(writeErrorRef.current)}`);
+      return null;
+    }
     const mime = recorder.mimeType || "";
     await new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => reject(new Error(`${camId} did not stop within ${STOP_TIMEOUT_MS / 1000}s`)), STOP_TIMEOUT_MS);
@@ -180,6 +234,11 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
     if (chunkCount === 0) return null;
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted
     // download. They are GC'd at the start of the NEXT session (see startRecording). [Finding A]
+    void recordCameraEvent(sessionRef.current, camId, "stopped", `chunks=${chunkCount}`);
+    postCameraMark(backendIp, sessionRef.current, {
+      cam_id: camId, event: "stopped", ts_ms: stoppedAtMs,
+      device_id: deviceId, label, mime,
+    });
     return { camId, deviceId, label, mime, sessionId: sessionRef.current, chunkCount,
              startedAtMs: startedAtRef.current, flashAtMs: flashAtRef.current, stoppedAtMs };
   };
@@ -210,11 +269,12 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus }:
 
 // ── Manager: enumerate, select, aggregate readiness, fan out start/stop ──────
 const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
-  ({ onStatusChange, disabled }, ref) => {
+  ({ onStatusChange, onRecordingError, backendIp, sessionId = "", disabled }, ref) => {
     const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
     const [active, setActive] = useState<ActiveCam[]>([]);
     const [permError, setPermError] = useState("");
     const [deviceEpoch, setDeviceEpoch] = useState(0); // bumped on devicechange → tiles re-acquire
+    const [restoringSession, setRestoringSession] = useState("");
     const tilesRef = useRef<Map<string, TileHandle>>(new Map());
     const statusRef = useRef<Map<string, boolean>>(new Map());
     const activeRef = useRef<ActiveCam[]>([]);
@@ -222,13 +282,40 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
     disabledRef.current = disabled;             // RECORDING lock, readable in stable handlers
     const grantedRef = useRef(false);           // true once camera permission is granted
 
+    const readSavedSelection = useCallback((devs: MediaDeviceInfo[]): ActiveCam[] => {
+      try {
+        const saved = JSON.parse(localStorage.getItem(CAMERA_SELECTION_KEY) ?? "null");
+        if (!Array.isArray(saved)) return [];
+        return saved
+          .map((v: unknown) => v as Partial<ActiveCam>)
+          .filter(v => typeof v.deviceId === "string" && devs.some(d => d.deviceId === v.deviceId))
+          .slice(0, MAX_CAMERAS)
+          .map((v, i) => ({
+            camId: typeof v.camId === "string" ? v.camId : `cam${i + 1}`,
+            deviceId: v.deviceId!,
+            label: v.label || devs.find(d => d.deviceId === v.deviceId)?.label || `camera ${i + 1}`,
+          }));
+      } catch {
+        return [];
+      }
+    }, []);
+
+    const persistSelection = useCallback((selection: ActiveCam[]) => {
+      try { localStorage.setItem(CAMERA_SELECTION_KEY, JSON.stringify(selection)); } catch { /* best effort */ }
+    }, []);
+
     // Compute aggregate readiness from refs (so the callbacks below stay stable).
     const emitStatus = useCallback(() => {
       const total = activeRef.current.length;
       let ready = 0;
       activeRef.current.forEach(c => { if (statusRef.current.get(c.camId)) ready++; });
-      onStatusChange({ ready, total, ok: total >= 1 && ready === total });
-    }, [onStatusChange]);
+      onStatusChange({
+        ready,
+        total,
+        ok: total >= 1 && ready === total,
+        restoring: restoringSession !== "",
+      });
+    }, [onStatusChange, restoringSession]);
 
     const handleTileStatus = useCallback((camId: string, live: boolean) => {
       statusRef.current.set(camId, live);
@@ -268,11 +355,11 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
             // No camera present yet — not a permission problem. devicechange will retry.
             setPermError("");
             await refreshDevices();
-            onStatusChange({ ready: 0, total: 0, ok: false });
+            onStatusChange({ ready: 0, total: 0, ok: false, restoring: false });
             return;
           }
           setPermError("Camera access blocked — enable it, then click Retry");
-          onStatusChange({ ready: 0, total: 0, ok: false });
+          onStatusChange({ ready: 0, total: 0, ok: false, restoring: false });
           console.error("camera permission probe failed", e);
           return;
         }
@@ -282,9 +369,11 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
       // and recovers a zero-camera startup once a camera appears).
       setActive(prev => {
         if (prev.length > 0 || devs.length === 0) return prev;
+        const saved = readSavedSelection(devs);
+        if (saved.length > 0) return saved;
         return [{ camId: "cam1", deviceId: devs[0].deviceId, label: devs[0].label || "camera 1" }];
       });
-    }, [refreshDevices, onStatusChange]);
+    }, [refreshDevices, onStatusChange, readSavedSelection]);
 
     // Mount: attempt to become ready once.
     useEffect(() => { ensureReady(); }, [ensureReady]);
@@ -337,7 +426,9 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
         if (existing) {
           statusRef.current.delete(existing.camId);
           tilesRef.current.delete(existing.camId);
-          return prev.filter(a => a.deviceId !== dev.deviceId);
+          const next = prev.filter(a => a.deviceId !== dev.deviceId);
+          persistSelection(next);
+          return next;
         }
         if (prev.length >= MAX_CAMERAS) return prev; // cap
         // assign the lowest free camId (cam1..cam5)
@@ -346,9 +437,58 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
           const c = `cam${i}`;
           if (!prev.some(a => a.camId === c)) { camId = c; break; }
         }
-        return [...prev, { camId, deviceId: dev.deviceId, label: dev.label || camId }];
+        const next = [...prev, { camId, deviceId: dev.deviceId, label: dev.label || camId }];
+        persistSelection(next);
+        return next;
       });
     };
+
+    // Reconstruct the selected camera slots after a dashboard reload during RECORDING.
+    // The browser-local selection is the fast path; the server anchors are the fallback
+    // when the reload happened in a fresh browser profile/origin. Never replace a larger
+    // current selection with a partial anchor snapshot that is still arriving.
+    const restoredSessionRef = useRef("");
+    useEffect(() => {
+      if (!disabled || !sessionId || cameras.length === 0) {
+        setRestoringSession("");
+        return;
+      }
+      if (restoredSessionRef.current === sessionId) {
+        setRestoringSession("");
+        return;
+      }
+      setRestoringSession(sessionId);
+      let cancelled = false;
+      fetch(`http://${backendIp}:8000/cameras/${encodeURIComponent(sessionId)}`)
+        .then(r => r.ok ? r.json() as Promise<{ cameras?: Array<Record<string, unknown>> }> : null)
+        .then(data => {
+          if (cancelled) return;
+          const available = new Map(cameras.map(d => [d.deviceId, d]));
+          const anchored = (data?.cameras ?? [])
+            .map((c, i) => {
+              const deviceId = String(c.device_id ?? "");
+              const device = available.get(deviceId);
+              if (!deviceId || !device) return null;
+              return {
+                camId: String(c.cam_id ?? `cam${i + 1}`),
+                deviceId,
+                label: String(c.browser_label ?? device.label ?? `camera ${i + 1}`),
+              } satisfies ActiveCam;
+            })
+            .filter((c): c is ActiveCam => c !== null)
+            .slice(0, MAX_CAMERAS);
+          if (anchored.length > activeRef.current.length) {
+            persistSelection(anchored);
+            setActive(anchored);
+          }
+          restoredSessionRef.current = sessionId;
+        })
+        .catch(() => { /* local selection remains the recovery path */ })
+        .finally(() => {
+          if (!cancelled) setRestoringSession("");
+        });
+      return () => { cancelled = true; };
+    }, [backendIp, cameras, disabled, persistSelection, sessionId]);
 
     useImperativeHandle(ref, () => ({
       // Fan out to all live tiles in the SAME callback → synchronized start.
@@ -359,11 +499,19 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
         // Only sessions whose footage was CONFIRMED written to disk are dropped. Unsaved
         // footage is retained and surfaced by the recovery screen — wiping it here is what
         // would have made the 2026-08-07 crash unrecoverable.
-        const { kept } = await clearConfirmedChunks();
-        if (kept.length > 0) {
-          console.warn(`video_backup: retained unsaved footage for session(s) ${kept.join(", ")}`);
+        try {
+          const { kept } = await clearConfirmedChunks();
+          if (kept.length > 0) {
+            console.warn(`video_backup: retained unsaved footage for session(s) ${kept.join(", ")}`);
+          }
+          const tiles = Array.from(tilesRef.current.values());
+          if (tiles.length === 0) throw new Error("no camera recorder tiles are ready");
+          await Promise.all(tiles.map(t => t.start(sessionId)));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          onRecordingError?.(message);
+          throw error;
         }
-        await Promise.all(Array.from(tilesRef.current.values()).map(t => t.start(sessionId)));
       },
       async stopRecording(): Promise<StopOutcome> {
         const entries = Array.from(tilesRef.current.entries());
@@ -373,7 +521,7 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
         raw.forEach((r, i) => { if (r !== null) results.push(r); else missed.push(entries[i][0]); });
         return { results, missed };
       },
-    }), []);
+    }), [onRecordingError]);
 
     return (
       <div className="flex flex-col gap-2">
@@ -430,6 +578,7 @@ const MultiCameraRecorder = forwardRef<MultiCameraRecorderHandle, Props>(
               deviceEpoch={deviceEpoch}
               register={registerTile}
               onStatus={handleTileStatus}
+              backendIp={backendIp}
             />
           ))}
           {active.length === 0 && !permError && (

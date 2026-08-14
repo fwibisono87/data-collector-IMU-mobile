@@ -43,6 +43,11 @@ export interface ExportManifest {
   operator: string;
   status: string; // PASS|PARTIAL|FAIL|UNKNOWN|NONE
   whole: boolean;
+  exportable?: boolean;
+  consolidated?: boolean;
+  analysis_ready_imu?: boolean;
+  terminal?: boolean;
+  lifecycle_state?: string;
   reasons: string[];
   late_pending: boolean;
   recovery_pending: boolean;
@@ -54,6 +59,7 @@ export interface ExportManifest {
   late_summary: Record<string, unknown> | null;
   files: ExportFile[];
   recovery: RecoveryFileInfo[];
+  ledger?: Record<string, unknown>;
 }
 
 export interface PerRoleStat {
@@ -114,6 +120,37 @@ export async function fetchExportFile(
   return res.blob();
 }
 
+async function streamResponse(
+  res: Response,
+  onChunk: (chunk: Uint8Array) => Promise<void> | void,
+): Promise<void> {
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.body) throw new Error("backend response has no streaming body");
+  const reader = res.body.getReader();
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) return;
+      await onChunk(part.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Stream a backend artifact without materialising a long CSV in the renderer heap. */
+export async function streamExportFile(
+  ip: string,
+  sessionId: string,
+  name: string,
+  onChunk: (chunk: Uint8Array) => Promise<void> | void,
+): Promise<void> {
+  await streamResponse(
+    await fetch(`${base(ip)}/export/${encodeURIComponent(sessionId)}/file?name=${encodeURIComponent(name)}`),
+    onChunk,
+  );
+}
+
 export async function postConsolidate(ip: string, sessionId: string): Promise<ConsolidateResult> {
   return _json<ConsolidateResult>(
     await fetch(`${base(ip)}/export/${encodeURIComponent(sessionId)}/consolidate`, {
@@ -146,6 +183,10 @@ export async function postBundle(ip: string, sessionId: string): Promise<BundleR
   );
 }
 
+export function dataBundleUrl(ip: string, sessionId: string): string {
+  return `${base(ip)}/export/${encodeURIComponent(sessionId)}/bundle/file`;
+}
+
 // ── Recovery endpoints (shared with RecoveryModal) ─────────────────────────
 
 export async function fetchRecoverySessions(
@@ -166,6 +207,18 @@ export async function fetchRecoveryFile(
   );
   if (!res.ok) throw new Error(`fetch recovery file ${deviceId}: HTTP ${res.status}`);
   return res.blob();
+}
+
+export async function streamRecoveryFile(
+  ip: string,
+  sessionId: string,
+  deviceId: string,
+  onChunk: (chunk: Uint8Array) => Promise<void> | void,
+): Promise<void> {
+  await streamResponse(
+    await fetch(`${base(ip)}/recovery/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(deviceId)}.csv`),
+    onChunk,
+  );
 }
 
 export function isDataKind(kind: string): boolean {

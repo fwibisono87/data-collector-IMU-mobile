@@ -34,20 +34,25 @@ class _ImuTelemetryAppState extends State<ImuTelemetryApp> {
   // engine auto-reconnect from the persisted endpoint. The UI just waits for the
   // engine to report it is connected.
   Future<void> _checkResumeSession() async {
-    final interrupted = await SessionPersistence().loadInterrupted();
-    if (interrupted != null) {
-      final serverIp = interrupted['server_ip'] as String? ?? '';
+    try {
+      final interrupted = await SessionPersistence().loadInterrupted();
+      if (interrupted != null) {
+        final serverIp = interrupted['server_ip'] as String? ?? '';
 
-      if (serverIp.isNotEmpty) {
-        await ForegroundServiceHandler().start();
-        final ok = await TaskBridge().waitUntilConnected(
-            const Duration(seconds: 12));
-        if (ok && mounted) {
-          setState(() => _home = const DashboardScreen());
+        if (serverIp.isNotEmpty) {
+          await ForegroundServiceHandler().start();
+          final ok = await TaskBridge()
+              .waitUntilConnected(const Duration(seconds: 12));
+          if (ok && mounted) {
+            setState(() => _home = const DashboardScreen());
+          }
         }
       }
+    } catch (_) {
+      // Startup recovery is best effort. The operator can still connect manually.
+    } finally {
+      if (mounted) setState(() => _checked = true);
     }
-    setState(() => _checked = true);
   }
 
   @override
