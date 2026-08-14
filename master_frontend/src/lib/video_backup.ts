@@ -186,6 +186,40 @@ export async function listCameraEvents(sessionId: string): Promise<CameraEvent[]
   });
 }
 
+/** Half-open chunk-index range [from, to) covering one MediaRecorder run. */
+export interface CameraSegment {
+  from: number;
+  to: number;
+}
+
+/**
+ * Chunk-index ranges for a camera, one per MediaRecorder run.
+ *
+ * Each `started` event records the chunk index that run began at, so consecutive starts
+ * delimit the runs. Normally there is exactly one; more than one means the recorder was
+ * restarted mid-session, and each run has to be written as a separate file to stay
+ * playable. Returns a single open-ended segment when no events exist, so sessions
+ * recorded before camera events were introduced still export unchanged.
+ */
+export async function cameraSegments(sessionId: string, camId: string): Promise<CameraSegment[]> {
+  const events = await listCameraEvents(sessionId);
+  const starts = events
+    .filter(e => e.camId === camId && e.type === "started")
+    .map(e => {
+      const m = /chunk_index=(\d+)/.exec(e.detail ?? "");
+      return m ? Number(m[1]) : null;
+    })
+    .filter((n): n is number => n !== null)
+    .sort((a, b) => a - b);
+
+  const bounds = starts[0] === 0 || starts.length === 0 ? starts : [0, ...starts];
+  if (bounds.length === 0) return [{ from: 0, to: Infinity }];
+  return bounds.map((from, i) => ({
+    from,
+    to: i + 1 < bounds.length ? bounds[i + 1] : Infinity,
+  }));
+}
+
 export async function loadChunks(sessionId: string, camId: string): Promise<Blob[]> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
@@ -217,6 +251,26 @@ export async function streamChunks(
   camId: string,
   onChunk: (blob: Blob, index: number) => Promise<void> | void,
 ): Promise<number> {
+  return streamChunkRange(sessionId, camId, 0, Infinity, onChunk);
+}
+
+/**
+ * As `streamChunks`, but restricted to chunk indices in [fromIndex, toIndex).
+ *
+ * Each MediaRecorder run must be written out as its OWN file. A recorder emits a fresh
+ * EBML header in its first chunk, so appending a second run to the first one's chunk
+ * sequence produces a file that stops playing where the second header appears — the
+ * failure recovered in tools/recover_video.py. Chunk indices resume across a restart
+ * (see `nextChunkIndex`), so footage is never overwritten; splitting on the boundary at
+ * export is what keeps each run independently playable.
+ */
+export async function streamChunkRange(
+  sessionId: string,
+  camId: string,
+  fromIndex: number,
+  toIndex: number,
+  onChunk: (blob: Blob, index: number) => Promise<void> | void,
+): Promise<number> {
   const db = await openDb();
   const keys: string[] = await new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
@@ -228,6 +282,7 @@ export async function streamChunks(
   const mine = keys
     .map(k => ({ key: k, parsed: parseKey(k) }))
     .filter(x => x.parsed && x.parsed.sessionId === sessionId && x.parsed.camId === camId)
+    .filter(x => x.parsed!.index >= fromIndex && x.parsed!.index < toIndex)
     .sort((a, b) => a.parsed!.index - b.parsed!.index);
 
   let n = 0;

@@ -8,6 +8,7 @@ import {
   streamChunks,
   type ChunkGroup,
 } from "@/lib/video_backup";
+import { finalizeWebmStream } from "@/lib/webm_seekable";
 
 interface Props {
   open: boolean;
@@ -40,12 +41,25 @@ async function saveOneCamera(
     });
     const writable = await handle.createWritable();
     try {
-      let done = 0;
-      await streamChunks(group.sessionId, group.camId, async blob => {
-        await writable.write(blob);
-        done += 1;
-        onProgress(done, total);
-      });
+      // Finalize on the way out, exactly as the normal export does: rescued footage is
+      // usually the ONLY copy, so it must land seekable and with a real duration rather
+      // than as a live stream no desktop player can navigate.
+      //
+      // Finalizing reads the chunks twice (parse, then write), so each pass drives half
+      // the progress bar rather than filling it twice.
+      let pass = 0;
+      await finalizeWebmStream(
+        (onChunk) => {
+          pass += 1;
+          let done = 0;
+          return streamChunks(group.sessionId, group.camId, async blob => {
+            await onChunk(blob);
+            done += 1;
+            onProgress(Math.min(total, Math.round(((pass - 1) * total + done) / 2)), total);
+          }).then(() => {});
+        },
+        async (chunk) => { await writable.write(chunk); },
+      );
       await writable.close();
     } catch (e) {
       try { await writable.abort(); } catch { /* ignore */ }

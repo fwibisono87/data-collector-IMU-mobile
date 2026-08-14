@@ -13,12 +13,21 @@ import {
 import { streamZipToDisk, canStreamSave, type StreamZipEntry } from "@/lib/zip_stream";
 import {
   streamChunks,
+  streamChunkRange,
+  cameraSegments,
   markSessionSaved,
   listAllChunkGroups,
   listCameraEvents,
   type ChunkGroup,
   type CameraEvent,
 } from "@/lib/video_backup";
+import { finalizeWebmStream, type FinalizeResult } from "@/lib/webm_seekable";
+
+/** What one written video file turned out to be, recorded for the bundle and the UI. */
+interface VideoFinalizeReport extends FinalizeResult {
+  path: string;
+  camId: string;
+}
 
 // ── Public contract ───────────────────────────────────────────────────────
 
@@ -321,18 +330,32 @@ export default function EndSessionModal({
       await sink(chunk);
     };
 
-  const buildStreamEntries = (
+  const buildStreamEntries = async (
     m: ExportManifest | null,
     sid: string,
     tally: { total: number },
-  ): StreamZipEntry[] => {
+    videoReport: VideoFinalizeReport[],
+  ): Promise<StreamZipEntry[]> => {
     const entries: StreamZipEntry[] = [];
 
-    // Video — streamed chunk-by-chunk straight from IndexedDB, never concatenated.
+    // Video — streamed chunk-by-chunk straight from IndexedDB, never concatenated, and
+    // finalized on the way out so the saved file carries a real Duration and Cues.
+    // One file per MediaRecorder run: a second run writes a second EBML header, and a
+    // player stops dead at that boundary (this is what broke session 1786677865027).
     for (const r of effectiveVideoResults) {
-      entries.push({
-        path: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
-        write: (sink) => streamChunks(sid, r.camId, (chunk) => trackBytes(sink, tally)(chunk)).then(() => {}),
+      const segments = await cameraSegments(sid, r.camId);
+      segments.forEach((seg, i) => {
+        const suffix = i === 0 ? "" : `_part${i + 1}`;
+        const path = `videos/${sid}_${r.camId}_video_sync${suffix}.${_ext(r)}`;
+        entries.push({
+          path,
+          write: async (sink) => {
+            const read = (onChunk: (b: Blob) => Promise<void>) =>
+              streamChunkRange(sid, r.camId, seg.from, seg.to, onChunk).then(() => {});
+            const res = await finalizeWebmStream(read, trackBytes(sink, tally));
+            videoReport.push({ path, camId: r.camId, ...res });
+          },
+        });
       });
     }
 
@@ -398,6 +421,20 @@ export default function EndSessionModal({
         },
       });
     }
+    // Written last so it observes the finalize result of every video above. This is the
+    // record that says whether each file is actually seekable and holds exactly one
+    // recording — the check whose absence let corrupt footage ship looking healthy.
+    entries.push({
+      path: "video_report.json",
+      write: async (sink) => {
+        const payload = {
+          session_id: sid,
+          videos: videoReport,
+          healthy: videoReport.every(v => v.ok && v.ebmlHeaders === 1),
+        };
+        await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify(payload, null, 2)));
+      },
+    });
     return entries;
   };
 
@@ -420,7 +457,8 @@ export default function EndSessionModal({
       const tally = { total: 0 };
       if (canStreamSave()) {
         setDownloadProgress("Streaming videos to disk…");
-        const entries = buildStreamEntries(m, sid, tally);
+        const videoReport: VideoFinalizeReport[] = [];
+        const entries = await buildStreamEntries(m, sid, tally, videoReport);
         const ok = await streamZipToDisk(`${prefix}.zip`, entries, setDownloadProgress);
         if (!ok) {
           // User cancelled the file picker — no error, and the session is NOT marked saved.
