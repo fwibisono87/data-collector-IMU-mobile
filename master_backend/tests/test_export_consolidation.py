@@ -211,6 +211,27 @@ def test_consolidate_and_manifest_whole(store: dict):
     assert after["recovery_pending"] is False
     assert set(after["per_roles"]) == {"chest", "waist"}
     assert after["whole"] is True
+    assert after["validation"]["status"] == "PASS"
+
+
+def test_consolidation_revalidation_rejects_remaining_sequence_gap(store: dict):
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(1, 1, "DEV-CHEST"), _row(2, 2, "DEV-CHEST"),
+        _row(3, 3, "DEV-CHEST"), _row(4, 4, "DEV-CHEST"),
+    ])
+    _recovery_info(store["recovery"], "DEV-CHEST", role="chest", seq1=6, n=3)
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status": "PASS", "devices": []}', encoding="utf-8"
+    )
+
+    result = _run(export_consolidate(SESSION_ID))
+    assert result["validation"]["status"] == "FAIL"
+
+    manifest = _run(export_manifest(SESSION_ID))
+    assert manifest["status"] == "FAIL"
+    assert manifest["whole"] is False
+    assert any("final consolidated validation" in reason for reason in manifest["reasons"])
 
 
 def test_manifest_prefers_per_role_pending(store: dict):

@@ -246,8 +246,6 @@ class LocalSessionRecorder {
   }
 
   Future<void> stop() async {
-    _flushTimer?.cancel();
-    _flushTimer = null;
     final s = _sink;
     final ev = _events;
     final closedSessionId = _sessionId;
@@ -255,6 +253,10 @@ class LocalSessionRecorder {
     // the queued writes and flush have drained. Clearing them first races with
     // the I/O chain and can leave the rescue CSV short by its final packets.
     _acceptWrites = false;
+    // The periodic flush must not outlive the session: left running it keeps firing
+    // against sinks this method is about to close, once per second, forever.
+    _flushTimer?.cancel();
+    _flushTimer = null;
     try {
       await _ioChain;
     } catch (e) {

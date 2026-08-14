@@ -32,6 +32,8 @@ class WebSocketClient {
   StreamSubscription? _sensorSub;
   Timer? _pingTimer;
   Timer? _resyncTimer;
+  Timer? _reconnectTimer;
+  Timer? _telemetryWatchdog;
 
   WsState _state = WsState.disconnected;
   WsState get state => _state;
@@ -42,6 +44,7 @@ class WebSocketClient {
   String _deviceRole = 'chest';
   int _sequence = 0;
   int _packetsSent = 0;
+  int _sessionPacketsSentBaseline = 0;
   int _packetsBuffered = 0;
   int _flushCounter = 0;
   DateTime? _lastPong;
@@ -68,6 +71,14 @@ class WebSocketClient {
   DateTime? _lastStateAtMs; // when we last heard authoritative state
   DateTime? _offlineSince; // for the UI's "offline for 00:24" timer
   DateTime? _lostAtMs; // when the last connection gap began (sidecar)
+  DateTime? _lastTelemetryProgressAt;
+  int? _backendTelemetryPackets;
+  int? _backendTelemetryAgeMs;
+
+  // Keep this aligned with pubspec.yaml. It is sent to the backend so operators can see
+  // whether a phone is running the build that was actually tested.
+  static const String _reportedAppVersion = '2.2.0';
+  static const Duration _telemetryStaleAfter = Duration(seconds: 12);
 
   String? get serverState => _serverState;
   String? get serverLateSid => _serverLateSid;
@@ -104,6 +115,8 @@ class WebSocketClient {
       ConnDebug.log('connect($serverIp) early-return: state=$_state');
       return true;
     }
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _serverIp = serverIp;
     _lastConnectError = null;
     RecoveryUploader().configure(_serverIp);
@@ -111,12 +124,11 @@ class WebSocketClient {
     ConnDebug.log('connect begin -> $serverIp, state=connecting');
 
     try {
-      // Cancel any stale subscriptions from a previous (now-dead) connection so their
-      // onDone/onError cannot fire against the new connection (Defect D).
-      await _controlSub?.cancel();
-      await _telemetrySub?.cancel();
-      _controlSub = null;
-      _telemetrySub = null;
+      // Cancel stale subscriptions AND close the old channels before creating
+      // replacements: a dead connection's onDone/onError must not fire against the new
+      // one (Defect D), and a half-open telemetry socket left alive lets sink.add keep
+      // accepting bytes locally that no server will ever read.
+      await _disposeChannels();
 
       _deviceId = await DeviceIdService().getDeviceId();
       _deviceRole = await DeviceIdService().getDeviceRole();
@@ -178,8 +190,12 @@ class WebSocketClient {
       // Reset the pong clock so the first ping-timer tick after (re)connect does not
       // immediately time out on a stale _lastPong (Defect A — the critical fix).
       _lastPong = DateTime.now();
+      _backendTelemetryPackets = null;
+      _backendTelemetryAgeMs = null;
+      _lastTelemetryProgressAt = DateTime.now();
       _startPingTimer();
       _startClockSync();
+      _startTelemetryWatchdog();
       // Start foreground service to keep process alive when screen is off.
       // Guard inside start() means repeated calls on reconnect are safe.
       await ForegroundServiceHandler().start();
@@ -195,6 +211,7 @@ class WebSocketClient {
       // against a dead socket (Defect B).
       _lastConnectError = _describeConnectError(e);
       ConnDebug.log('connect FAILED -> $serverIp: $_lastConnectError | raw=$e');
+      await _disposeChannels();
       _setState(WsState.offline);
       _scheduleReconnect();
       return false;
@@ -216,6 +233,52 @@ class WebSocketClient {
       return 'Phone not on the same network as the laptop.';
     }
     return 'Could not connect. Check Wi-Fi, backend status, and the IP.';
+  }
+
+  Future<void> _disposeChannels() async {
+    await _controlSub?.cancel();
+    await _telemetrySub?.cancel();
+    _controlSub = null;
+    _telemetrySub = null;
+    for (final channel in <WebSocketChannel?>[_control, _telemetry]) {
+      try {
+        await channel?.sink.close().timeout(const Duration(seconds: 1));
+      } catch (_) {
+        // A dead socket is already in the desired state.
+      }
+    }
+    _control = null;
+    _telemetry = null;
+  }
+
+  void _startTelemetryWatchdog() {
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_state != WsState.connected || _activeSessionId == null) return;
+      if (_packetsSent <= _sessionPacketsSentBaseline) return;
+
+      final lastProgress = _lastTelemetryProgressAt;
+      final backendAge = _backendTelemetryAgeMs;
+      final staleByAge = backendAge != null &&
+          backendAge >= _telemetryStaleAfter.inMilliseconds;
+      final staleByCounter = lastProgress != null &&
+          DateTime.now().difference(lastProgress) >= _telemetryStaleAfter;
+      if (!staleByAge && !staleByCounter) return;
+
+      ConnDebug.log(
+        'telemetry stalled; reconnecting '
+        '(backend_age_ms=$backendAge, backend_packets=$_backendTelemetryPackets)',
+      );
+      LocalSessionRecorder().logEvent({
+        'type': 'telemetry_stale',
+        'telemetry_age_ms': backendAge,
+        'telemetry_packets': _backendTelemetryPackets,
+        'time_ms': DateTime.now().millisecondsSinceEpoch,
+      });
+      _emitEvent(
+          {'type': 'telemetry_reconnect', 'telemetry_age_ms': backendAge});
+      _onControlDisconnect();
+    });
   }
 
   // ── Attach sensor stream ─────────────────────────────────────────────────
@@ -287,9 +350,10 @@ class WebSocketClient {
         gyroTsMs: _hwTsToCorrectedMs(raw.gyroTs, correctedNow),
         sampleKind: raw.isHeld ? 1 : 0);
 
-    // Persist the sequence counter on BOTH the online and offline paths — persisting only
-    // while connected meant a process kill during an offline stretch restored a sequence
-    // number stale by the whole outage, defeating the D5 fix's +5000 margin (plan R5).
+    // Persist the sequence counter on BOTH the online and offline paths. The checkpoint is
+    // deliberately fire-and-forget so the sensor callback never waits on disk; the
+    // persistence service serializes these writes. A restart resumes at the checkpoint's
+    // next sequence and relies on backend/local deduplication for the small uncertain tail.
     if (_activeSessionId != null && seq % 250 == 0) {
       unawaited(_persistSequence(seq));
     }
@@ -463,6 +527,20 @@ class WebSocketClient {
     _serverLateSid = nonEmpty(p['late_sid']);
     _lastStateAtMs = DateTime.now();
 
+    final telemetryPackets = p['telemetry_packets'];
+    if (telemetryPackets is num) {
+      final next = telemetryPackets.toInt();
+      if (_backendTelemetryPackets == null ||
+          next != _backendTelemetryPackets) {
+        _lastTelemetryProgressAt = DateTime.now();
+      }
+      _backendTelemetryPackets = next;
+    }
+    final telemetryAge = p['telemetry_age_ms'];
+    if (telemetryAge is num) {
+      _backendTelemetryAgeMs = telemetryAge.toInt();
+    }
+
     final sid = nonEmpty(p['session_id']);
     final serverRecording = state == 'RECORDING';
 
@@ -496,6 +574,10 @@ class WebSocketClient {
   Future<void> _setActiveSession(String? sid) async {
     if (_activeSessionId == sid) return;
     _activeSessionId = sid;
+    _sessionPacketsSentBaseline = _packetsSent;
+    _backendTelemetryPackets = null;
+    _backendTelemetryAgeMs = null;
+    _lastTelemetryProgressAt = DateTime.now();
     if (sid == null) {
       // Stop accepting sensor samples before closing the recorder so the file
       // drains on a clean boundary (task-engine lifecycle, plan T23).
@@ -512,9 +594,12 @@ class WebSocketClient {
       // Sensors are acquired here — owned by the running isolate (the task
       // engine), gated to an active session, not by any widget lifecycle.
       InternalSensorManager().start(frequency: 100);
-      // Checkpoint the active-session flag immediately (before any ack/read) so
-      // a process kill right after START still resumes this recording.
-      unawaited(_persistSequence(0));
+      // Checkpoint the active-session flag immediately (before any ack/read) so a process
+      // kill right after START still resumes this recording. On a resumed session, keep
+      // the restored checkpoint instead of overwriting it with zero; the next packet will
+      // then use the checkpoint's next sequence number.
+      final checkpoint = _sequence == 0 ? 0 : _sequence - 1;
+      unawaited(_persistSequence(checkpoint));
     }
   }
 
@@ -539,6 +624,9 @@ class WebSocketClient {
     _offlineSince = DateTime.now();
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = null;
+    unawaited(_disposeChannels());
     if (_activeSessionId != null) {
       ForegroundServiceHandler()
           .updateStatus('⚠ DISCONNECTED — buffering locally');
@@ -547,7 +635,9 @@ class WebSocketClient {
   }
 
   void _scheduleReconnect() {
-    Future.delayed(const Duration(seconds: 3), () async {
+    if (_reconnectTimer != null) return;
+    _reconnectTimer = Timer(const Duration(seconds: 3), () async {
+      _reconnectTimer = null;
       if (_state != WsState.offline) return;
       try {
         await connect(_serverIp);
@@ -602,6 +692,11 @@ class WebSocketClient {
         'type': 'buffer_orphaned',
         'files': moved,
         'session_id': orphanSessionId
+      });
+      _emitEvent({
+        'type': 'buffer_orphaned',
+        'files': moved,
+        'session_id': buf.sessionId
       });
       return;
     }
@@ -684,7 +779,7 @@ class WebSocketClient {
       deviceRole: _deviceRole,
       deviceModel: 'Android',
       androidVersion: '',
-      appVersion: '2.0.0',
+      appVersion: _reportedAppVersion,
       schemaVersion: 1,
     );
     _control?.sink.add(proto.toBytes());
@@ -753,16 +848,14 @@ class WebSocketClient {
       );
     } catch (error) {
       // A checkpoint is recovery metadata, not a reason to terminate acquisition.
-      ConnDebug.log('sequence checkpoint failed: $error');
+      ConnDebug.log('sequence checkpoint failed at $seq: $error');
     }
   }
 
   // The backend dedups on (device_id, session_id, sequence_number). After a process kill
-  // (MIUI does this routinely) _sequence restarted at 0 while the backend had already seen
-  // 0…N for this session, so every packet was silently discarded until the counter caught
-  // up — up to the entire remaining session (plan D5). Resume above the last persisted
-  // value with a margin larger than the persistence interval. Sequence gaps are harmless:
-  // dedup is keyed on exact values, not ranges.
+  // (MIUI does this routinely), resume from the last persisted checkpoint rather than
+  // restarting at zero. The local rescue CSV supplies the uncertain tail and the backend
+  // drops any duplicate sequence values that were already accepted.
   Future<void> _restoreSequenceIfInterrupted() async {
     if (_activeSessionId != null || _sequence != 0) return;
     final saved = await SessionPersistence().loadInterrupted();
@@ -771,7 +864,11 @@ class WebSocketClient {
     final sid = saved['session_id']?.toString();
     final last = (saved['last_sequence_number'] as num?)?.toInt();
     if (sid == null || last == null) return;
-    _sequence = last + 5000;
+    // The old +5000 safety margin made every process restart look like thousands of lost
+    // samples to the integrity validator. Resume at the checkpoint's next sequence instead:
+    // packets emitted before the crash are safely de-duplicated by (device, session, seq),
+    // while the local rescue CSV supplies any tail the backend did not receive.
+    _sequence = last + 1;
     // Resume the local recorder immediately, even before the control socket reconnects —
     // it is the guarantee that must not wait on the network (plan T12).
     await _setActiveSession(sid);
@@ -798,10 +895,12 @@ class WebSocketClient {
     }
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = null;
     _sensorSub?.cancel();
-    _controlSub?.cancel();
-    await _control?.sink.close();
-    await _telemetry?.sink.close();
+    await _disposeChannels();
     await LocalSessionRecorder()
         .stop(); // close the file cleanly; no unflushed tail (plan R8)
     _setState(WsState.disconnected);

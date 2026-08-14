@@ -445,6 +445,17 @@ export default function EndSessionModal({
   const m = manifest;
   const isWhole = m?.whole ?? false;
   const status = m?.status ?? "NONE";
+  const hasConsolidatedData = Boolean(
+    m && Array.isArray(m.files) && m.files.some(f => f.kind === "consolidated"),
+  );
+  const hasPendingPhoneData = Boolean(m?.late_pending || m?.recovery_pending);
+  // A PARTIAL integrity report can be expected after intentional disconnects. It must not
+  // keep the operator in a perpetual "consolidate" state once the consolidated artifacts are
+  // current and no phone still has data to deliver.
+  const canConsolidate = Boolean(m && (!hasConsolidatedData || hasPendingPhoneData));
+  const exportReady = Boolean(
+    m && hasConsolidatedData && !hasPendingPhoneData && phase === "idle",
+  );
   // The manifest is server-supplied JSON typed only by an interface, so a backend that
   // omits or renames a list crashes the render — at end of session, after the recording,
   // right when the operator is saving. `totalLabels` already defended itself; the JSX
@@ -559,12 +570,15 @@ export default function EndSessionModal({
           <div className="shrink-0 flex items-center gap-2">
             <button
               onClick={handleConsolidate}
-              disabled={phase !== "idle"}
+              disabled={phase !== "idle" || !canConsolidate}
               className="btn-glass flex-1 py-2 text-xs text-amber-200 disabled:opacity-50"
+              title={!canConsolidate ? "Consolidation is current; re-check for new phone data first" : undefined}
             >
               {phase === "waiting" || phase === "consolidating"
                 ? (phase === "waiting" ? "Waiting for phones…" : "Consolidating…")
-                : "Pull & consolidate CSVs (incl. recovered)"}
+                : canConsolidate
+                  ? (hasConsolidatedData ? "Pull & consolidate new data" : "Pull & consolidate CSVs (incl. recovered)")
+                  : "Consolidated — no pending data"}
             </button>
             <button
               onClick={loadManifest}
@@ -630,8 +644,9 @@ export default function EndSessionModal({
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownload}
-              disabled={downloading || !canStreamSave()}
+              disabled={downloading || !exportReady || !canStreamSave()}
               className="btn-primary flex-1 py-2 font-bold text-sm disabled:opacity-50 disabled:cursor-wait"
+              title={!exportReady ? "Consolidate all phone data before downloading" : undefined}
             >
               {downloading ? "Building ZIP…" : "Download all as .zip"}
             </button>

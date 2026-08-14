@@ -37,13 +37,24 @@ _latest_samples: dict[str, dict] = {}
 _ACCEPTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
-def _state_pong(command_id: str = "") -> bytes:
-    """Authoritative session state, delivered on the PONG heartbeat (plan DD-1)."""
+def _state_pong(command_id: str = "", device_id: str = "") -> bytes:
+    """Authoritative state plus per-device telemetry progress on a device PONG."""
+    dev = session_manager.get_device(device_id) if device_id else None
+    telemetry_age_ms = None
+    telemetry_packets = None
+    if dev is not None:
+        telemetry_packets = dev.packets_received
+        telemetry_age_ms = (
+            int((time.monotonic() - dev.last_packet_at) * 1000)
+            if dev.last_packet_at else -1
+        )
     return make_pong(
         command_id,
         state=session_manager.state.value,
         session_id=session_manager.session_id or "",
         late_sid=io_manager.late_session_id,
+        telemetry_packets=telemetry_packets,
+        telemetry_age_ms=telemetry_age_ms,
     )
 
 
@@ -205,7 +216,7 @@ async def control_ws(websocket: WebSocket) -> None:
         # Reconciliation on (re)connect: tell the device what the backend believes is
         # happening RIGHT NOW. Without this a phone that was offline during STOP stays
         # stuck showing "RECORDING" forever (plan D1).
-        await websocket.send_bytes(_state_pong())
+        await websocket.send_bytes(_state_pong(device_id=reg.device_id))
 
         async def heartbeat() -> None:
             """Keep the control channel alive even if a phone misses its own PING timer.
@@ -257,7 +268,7 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
     match cmd.type:
         case CommandType.PING:
             session_manager.mark_ping(device_id)
-            await ws.send_bytes(_state_pong(cmd.command_id))
+            await ws.send_bytes(_state_pong(cmd.command_id, device_id))
 
         case CommandType.CLOCK_SYNC:
             t1_ms = int(time.time() * 1000)
@@ -463,6 +474,7 @@ def _state_snapshot() -> dict:
                 "device_id": d.device_id,
                 "role": d.device_role,
                 "is_online": d.control_ws is not None,
+                "control_alive": d.is_alive,
                 "packets": d.packets_received,
                 # Surfaced so a stale handset build is visible on the dashboard. Three phones
                 # ran a pre-v2 build for days on 2026-08-07, leaving acc_ts_ms/sample_kind
@@ -472,10 +484,15 @@ def _state_snapshot() -> dict:
                 "substate": d.substate,
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),
+                "telemetry_gaps": len(d.telemetry_gaps),
                 "rate_hz": round(d.rate_hz, 1),
                 "true_hz": round(d.true_hz, 1),
                 "true_hz_avg": round(d.true_hz_avg, 1),
                 "held_pct": round(d.held_pct, 1),
+                "telemetry_age_ms": (
+                    int((time.monotonic() - d.last_packet_at) * 1000)
+                    if d.last_packet_at else -1
+                ),
                 "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }
             for d in session_manager._devices.values()

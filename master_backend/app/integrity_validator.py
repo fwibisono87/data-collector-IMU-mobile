@@ -25,6 +25,15 @@ def _total_offline_ms(intervals: list) -> int:
     return sum((iv.get("end_ms") or now) - iv["start_ms"] for iv in intervals)
 
 
+def _telemetry_gaps(dev) -> list:
+    return getattr(dev, "telemetry_gaps", None) or []
+
+
+def _total_telemetry_gap_ms(gaps: list) -> int:
+    now = int(time.time() * 1000)
+    return sum((gap.get("end_ms") or now) - gap["start_ms"] for gap in gaps)
+
+
 def _analyse_csv(path: str, device_id: str, role: str) -> dict:
     """Read a CSV off the event loop and run sampling analysis on its rows.
 
@@ -37,8 +46,11 @@ def _analyse_csv(path: str, device_id: str, role: str) -> dict:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 fields = parse_row(line)
+                # `device_id or None` — an empty id means "do not filter by device", which
+                # is how the consolidated per-role pass calls this: those files hold every
+                # device for the role, so filtering on "" would reject every single row.
                 if fields is not None and is_valid_data_row(
-                    fields, expected_device_id=device_id
+                    fields, expected_device_id=device_id or None
                 ):
                     rows.append(fields)
                 elif line.strip() and not line.lstrip().startswith("#") and not is_header_line(line):
@@ -73,6 +85,68 @@ def _escalate(current: str, candidate: str) -> str:
     assignment in a later check silently downgrades an earlier, more severe verdict.
     """
     return candidate if _VERDICT_RANK[candidate] > _VERDICT_RANK[current] else current
+
+
+def validate_consolidated(
+    session_id: str,
+    per_role_files: list[tuple[str, Path]],
+    validated_at_ms: int | None = None,
+) -> dict:
+    """Check the final per-role files after rescue/late rows have been merged.
+
+    The stop-time report remains authoritative for rate and disconnect evidence. This
+    second pass specifically answers the question that cannot be answered at STOP:
+    did the final merged files still contain sequence gaps after recovery arrived?
+    """
+    thresholds = {
+        "seq_gap_partial_pct": float(os.getenv("INTEGRITY_SEQ_GAP_PARTIAL_PCT", "0.1")),
+        "seq_gap_fail_pct": float(os.getenv("INTEGRITY_SEQ_GAP_FAIL_PCT", "1.0")),
+    }
+    roles: list[dict] = []
+    status = "PASS"
+    for role, path in per_role_files:
+        stats = _analyse_csv(str(path), "", role)
+        role_status = "PASS"
+        reasons: list[str] = []
+        if not stats:
+            role_status = "FAIL"
+            reasons.append("consolidated CSV could not be read")
+            sequence = {}
+            rows = 0
+        else:
+            rows = stats["rows"]
+            sequence = stats["sequence"]
+            missing_pct = sequence["missing_pct"]
+            if rows == 0:
+                role_status = "FAIL"
+                reasons.append("consolidated CSV has zero rows")
+            elif missing_pct > thresholds["seq_gap_fail_pct"]:
+                role_status = "FAIL"
+                reasons.append(f"sequence gap {missing_pct:.2f}% exceeds fail threshold")
+            elif missing_pct > thresholds["seq_gap_partial_pct"]:
+                role_status = "PARTIAL"
+                reasons.append(f"sequence gap {missing_pct:.2f}% exceeds partial threshold")
+        status = _escalate(status, role_status)
+        roles.append({
+            "role": role,
+            "path": str(path),
+            "rows": rows,
+            "status": role_status,
+            "reasons": reasons,
+            "sequence": sequence,
+        })
+
+    if not roles:
+        status = "FAIL"
+
+    return {
+        "session_id": session_id,
+        "status": status,
+        "validated_at_ms": validated_at_ms or int(time.time() * 1000),
+        "validation_scope": "consolidated_per_role",
+        "thresholds": thresholds,
+        "roles": roles,
+    }
 
 
 class IntegrityValidator:
@@ -195,6 +269,11 @@ class IntegrityValidator:
                 "packets_received": dev_obj.packets_received if dev_obj else 0,
                 "offline_interval_count": len(dev_obj.offline_intervals) if dev_obj else 0,
                 "offline_total_ms": _total_offline_ms(dev_obj.offline_intervals) if dev_obj else 0,
+                "telemetry_gaps": _telemetry_gaps(dev_obj) if dev_obj else [],
+                "telemetry_gap_count": len(_telemetry_gaps(dev_obj)) if dev_obj else 0,
+                "telemetry_gap_total_ms": (
+                    _total_telemetry_gap_ms(_telemetry_gaps(dev_obj)) if dev_obj else 0
+                ),
                 "rows_reordered": result.get("reordered", 0),
                 "packets_dropped_no_writer": metrics.dropped_no_writer(device_id),
                 "csv_write_failures": metrics.write_failures(device_id),
@@ -344,6 +423,10 @@ class IntegrityValidator:
                         f"{role}: {gap.get('duration_ms', 0)} ms gap overlaps non-zero label"
                     )
 
+            if dev_obj and _telemetry_gaps(dev_obj):
+                device_report["status"] = _escalate(device_report["status"], "PARTIAL")
+                device_report["reasons"].append("device had telemetry-only gaps")
+
             # Packets the operator believed were captured (the dashboard counted them)
             # but that never reached disk are a hard failure, not merely PARTIAL (plan D2).
             if device_report["packets_dropped_no_writer"] > 0:
@@ -399,6 +482,15 @@ class IntegrityValidator:
                 }
                 for d in devices
                 if d.offline_intervals
+            ],
+            "telemetry_gaps": [
+                {
+                    "device_id": d.device_id,
+                    "role": d.device_role,
+                    "intervals": _telemetry_gaps(d),
+                }
+                for d in devices
+                if _telemetry_gaps(d)
             ],
         }
 
@@ -461,6 +553,8 @@ class IntegrityValidator:
                         "role": d.device_role,
                         "intervals": d.offline_intervals,
                         "total_offline_ms": _total_offline_ms(d.offline_intervals),
+                        "telemetry_gaps": _telemetry_gaps(d),
+                        "total_telemetry_gap_ms": _total_telemetry_gap_ms(_telemetry_gaps(d)),
                     }
                     for d in devices
                 ],

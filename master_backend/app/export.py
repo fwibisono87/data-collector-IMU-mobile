@@ -91,6 +91,8 @@ def _classify(name: str) -> str:
         return "late_summary"
     if name.endswith("_consolidation.json"):
         return "consolidation"
+    if name.endswith("_consolidated_validation.json"):
+        return "consolidated_validation"
     if name.endswith("_consolidated.csv"):
         return "consolidated"
     if name.endswith("_merged.csv"):
@@ -441,6 +443,7 @@ async def export_manifest(session_id: str):
     integrity = None
     connectivity = None
     late_summary = None
+    validation = None
     for f in files:
         p = Path(f["path"])
         try:
@@ -450,6 +453,8 @@ async def export_manifest(session_id: str):
                 connectivity = json.loads(p.read_text(encoding="utf-8"))
             elif f["kind"] == "late_summary":
                 late_summary = json.loads(p.read_text(encoding="utf-8"))
+            elif f["kind"] == "consolidated_validation":
+                validation = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
 
@@ -497,14 +502,26 @@ async def export_manifest(session_id: str):
             or max(_mtime(csv) for _, csv in recovery_sources) > session_mtime
         )
 
-    status = (integrity or ledger.get("integrity_report") or {}).get("status", "") or (
+    # Fall back to the ledger's copy: a dashboard that reconnects after the backend
+    # restarted has no in-memory integrity report, and reporting UNKNOWN for a session
+    # that already passed would read as a regression.
+    at_stop_status = (integrity or ledger.get("integrity_report") or {}).get("status", "") or (
         "NONE" if not folders else "UNKNOWN"
     )
+    final_status = (validation or {}).get("status", "")
+    status_rank = {"NONE": 0, "UNKNOWN": 0, "PASS": 1, "PARTIAL": 2, "FAIL": 3}
+    status = at_stop_status
+    if final_status and status_rank.get(final_status, 0) > status_rank.get(status, 0):
+        status = final_status
 
     reasons: list[str] = []
     if status != "PASS":
-        reasons.append(f"integrity report is '{status}'" if status != "NONE"
-                       else "no integrity report on disk for this session")
+        if final_status and final_status != "PASS":
+            reasons.append(f"final consolidated validation is '{final_status}'")
+        if at_stop_status != "NONE":
+            reasons.append(f"integrity report is '{at_stop_status}'")
+        else:
+            reasons.append("no integrity report on disk for this session")
     if late_pending:
         reasons.append("late telemetry rows have not been consolidated yet")
     if recovery_pending:
@@ -544,6 +561,7 @@ async def export_manifest(session_id: str):
         "integrity": integrity,
         "connectivity": connectivity,
         "late_summary": late_summary,
+        "validation": validation,
         "files": files,
         "recovery": recovery,
         "ledger": ledger,
@@ -617,15 +635,6 @@ async def export_consolidate(session_id: str):
             session_id,
             metadata_prefix=f"session_id={session_id},source=consolidate",
         )
-        summary_path = primary_folder / f"{session_id}_consolidation.json"
-        summary = {
-            "session_id": session_id,
-            "consolidated_at_ms": int(time.time() * 1000),
-            "per_role": per_role["per_role"],
-            "per_role_files": per_role["files"],
-            **result,
-        }
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return result, per_role
 
     lock = _consolidate_locks.setdefault(session_id, asyncio.Lock())
@@ -637,7 +646,38 @@ async def export_consolidate(session_id: str):
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"consolidation failed: {exc}") from exc
 
-    revalidated = await _revalidate_consolidated(session_id, per_role["per_role"])
+        # Both passes stay inside the lock: they read the files just written, and a
+        # concurrent consolidation would otherwise rewrite them mid-validation.
+        #
+        # The stop-time integrity report cannot include phone rescue/late rows that arrive
+        # afterward. Re-check the final per-role files so the export modal never reports a
+        # complete dataset when sequence gaps remain after consolidation.
+        from .integrity_validator import validate_consolidated
+        validation_inputs = [
+            (role, Path(stats["path"]))
+            for role, stats in per_role["per_role"].items()
+        ]
+        validation = await asyncio.get_event_loop().run_in_executor(
+            None, validate_consolidated, session_id, validation_inputs
+        )
+        validation_path = primary_folder / f"{session_id}_consolidated_validation.json"
+        validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+
+        # Complementary to the above, not a duplicate: this reconstructs each device from
+        # the ledger and re-runs the FULL validator over the merged files, so the export
+        # carries rate/disconnect evidence too — not just the sequence-gap verdict.
+        revalidated = await _revalidate_consolidated(session_id, per_role["per_role"])
+
+        summary_path = primary_folder / f"{session_id}_consolidation.json"
+        summary = {
+            "session_id": session_id,
+            "consolidated_at_ms": int(time.time() * 1000),
+            "per_role": per_role["per_role"],
+            "per_role_files": per_role["files"],
+            **result,
+            "validation": validation,
+        }
+        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     await audit.log("INFO", "session_consolidated", {
         "session_id": session_id,
@@ -651,6 +691,7 @@ async def export_consolidate(session_id: str):
         **result,
         "per_role": per_role["per_role"],
         "integrity_report": revalidated,
+        "validation": validation,
     }
 
 

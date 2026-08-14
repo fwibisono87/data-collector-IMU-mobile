@@ -1,0 +1,40 @@
+{
+  "duration_sec": 21600,
+  "poll_sec": 5,
+  "startup_timeout_sec": 900,
+  "package_name": "com.example.sensors_app",
+  "faults": [
+    {
+      "at_sec": 1800,
+      "serial": "SERIAL_PHONE_A",
+      "action": "wifi_off",
+      "duration_sec": 120
+    },
+    {
+      "at_sec": 3600,
+      "serial": "SERIAL_PHONE_A",
+      "action": "screen_off"
+    },
+    {
+      "at_sec": 4200,
+      "serial": "SERIAL_PHONE_A",
+      "action": "screen_on"
+    },
+    {
+      "at_sec": 7200,
+      "serial": "SERIAL_PHONE_A",
+      "action": "force_stop"
+    },
+    {
+      "at_sec": 7245,
+      "serial": "SERIAL_PHONE_A",
+      "action": "launch"
+    },
+    {
+      "at_sec": 10800,
+      "serial": "SERIAL_PHONE_B",
+      "action": "wifi_off",
+      "duration_sec": 120
+    }
+  ]
+}
