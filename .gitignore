@@ -300,3 +300,8 @@ master_frontend/tsconfig.tsbuildinfo
 
 # Recovered/rescued session data pulled off devices — large, not source
 rescue_path/
+
+# Local-only recovery pulls, soak-test evidence, and toolchain checkouts
+data_recovery/
+tools/test_runs/
+$clean/

@@ -1,0 +1,42 @@
+{
+  "duration_sec": 1200,
+  "poll_sec": 5,
+  "startup_timeout_sec": 60,
+  "package_name": "com.example.sensors_app",
+  "faults": [
+    {
+      "at_sec": 180,
+      "serial": "5DPVRG65RGS8ONV4",
+      "action": "wifi_off",
+      "duration_sec": 25
+    },
+    {
+      "at_sec": 420,
+      "serial": "6LZDZLH665SOZPFE",
+      "action": "wifi_off",
+      "duration_sec": 30
+    },
+    {
+      "at_sec": 660,
+      "serial": "IR497PGY5HZXUKAE",
+      "action": "wifi_off",
+      "duration_sec": 25
+    },
+    {
+      "at_sec": 900,
+      "serial": "5DPVRG65RGS8ONV4",
+      "action": "wifi_off",
+      "duration_sec": 35
+    },
+    {
+      "at_sec": 1020,
+      "serial": "6LZDZLH665SOZPFE",
+      "action": "force_stop"
+    },
+    {
+      "at_sec": 1025,
+      "serial": "6LZDZLH665SOZPFE",
+      "action": "launch"
+    }
+  ]
+}

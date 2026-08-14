@@ -5,7 +5,7 @@ export interface ExportFile {
   name: string;
   path: string;
   size: number;
-  kind: string; // main|csv|late|rescue|merged|consolidated|integrity|connectivity|late_summary|consolidation|other
+  kind: string; // main|csv|late|rescue|merged|consolidated|integrity|connectivity|late_summary|consolidation|validation|other
   folder: string;
 }
 
@@ -52,6 +52,7 @@ export interface ExportManifest {
   integrity: Record<string, unknown> | null;
   connectivity: Record<string, unknown> | null;
   late_summary: Record<string, unknown> | null;
+  validation: Record<string, unknown> | null;
   files: ExportFile[];
   recovery: RecoveryFileInfo[];
 }
@@ -70,6 +71,7 @@ export interface ConsolidateResult {
   sources: Record<string, number>;
   duplicates_dropped: number;
   per_role: Record<string, PerRoleStat>;
+  validation: Record<string, unknown>;
 }
 
 export interface RecoverySessionEntry {
@@ -81,6 +83,7 @@ export interface RecoverySessionEntry {
 const DATA_KINDS = new Set([
   "main", "csv", "late", "rescue", "merged", "consolidated",
   "integrity", "connectivity", "late_summary", "consolidation",
+  "consolidated_validation",
 ]);
 
 function base(ip: string): string {

@@ -88,6 +88,8 @@ def _classify(name: str) -> str:
         return "late_summary"
     if name.endswith("_consolidation.json"):
         return "consolidation"
+    if name.endswith("_consolidated_validation.json"):
+        return "consolidated_validation"
     if name.endswith("_consolidated.csv"):
         return "consolidated"
     if name.endswith("_merged.csv"):
@@ -283,6 +285,7 @@ async def export_manifest(session_id: str):
     integrity = None
     connectivity = None
     late_summary = None
+    validation = None
     for f in files:
         p = Path(f["path"])
         try:
@@ -292,6 +295,8 @@ async def export_manifest(session_id: str):
                 connectivity = json.loads(p.read_text(encoding="utf-8"))
             elif f["kind"] == "late_summary":
                 late_summary = json.loads(p.read_text(encoding="utf-8"))
+            elif f["kind"] == "consolidated_validation":
+                validation = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
 
@@ -338,12 +343,21 @@ async def export_manifest(session_id: str):
             or max(_mtime(csv) for _, csv in recovery_sources) > session_mtime
         )
 
-    status = (integrity or {}).get("status", "") or ("NONE" if not folders else "UNKNOWN")
+    at_stop_status = (integrity or {}).get("status", "") or ("NONE" if not folders else "UNKNOWN")
+    final_status = (validation or {}).get("status", "")
+    status_rank = {"NONE": 0, "UNKNOWN": 0, "PASS": 1, "PARTIAL": 2, "FAIL": 3}
+    status = at_stop_status
+    if final_status and status_rank.get(final_status, 0) > status_rank.get(status, 0):
+        status = final_status
 
     reasons: list[str] = []
     if status != "PASS":
-        reasons.append(f"integrity report is '{status}'" if status != "NONE"
-                       else "no integrity report on disk for this session")
+        if final_status and final_status != "PASS":
+            reasons.append(f"final consolidated validation is '{final_status}'")
+        if at_stop_status != "NONE":
+            reasons.append(f"integrity report is '{at_stop_status}'")
+        else:
+            reasons.append("no integrity report on disk for this session")
     if late_pending:
         reasons.append("late telemetry rows have not been consolidated yet")
     if recovery_pending:
@@ -372,6 +386,7 @@ async def export_manifest(session_id: str):
         "integrity": integrity,
         "connectivity": connectivity,
         "late_summary": late_summary,
+        "validation": validation,
         "files": files,
         "recovery": recovery,
     }
@@ -432,6 +447,20 @@ async def export_consolidate(session_id: str):
         metadata_prefix=f"session_id={session_id},source=consolidate",
     )
 
+    # The stop-time integrity report cannot include phone rescue/late rows that arrive
+    # afterward. Re-check the final per-role files so the export modal never reports a
+    # complete dataset when sequence gaps remain after consolidation.
+    from .integrity_validator import validate_consolidated
+    validation_inputs = [
+        (role, Path(stats["path"]))
+        for role, stats in per_role["per_role"].items()
+    ]
+    validation = await asyncio.get_event_loop().run_in_executor(
+        None, validate_consolidated, session_id, validation_inputs
+    )
+    validation_path = primary_folder / f"{session_id}_consolidated_validation.json"
+    validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+
     summary_path = primary_folder / f"{session_id}_consolidation.json"
     summary = {
         "session_id": session_id,
@@ -439,6 +468,7 @@ async def export_consolidate(session_id: str):
         "per_role": per_role["per_role"],
         "per_role_files": per_role["files"],
         **result,
+        "validation": validation,
     }
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -449,7 +479,12 @@ async def export_consolidate(session_id: str):
         "sources": result["sources"],
         "per_role_files": per_role["files"],
     })
-    return {"session_id": session_id, **result, "per_role": per_role["per_role"]}
+    return {
+        "session_id": session_id,
+        **result,
+        "per_role": per_role["per_role"],
+        "validation": validation,
+    }
 
 
 BUNDLE_SUFFIX = "_bundle.zip"

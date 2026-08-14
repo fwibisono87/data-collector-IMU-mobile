@@ -105,18 +105,25 @@ def make_pong(
     state: str = "",
     session_id: str = "",
     late_sid: str = "",
+    telemetry_packets: int | None = None,
+    telemetry_age_ms: int | None = None,
 ) -> bytes:
     """PONG doubles as the authoritative session-state heartbeat (1 Hz).
 
     The payload is additive and optional: an older mobile build ignores it and
     behaves exactly as before. `late_sid` is non-empty only while the backend is
-    still accepting late telemetry for a session that has already stopped.
+    still accepting late telemetry for a session that has already stopped. When a
+    device-specific PONG is requested, telemetry counters are included so the phone
+    can detect a half-open telemetry socket whose stream never raises onDone/onError.
     """
     payload = ""
     if state:
-        payload = json.dumps(
-            {"state": state, "session_id": session_id, "late_sid": late_sid}
-        )
+        body = {"state": state, "session_id": session_id, "late_sid": late_sid}
+        if telemetry_packets is not None:
+            body["telemetry_packets"] = telemetry_packets
+        if telemetry_age_ms is not None:
+            body["telemetry_age_ms"] = telemetry_age_ms
+        payload = json.dumps(body)
     return Command(type=CommandType.PONG, payload=payload, command_id=command_id).to_bytes()
 
 

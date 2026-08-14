@@ -41,6 +41,20 @@ def _open_offline_interval(dev: "DeviceInfo", source: str) -> None:
     )
 
 
+def _open_telemetry_gap(dev: "DeviceInfo", source: str = "telemetry_disconnect") -> None:
+    """Track a telemetry-channel gap independently from control/offline liveness."""
+    if dev.telemetry_gaps and dev.telemetry_gaps[-1]["end_ms"] is None:
+        return
+    dev.telemetry_gaps.append(
+        {"start_ms": int(time.time() * 1000), "end_ms": None, "source": source}
+    )
+
+
+def _close_telemetry_gap(dev: "DeviceInfo") -> None:
+    if dev.telemetry_gaps and dev.telemetry_gaps[-1]["end_ms"] is None:
+        dev.telemetry_gaps[-1]["end_ms"] = int(time.time() * 1000)
+
+
 class SessionState(str, Enum):
     IDLE = "IDLE"
     PREFLIGHT = "PREFLIGHT"
@@ -71,6 +85,7 @@ class DeviceInfo:
     substate: DeviceSubstate = DeviceSubstate.CONNECTED
     first_packet_ts: int | None = None      # epoch ms of first packet (for start drift)
     offline_intervals: list = field(default_factory=list)  # [{start_ms, end_ms}]
+    telemetry_gaps: list = field(default_factory=list)  # telemetry-only gaps
     last_packet_at: float = 0.0             # time.monotonic() of the last accepted packet
     _packets_prev_tick: int = 0
     rate_hz: float = 0.0
@@ -128,6 +143,7 @@ class SessionManager:
         # Preserve session-level data if device reconnects mid-session.
         existing = self._devices.get(device_id)
         preserved_intervals = existing.offline_intervals if existing else []
+        preserved_telemetry_gaps = list(existing.telemetry_gaps) if existing else []
         preserved_first_ts = existing.first_packet_ts if existing else None
         preserved_packets = existing.packets_received if existing else 0
         preserved_last_acc = existing.last_acc if existing else None
@@ -147,6 +163,7 @@ class SessionManager:
             last_ping_ms=time.monotonic(),
             is_online=True,
             offline_intervals=preserved_intervals,
+            telemetry_gaps=preserved_telemetry_gaps,
             first_packet_ts=preserved_first_ts,
             packets_received=preserved_packets,
             last_acc=preserved_last_acc,
@@ -177,7 +194,7 @@ class SessionManager:
             return
         dev = self._devices[device_id]
         if self.state == SessionState.RECORDING:
-            _open_offline_interval(dev, "telemetry_disconnect")
+            _open_telemetry_gap(dev)
 
     def mark_ping(self, device_id: str) -> None:
         if device_id in self._devices:
@@ -200,6 +217,7 @@ class SessionManager:
             dev = self._devices[device_id]
             dev.packets_received += 1
             dev.last_packet_at = time.monotonic()
+            _close_telemetry_gap(dev)
 
     def note_sample(self, device_id: str, acc: tuple) -> None:
         """Count DISTINCT accelerometer readings. A repeated triple is a held sample:
@@ -289,7 +307,9 @@ class SessionManager:
         for dev in self._devices.values():
             dev.first_packet_ts = None
             dev.offline_intervals = []
+            dev.telemetry_gaps = []
             dev.packets_received = 0
+            dev.last_packet_at = 0.0
             dev.last_acc = None
             dev.acc_changes = 0
             dev._acc_changes_prev_tick = 0
@@ -322,10 +342,11 @@ class SessionManager:
         if self._offline_check_task:
             self._offline_check_task.cancel()
 
-        # Close any open offline intervals
+        # Close any open offline and telemetry intervals.
         for dev in self._devices.values():
             if dev.offline_intervals and dev.offline_intervals[-1]["end_ms"] is None:
                 dev.offline_intervals[-1]["end_ms"] = int(time.time() * 1000)
+            _close_telemetry_gap(dev)
             dev.substate = DeviceSubstate.FINALIZED
 
         file_results = await io_manager.close_session(self._session_true_hz())

@@ -16,22 +16,45 @@ class SessionPersistence {
 
   static const _fileName = 'session_state.json';
   static const _desiredFileName = 'desired_state.json';
+  Future<void> _writeTail = Future<void>.value();
+  int _tempCounter = 0;
 
   Future<File> _file(String name) async {
     final dir = await getApplicationDocumentsDirectory();
     return File('${dir.path}/$name');
   }
 
-  // Atomic write: write to a temp sibling then rename over the target. Rename is
-  // atomic on the same filesystem, so a reader never observes a torn JSON blob.
-  Future<void> _atomicWrite(File target, String content) async {
-    final tmp = File('${target.path}.tmp');
-    await tmp.writeAsString(content, flush: true);
-    // Windows rename-over-existing needs the target removed first; Unix is fine.
-    if (Platform.isWindows && await target.exists()) {
-      await target.delete();
+  // Atomic write: write to a unique temp sibling then rename over the target. The
+  // queue matters because sequence checkpoints are fire-and-forget from the 100 Hz
+  // sensor path, while START/resume/STOP can also write this file. A shared fixed
+  // `.tmp` name let those operations delete or rename one another's temp file.
+  // Unique names also protect against a second Flutter engine writing concurrently.
+  Future<void> _atomicWrite(File target, String content) {
+    return _enqueue(() => _atomicWriteNow(target, content));
+  }
+
+  Future<void> _enqueue(Future<void> Function() operation) {
+    final queued = _writeTail.catchError((_) {}).then<void>((_) => operation());
+    _writeTail = queued.catchError((_) {});
+    return queued;
+  }
+
+  Future<void> _atomicWriteNow(File target, String content) async {
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    final tmp = File('${target.path}.$stamp.${_tempCounter++}.tmp');
+    try {
+      await tmp.writeAsString(content, flush: true);
+      // Windows rename-over-existing needs the target removed first; Unix is fine.
+      if (Platform.isWindows && await target.exists()) {
+        await target.delete();
+      }
+      await tmp.rename(target.path);
+    } finally {
+      // A failed write must not leave checkpoint debris behind.
+      try {
+        if (await tmp.exists()) await tmp.delete();
+      } catch (_) {}
     }
-    await tmp.rename(target.path);
   }
 
   Future<void> save({
@@ -57,6 +80,7 @@ class SessionPersistence {
 
   Future<Map<String, dynamic>?> loadInterrupted() async {
     try {
+      await _writeTail.catchError((_) {});
       final f = await _file(_fileName);
       if (!await f.exists()) return null;
       final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
@@ -68,18 +92,21 @@ class SessionPersistence {
   }
 
   Future<void> clear() async {
-    try {
-      final f = await _file(_fileName);
-      if (!await f.exists()) return;
-      final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
-      data['state'] = 'IDLE';
-      await _atomicWrite(f, jsonEncode(data));
-    } catch (_) {}
+    await _enqueue(() async {
+      try {
+        final f = await _file(_fileName);
+        if (!await f.exists()) return;
+        final data = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
+        data['state'] = 'IDLE';
+        await _atomicWriteNow(f, jsonEncode(data));
+      } catch (_) {}
+    });
   }
 
   /// Persist the desired endpoint + role independently of any active recording,
   /// so a restarted engine knows WHERE to reconnect without the UI.
-  Future<void> saveDesired({required String serverIp, required String deviceRole}) async {
+  Future<void> saveDesired(
+      {required String serverIp, required String deviceRole}) async {
     await _atomicWrite(
       await _file(_desiredFileName),
       jsonEncode({
@@ -92,6 +119,7 @@ class SessionPersistence {
 
   Future<Map<String, dynamic>?> loadDesired() async {
     try {
+      await _writeTail.catchError((_) {});
       final f = await _file(_desiredFileName);
       if (!await f.exists()) return null;
       return jsonDecode(await f.readAsString()) as Map<String, dynamic>;
@@ -103,9 +131,11 @@ class SessionPersistence {
   /// In-app recovery: remove the persisted desired endpoint so a task-engine
   /// auto-reconnect can no longer re-dial a stale server IP after a reset.
   Future<void> clearDesired() async {
-    try {
-      final f = await _file(_desiredFileName);
-      if (await f.exists()) await f.delete();
-    } catch (_) {}
+    await _enqueue(() async {
+      try {
+        final f = await _file(_desiredFileName);
+        if (await f.exists()) await f.delete();
+      } catch (_) {}
+    });
   }
 }

@@ -33,7 +33,8 @@ class LocalSessionRecorder {
   IOSink? _sink;
   IOSink? _events;
   File? _file;
-  Timer? _flushTimer;
+  Future<void> _ioTail = Future<void>.value();
+  int _csvWritesSinceFlush = 0;
   String? _sessionId;
   int _rows = 0;
   String? _lastError;
@@ -89,10 +90,7 @@ class LocalSessionRecorder {
       _sessionId = sessionId;
       _rows = 0;
       _lastError = null;
-      _flushTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        _sink?.flush();
-        _events?.flush();
-      });
+      _csvWritesSinceFlush = 0;
       await _prune();
     } catch (e) {
       _lastError = '$e';
@@ -132,26 +130,49 @@ class LocalSessionRecorder {
   }) {
     final s = _sink;
     if (s == null) return;
-    final accTs = accTsMs == 0 ? '' : '$accTsMs';
-    final gyroTs = gyroTsMs == 0 ? '' : '$gyroTsMs';
-    s.write('$timestampMs,'
+    final line = '$timestampMs,'
         '${p.accX.toStringAsFixed(6)},${p.accY.toStringAsFixed(6)},${p.accZ.toStringAsFixed(6)},'
         '${p.gyroX.toStringAsFixed(6)},${p.gyroY.toStringAsFixed(6)},${p.gyroZ.toStringAsFixed(6)},'
         '$labelId,$labelName,$sequence,$deviceId,'
-        '$accTs,$gyroTs,$sampleKind\n');
+        '${accTsMs == 0 ? '' : accTsMs},${gyroTsMs == 0 ? '' : gyroTsMs},$sampleKind\n';
     _rows++;
+    _enqueueIo(() async {
+      s.write(line);
+      _csvWritesSinceFlush++;
+      if (_csvWritesSinceFlush >= 100) {
+        _csvWritesSinceFlush = 0;
+        await s.flush();
+      }
+    });
   }
 
   /// Append one integrity/sampling marker to the JSONL sidecar. Never touches the CSV.
   void logEvent(Map<String, dynamic> event) {
     final e = _events;
     if (e == null) return;
-    e.writeln(jsonEncode(event));
+    final line = jsonEncode(event);
+    _enqueueIo(() async {
+      e.writeln(line);
+      await e.flush();
+    });
+  }
+
+  /// Serialize all writes and flushes. IOSink.flush() temporarily binds the sink to
+  /// an internal stream; a concurrent hot-path write then throws
+  /// "StreamSink is bound to a stream". Keeping both operations on one future chain
+  /// preserves periodic durability without making the sensor callback await I/O.
+  void _enqueueIo(FutureOr<void> Function() operation) {
+    _ioTail = _ioTail.then<void>((_) async {
+      try {
+        await operation();
+      } catch (e) {
+        _lastError = '$e';
+        debugPrint('LocalSessionRecorder: write failed: $e');
+      }
+    });
   }
 
   Future<void> stop() async {
-    _flushTimer?.cancel();
-    _flushTimer = null;
     final s = _sink;
     final ev = _events;
     // Keep a local reference for close, but make the public path cease to identify this file
@@ -161,6 +182,7 @@ class LocalSessionRecorder {
     _events = null;
     _sessionId = null;
     try {
+      await _ioTail;
       await ev?.flush();
       await ev?.close();
       if (s != null) {

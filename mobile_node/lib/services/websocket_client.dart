@@ -32,6 +32,8 @@ class WebSocketClient {
   StreamSubscription? _sensorSub;
   Timer? _pingTimer;
   Timer? _resyncTimer;
+  Timer? _reconnectTimer;
+  Timer? _telemetryWatchdog;
 
   WsState _state = WsState.disconnected;
   WsState get state => _state;
@@ -42,6 +44,7 @@ class WebSocketClient {
   String _deviceRole = 'chest';
   int _sequence = 0;
   int _packetsSent = 0;
+  int _sessionPacketsSentBaseline = 0;
   int _packetsBuffered = 0;
   int _flushCounter = 0;
   DateTime? _lastPong;
@@ -63,22 +66,31 @@ class WebSocketClient {
   String _sessionTag = '';
   String _sessionOperator = '';
 
-  String? _serverState;          // authoritative backend session state, from PONG
-  String? _serverLateSid;        // session still accepting late telemetry, or null
-  DateTime? _lastStateAtMs;      // when we last heard authoritative state
-  DateTime? _offlineSince;       // for the UI's "offline for 00:24" timer
-  DateTime? _lostAtMs;           // when the last connection gap began (sidecar)
+  String? _serverState; // authoritative backend session state, from PONG
+  String? _serverLateSid; // session still accepting late telemetry, or null
+  DateTime? _lastStateAtMs; // when we last heard authoritative state
+  DateTime? _offlineSince; // for the UI's "offline for 00:24" timer
+  DateTime? _lostAtMs; // when the last connection gap began (sidecar)
+  DateTime? _lastTelemetryProgressAt;
+  int? _backendTelemetryPackets;
+  int? _backendTelemetryAgeMs;
+
+  // Keep this aligned with pubspec.yaml. It is sent to the backend so operators can see
+  // whether a phone is running the build that was actually tested.
+  static const String _reportedAppVersion = '2.2.0';
+  static const Duration _telemetryStaleAfter = Duration(seconds: 12);
 
   String? get serverState => _serverState;
   String? get serverLateSid => _serverLateSid;
   DateTime? get lastStateAt => _lastStateAtMs;
   DateTime? get offlineSince => _offlineSince;
+
   /// True when we believe we are recording but have not heard from the backend
   /// for >15 s — the UI must show this as "unconfirmed", never as a confident red.
   bool get isRecordingUnconfirmed =>
       _activeSessionId != null &&
       (_lastStateAtMs == null ||
-       DateTime.now().difference(_lastStateAtMs!).inSeconds > 15);
+          DateTime.now().difference(_lastStateAtMs!).inSeconds > 15);
 
   // Pending CLOCK_SYNC requests: commandId → t0Ms
   final Map<String, int> _pendingSyncs = {};
@@ -103,25 +115,26 @@ class WebSocketClient {
       ConnDebug.log('connect($serverIp) early-return: state=$_state');
       return true;
     }
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _serverIp = serverIp;
     _lastConnectError = null;
     RecoveryUploader().configure(_serverIp);
     _setState(WsState.connecting);
     ConnDebug.log('connect begin -> $serverIp, state=connecting');
 
-    // Cancel any stale subscriptions from a previous (now-dead) connection so their
-    // onDone/onError cannot fire against the new connection (Defect D).
-    await _controlSub?.cancel();
-    await _telemetrySub?.cancel();
-    _controlSub = null;
-    _telemetrySub = null;
+    // Cancel subscriptions and close old channels before creating replacements. This is
+    // important for a half-open telemetry socket: leaving it alive lets sink.add accept
+    // bytes locally while no server can ever read them.
+    await _disposeChannels();
 
     _deviceId = await DeviceIdService().getDeviceId();
     _deviceRole = await DeviceIdService().getDeviceRole();
     await DeviceIdService().saveServerIp(serverIp);
     // Persist the desired endpoint so a restarted foreground-task engine can
     // reconnect without the UI re-issuing a connect command.
-    await SessionPersistence().saveDesired(serverIp: serverIp, deviceRole: _deviceRole);
+    await SessionPersistence()
+        .saveDesired(serverIp: serverIp, deviceRole: _deviceRole);
     await _restoreSequenceIfInterrupted();
 
     try {
@@ -154,8 +167,12 @@ class WebSocketClient {
       // on the next reconnect (Defect D).
       _telemetrySub = _telemetry!.stream.listen(
         null,
-        onDone: () { if (_state == WsState.connected) _onControlDisconnect(); },
-        onError: (_) { if (_state == WsState.connected) _onControlDisconnect(); },
+        onDone: () {
+          if (_state == WsState.connected) _onControlDisconnect();
+        },
+        onError: (_) {
+          if (_state == WsState.connected) _onControlDisconnect();
+        },
         cancelOnError: true,
       );
 
@@ -164,8 +181,12 @@ class WebSocketClient {
       // Reset the pong clock so the first ping-timer tick after (re)connect does not
       // immediately time out on a stale _lastPong (Defect A — the critical fix).
       _lastPong = DateTime.now();
+      _backendTelemetryPackets = null;
+      _backendTelemetryAgeMs = null;
+      _lastTelemetryProgressAt = DateTime.now();
       _startPingTimer();
       _startClockSync();
+      _startTelemetryWatchdog();
       // Start foreground service to keep process alive when screen is off.
       // Guard inside start() means repeated calls on reconnect are safe.
       await ForegroundServiceHandler().start();
@@ -181,6 +202,7 @@ class WebSocketClient {
       // against a dead socket (Defect B).
       _lastConnectError = _describeConnectError(e);
       ConnDebug.log('connect FAILED -> $serverIp: $_lastConnectError | raw=$e');
+      await _disposeChannels();
       _setState(WsState.offline);
       _scheduleReconnect();
       return false;
@@ -189,11 +211,61 @@ class WebSocketClient {
 
   String _describeConnectError(Object e) {
     final s = e.toString().toLowerCase();
-    if (s.contains('timeout')) return 'Timed out — laptop unreachable. Same Wi-Fi? Backend running? IP correct?';
-    if (s.contains('refused')) return 'Connection refused — backend not started on :8000 at this IP.';
-    if (s.contains('failed host lookup') || s.contains('no address')) return 'Bad IP address — re-check the number.';
-    if (s.contains('network is unreachable')) return 'Phone not on the same network as the laptop.';
+    if (s.contains('timeout'))
+      return 'Timed out — laptop unreachable. Same Wi-Fi? Backend running? IP correct?';
+    if (s.contains('refused'))
+      return 'Connection refused — backend not started on :8000 at this IP.';
+    if (s.contains('failed host lookup') || s.contains('no address'))
+      return 'Bad IP address — re-check the number.';
+    if (s.contains('network is unreachable'))
+      return 'Phone not on the same network as the laptop.';
     return 'Could not connect. Check Wi-Fi, backend status, and the IP.';
+  }
+
+  Future<void> _disposeChannels() async {
+    await _controlSub?.cancel();
+    await _telemetrySub?.cancel();
+    _controlSub = null;
+    _telemetrySub = null;
+    for (final channel in <WebSocketChannel?>[_control, _telemetry]) {
+      try {
+        await channel?.sink.close().timeout(const Duration(seconds: 1));
+      } catch (_) {
+        // A dead socket is already in the desired state.
+      }
+    }
+    _control = null;
+    _telemetry = null;
+  }
+
+  void _startTelemetryWatchdog() {
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_state != WsState.connected || _activeSessionId == null) return;
+      if (_packetsSent <= _sessionPacketsSentBaseline) return;
+
+      final lastProgress = _lastTelemetryProgressAt;
+      final backendAge = _backendTelemetryAgeMs;
+      final staleByAge = backendAge != null &&
+          backendAge >= _telemetryStaleAfter.inMilliseconds;
+      final staleByCounter = lastProgress != null &&
+          DateTime.now().difference(lastProgress) >= _telemetryStaleAfter;
+      if (!staleByAge && !staleByCounter) return;
+
+      ConnDebug.log(
+        'telemetry stalled; reconnecting '
+        '(backend_age_ms=$backendAge, backend_packets=$_backendTelemetryPackets)',
+      );
+      LocalSessionRecorder().logEvent({
+        'type': 'telemetry_stale',
+        'telemetry_age_ms': backendAge,
+        'telemetry_packets': _backendTelemetryPackets,
+        'time_ms': DateTime.now().millisecondsSinceEpoch,
+      });
+      _emitEvent(
+          {'type': 'telemetry_reconnect', 'telemetry_age_ms': backendAge});
+      _onControlDisconnect();
+    });
   }
 
   // ── Attach sensor stream ─────────────────────────────────────────────────
@@ -236,17 +308,21 @@ class WebSocketClient {
 
     // Local guarantee: this write happens whether or not the network exists (plan T12).
     LocalSessionRecorder().write(raw,
-        timestampMs: correctedNow, sequence: seq, deviceId: _deviceId,
-        labelId: _activeLabelId, labelName: _activeLabelName,
+        timestampMs: correctedNow,
+        sequence: seq,
+        deviceId: _deviceId,
+        labelId: _activeLabelId,
+        labelName: _activeLabelName,
         accTsMs: _hwTsToCorrectedMs(raw.accTs, correctedNow),
         gyroTsMs: _hwTsToCorrectedMs(raw.gyroTs, correctedNow),
         sampleKind: raw.isHeld ? 1 : 0);
 
-    // Persist the sequence counter on BOTH the online and offline paths — persisting only
-    // while connected meant a process kill during an offline stretch restored a sequence
-    // number stale by the whole outage, defeating the D5 fix's +5000 margin (plan R5).
+    // Persist the sequence counter on BOTH the online and offline paths. The checkpoint is
+    // deliberately fire-and-forget so the sensor callback never waits on disk; the
+    // persistence service serializes these writes. A restart resumes at the checkpoint's
+    // next sequence and relies on backend/local deduplication for the small uncertain tail.
     if (_activeSessionId != null && seq % 250 == 0) {
-      _persistSequence(seq);
+      unawaited(_persistSequence(seq));
     }
 
     if (_state == WsState.connected && _telemetry != null) {
@@ -265,7 +341,8 @@ class WebSocketClient {
       }
       buf.enqueue(bytes);
       _packetsBuffered = buf.bufferedCount;
-      ForegroundServiceHandler().updateNotification(_packetsSent, _packetsBuffered);
+      ForegroundServiceHandler()
+          .updateNotification(_packetsSent, _packetsBuffered);
     }
   }
 
@@ -275,8 +352,10 @@ class WebSocketClient {
   /// rather than trusting a wrong number.
   int _hwTsToCorrectedMs(DateTime? ts, int correctedNow) {
     if (ts == null) return 0;
-    final candidate = ts.millisecondsSinceEpoch + ClockSyncService().clockOffsetMs;
-    if ((candidate - correctedNow).abs() > 3600000) return 0;   // > 1h off => not epoch-based
+    final candidate =
+        ts.millisecondsSinceEpoch + ClockSyncService().clockOffsetMs;
+    if ((candidate - correctedNow).abs() > 3600000)
+      return 0; // > 1h off => not epoch-based
     return candidate;
   }
 
@@ -330,8 +409,9 @@ class WebSocketClient {
           final sid = payload['session_id']?.toString();
           _sessionSubject = payload['subject']?.toString() ?? _sessionSubject;
           _sessionTag = payload['session_tag']?.toString() ?? _sessionTag;
-          _sessionOperator = payload['operator']?.toString() ?? _sessionOperator;
-          _sequence = 0;   // Reset sequence counter for new session
+          _sessionOperator =
+              payload['operator']?.toString() ?? _sessionOperator;
+          _sequence = 0; // Reset sequence counter for new session
           await _setActiveSession(sid);
 
           // Coordinated start: wait until scheduled_start_ms (CLAUDE.md §22.5)
@@ -359,8 +439,10 @@ class WebSocketClient {
       case CommandType.SET_LABEL:
         try {
           final payload = jsonDecode(cmd.payload) as Map<String, dynamic>;
-          _activeLabelId = int.tryParse(payload['label_id'].toString()) ?? _activeLabelId;
-          _activeLabelName = payload['label_name']?.toString() ?? _activeLabelId.toString();
+          _activeLabelId =
+              int.tryParse(payload['label_id'].toString()) ?? _activeLabelId;
+          _activeLabelName =
+              payload['label_name']?.toString() ?? _activeLabelId.toString();
         } catch (_) {}
         _emitEvent({'type': 'set_label', 'payload': cmd.payload});
 
@@ -377,7 +459,8 @@ class WebSocketClient {
   // missed a START or a STOP while offline is corrected within ~1 s of reconnecting
   // instead of staying wrong forever (plan D1).
   Future<void> _applyServerState(String payload) async {
-    if (payload.isEmpty) return;            // old backend → no information, keep today's behaviour
+    if (payload.isEmpty)
+      return; // old backend → no information, keep today's behaviour
     Map<String, dynamic> p;
     try {
       p = jsonDecode(payload) as Map<String, dynamic>;
@@ -396,6 +479,20 @@ class WebSocketClient {
     _serverLateSid = nonEmpty(p['late_sid']);
     _lastStateAtMs = DateTime.now();
 
+    final telemetryPackets = p['telemetry_packets'];
+    if (telemetryPackets is num) {
+      final next = telemetryPackets.toInt();
+      if (_backendTelemetryPackets == null ||
+          next != _backendTelemetryPackets) {
+        _lastTelemetryProgressAt = DateTime.now();
+      }
+      _backendTelemetryPackets = next;
+    }
+    final telemetryAge = p['telemetry_age_ms'];
+    if (telemetryAge is num) {
+      _backendTelemetryAgeMs = telemetryAge.toInt();
+    }
+
     final sid = nonEmpty(p['session_id']);
     final serverRecording = state == 'RECORDING';
 
@@ -404,13 +501,21 @@ class WebSocketClient {
       final ended = _activeSessionId!;
       await _setActiveSession(null);
       SessionPersistence().clear();
-      _emitEvent({'type': 'stop_session', 'reason': 'state_resync', 'session_id': ended});
+      _emitEvent({
+        'type': 'stop_session',
+        'reason': 'state_resync',
+        'session_id': ended
+      });
     } else if (serverRecording && sid != null && _activeSessionId != sid) {
       // A session is running that we are not part of — we missed the START, or a new
       // session began while we were dark. Adopt it and start a fresh dedup namespace.
       _sequence = 0;
       await _setActiveSession(sid);
-      _emitEvent({'type': 'start_session', 'reason': 'state_resync', 'session_id': sid});
+      _emitEvent({
+        'type': 'start_session',
+        'reason': 'state_resync',
+        'session_id': sid
+      });
     }
   }
 
@@ -421,6 +526,10 @@ class WebSocketClient {
   Future<void> _setActiveSession(String? sid, {String subject = ''}) async {
     if (_activeSessionId == sid) return;
     _activeSessionId = sid;
+    _sessionPacketsSentBaseline = _packetsSent;
+    _backendTelemetryPackets = null;
+    _backendTelemetryAgeMs = null;
+    _lastTelemetryProgressAt = DateTime.now();
     if (sid == null) {
       // Stop accepting sensor samples before closing the recorder so the file
       // drains on a clean boundary (task-engine lifecycle, plan T23).
@@ -428,14 +537,21 @@ class WebSocketClient {
       await LocalSessionRecorder().stop();
     } else {
       await LocalSessionRecorder().start(
-        sessionId: sid, role: _deviceRole, deviceId: _deviceId, subject: _sessionSubject,
-        sessionTag: _sessionTag, operator: _sessionOperator);
+          sessionId: sid,
+          role: _deviceRole,
+          deviceId: _deviceId,
+          subject: _sessionSubject,
+          sessionTag: _sessionTag,
+          operator: _sessionOperator);
       // Sensors are acquired here — owned by the running isolate (the task
       // engine), gated to an active session, not by any widget lifecycle.
       InternalSensorManager().start(frequency: 100);
-      // Checkpoint the active-session flag immediately (before any ack/read) so
-      // a process kill right after START still resumes this recording.
-      unawaited(_persistSequence(0));
+      // Checkpoint the active-session flag immediately (before any ack/read) so a process
+      // kill right after START still resumes this recording. On a resumed session, keep
+      // the restored checkpoint instead of overwriting it with zero; the next packet will
+      // then use the checkpoint's next sequence number.
+      final checkpoint = _sequence == 0 ? 0 : _sequence - 1;
+      unawaited(_persistSequence(checkpoint));
     }
   }
 
@@ -455,19 +571,25 @@ class WebSocketClient {
     // duplicate signal so reconnect attempts never stack (Defect C).
     if (_state != WsState.connected) return;
     _setState(WsState.offline);
-    _serverState = null;      // never gate a buffer flush on a stale "RECORDING"
+    _serverState = null; // never gate a buffer flush on a stale "RECORDING"
     _serverLateSid = null;
     _offlineSince = DateTime.now();
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = null;
+    unawaited(_disposeChannels());
     if (_activeSessionId != null) {
-      ForegroundServiceHandler().updateStatus('⚠ DISCONNECTED — buffering locally');
+      ForegroundServiceHandler()
+          .updateStatus('⚠ DISCONNECTED — buffering locally');
     }
     _scheduleReconnect();
   }
 
   void _scheduleReconnect() {
-    Future.delayed(const Duration(seconds: 3), () async {
+    if (_reconnectTimer != null) return;
+    _reconnectTimer = Timer(const Duration(seconds: 3), () async {
+      _reconnectTimer = null;
       if (_state != WsState.offline) return;
       await connect(_serverIp);
       // Reconciliation + flush now happen inside connect()'s success path for every
@@ -493,7 +615,8 @@ class WebSocketClient {
     // that does not match an open (or late-window) session, and the old code then erased
     // the local copy on "flush completed" — which only meant the socket accepted the
     // bytes, never that anything was written (plan D3).
-    final target = (_serverState == 'RECORDING') ? _activeSessionId : _serverLateSid;
+    final target =
+        (_serverState == 'RECORDING') ? _activeSessionId : _serverLateSid;
     if (target == null || buf.sessionId == null || buf.sessionId != target) {
       final moved = await buf.quarantine();
       _packetsBuffered = 0;
@@ -502,13 +625,20 @@ class WebSocketClient {
         'time_ms': DateTime.now().millisecondsSinceEpoch,
         'count': moved.length,
       });
-      _emitEvent({'type': 'buffer_orphaned', 'files': moved, 'session_id': buf.sessionId});
+      _emitEvent({
+        'type': 'buffer_orphaned',
+        'files': moved,
+        'session_id': buf.sessionId
+      });
       return;
     }
 
     bool completed = true;
     await for (final bytes in buf.flushStream()) {
-      if (_state != WsState.connected) { completed = false; break; }
+      if (_state != WsState.connected) {
+        completed = false;
+        break;
+      }
       _telemetry?.sink.add(bytes);
       if (++_flushCounter % 200 == 0) {
         // Re-check the target: a new session may have started mid-flush, and the rest of
@@ -516,8 +646,12 @@ class WebSocketClient {
         final stillValid = (_serverState == 'RECORDING')
             ? (_activeSessionId == target)
             : (_serverLateSid == target);
-        if (!stillValid) { completed = false; break; }
-        await Future.delayed(const Duration(milliseconds: 2));   // pace the sink, no backpressure
+        if (!stillValid) {
+          completed = false;
+          break;
+        }
+        await Future.delayed(
+            const Duration(milliseconds: 2)); // pace the sink, no backpressure
       }
     }
     if (completed && _state == WsState.connected) {
@@ -543,7 +677,7 @@ class WebSocketClient {
       deviceRole: _deviceRole,
       deviceModel: 'Android',
       androidVersion: '',
-      appVersion: '2.0.0',
+      appVersion: _reportedAppVersion,
       schemaVersion: 1,
     );
     _control?.sink.add(proto.toBytes());
@@ -558,7 +692,8 @@ class WebSocketClient {
 
   void _startPingTimer() {
     _pingTimer?.cancel();
-    _lastPong = DateTime.now();   // fresh grace window each time the timer (re)starts
+    _lastPong =
+        DateTime.now(); // fresh grace window each time the timer (re)starts
     _pingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       sendCommand(CommandProto(
         type: CommandType.PING,
@@ -600,22 +735,24 @@ class WebSocketClient {
 
   Future<void> _persistSequence(int seq) async {
     if (_activeSessionId == null) return;
-    await SessionPersistence().save(
-      sessionId: _activeSessionId!,
-      deviceId: _deviceId,
-      serverIp: _serverIp,
-      clockOffsetMs: ClockSyncService().clockOffsetMs,
-      lastSequenceNumber: seq,
-      deviceRole: _deviceRole,
-    );
+    try {
+      await SessionPersistence().save(
+        sessionId: _activeSessionId!,
+        deviceId: _deviceId,
+        serverIp: _serverIp,
+        clockOffsetMs: ClockSyncService().clockOffsetMs,
+        lastSequenceNumber: seq,
+        deviceRole: _deviceRole,
+      );
+    } catch (e) {
+      ConnDebug.log('sequence checkpoint failed at $seq: $e');
+    }
   }
 
   // The backend dedups on (device_id, session_id, sequence_number). After a process kill
-  // (MIUI does this routinely) _sequence restarted at 0 while the backend had already seen
-  // 0…N for this session, so every packet was silently discarded until the counter caught
-  // up — up to the entire remaining session (plan D5). Resume above the last persisted
-  // value with a margin larger than the persistence interval. Sequence gaps are harmless:
-  // dedup is keyed on exact values, not ranges.
+  // (MIUI does this routinely), resume from the last persisted checkpoint rather than
+  // restarting at zero. The local rescue CSV supplies the uncertain tail and the backend
+  // drops any duplicate sequence values that were already accepted.
   Future<void> _restoreSequenceIfInterrupted() async {
     if (_activeSessionId != null || _sequence != 0) return;
     final saved = await SessionPersistence().loadInterrupted();
@@ -624,12 +761,21 @@ class WebSocketClient {
     final sid = saved['session_id']?.toString();
     final last = (saved['last_sequence_number'] as num?)?.toInt();
     if (sid == null || last == null) return;
-    _sequence = last + 5000;
+    // The old +5000 safety margin made every process restart look like thousands of lost
+    // samples to the integrity validator. Resume at the checkpoint's next sequence instead:
+    // packets emitted before the crash are safely de-duplicated by (device, session, seq),
+    // while the local rescue CSV supplies any tail the backend did not receive.
+    _sequence = last + 1;
     // Resume the local recorder immediately, even before the control socket reconnects —
     // it is the guarantee that must not wait on the network (plan T12).
     await _setActiveSession(sid);
-    await FallbackBufferManager().loadMeta();     // re-attach any surviving buffer to its session
-    _emitEvent({'type': 'session_resumed', 'session_id': sid, 'from_sequence': _sequence});
+    await FallbackBufferManager()
+        .loadMeta(); // re-attach any surviving buffer to its session
+    _emitEvent({
+      'type': 'session_resumed',
+      'session_id': sid,
+      'from_sequence': _sequence
+    });
   }
 
   // ── Disconnect ───────────────────────────────────────────────────────────
@@ -639,17 +785,21 @@ class WebSocketClient {
       _emitEvent({
         'type': 'disconnect_refused',
         'session_id': _activeSessionId,
-        'reason': 'An active session can only be stopped by the backend operator.',
+        'reason':
+            'An active session can only be stopped by the backend operator.',
       });
       return;
     }
     _pingTimer?.cancel();
     _resyncTimer?.cancel();
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _telemetryWatchdog?.cancel();
+    _telemetryWatchdog = null;
     _sensorSub?.cancel();
-    _controlSub?.cancel();
-    await _control?.sink.close();
-    await _telemetry?.sink.close();
-    await LocalSessionRecorder().stop();   // close the file cleanly; no unflushed tail (plan R8)
+    await _disposeChannels();
+    await LocalSessionRecorder()
+        .stop(); // close the file cleanly; no unflushed tail (plan R8)
     _setState(WsState.disconnected);
     await FallbackBufferManager().deactivate();
     // Stop foreground service only on explicit disconnect, not on temporary drops.
@@ -666,7 +816,8 @@ class WebSocketClient {
       if (prev == WsState.connected && s != WsState.connected) {
         AlertService().startAlarm();
         _lostAtMs = DateTime.now();
-        LocalSessionRecorder().logEvent({'type': 'connection_lost', 'time_ms': nowMs});
+        LocalSessionRecorder()
+            .logEvent({'type': 'connection_lost', 'time_ms': nowMs});
       } else if (prev != WsState.connected && s == WsState.connected) {
         AlertService().stopAlarm();
         final dur = _lostAtMs != null
