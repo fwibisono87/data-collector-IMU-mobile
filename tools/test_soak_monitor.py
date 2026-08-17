@@ -160,6 +160,31 @@ class SerialCheckTest(unittest.TestCase):
         self.assertFalse(sm._serial_is_online(devices, "missing"))
 
 
+class FaultExecutionTest(unittest.TestCase):
+    def test_screen_injection_permission_failure_is_explicitly_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            fault = sm.Fault(index=0, at_sec=1.0, serial="phone-a", action="screen_off")
+            runner = _make_runner(
+                td, [fault],
+                last_devices=[{"serial": "phone-a", "state": "device"}],
+            )
+            try:
+                with mock.patch(
+                    "soak_monitor.subprocess.run",
+                    return_value=FakeProc(
+                        "", returncode=1,
+                        stderr="java.lang.SecurityException: Injecting input events requires the caller to hold INJECT_EVENTS permission",
+                    ),
+                ):
+                    runner._execute_fault(fault)
+                self.assertTrue(fault.skipped)
+                self.assertFalse(fault.executed)
+                self.assertIn("INJECT_EVENTS permission", fault.skipped_reason)
+                self.assertFalse(runner.degraded)
+            finally:
+                runner.close("test", 0)
+
+
 class CliTest(unittest.TestCase):
     def _parse(self, *extra: str) -> argparse.Namespace:
         return sm._parse_args(["--plan", "plan.json", *extra])

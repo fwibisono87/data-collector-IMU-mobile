@@ -58,6 +58,7 @@ _DEV_COL = 10
 _SEQ_COL = 9
 _consolidate_locks: dict[str, asyncio.Lock] = {}
 _bundle_locks: dict[str, asyncio.Lock] = {}
+_manifest_scan_cache: dict[str, tuple[tuple[tuple[str, int, int], ...], tuple[int, list[dict]]]] = {}
 
 
 def _session_folders(session_id: str) -> list[Path]:
@@ -241,10 +242,27 @@ def _scan_rows(csv_paths: list[Path]) -> tuple[int, list[dict]]:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     try:
+        # This is a disposable manifest index, not a durable database. Batch inserts and
+        # relax the temporary journal so a 20-minute three-device session does not turn
+        # every manifest poll into a minute-long end-session freeze.
+        conn.execute("PRAGMA journal_mode=MEMORY")
+        conn.execute("PRAGMA synchronous=OFF")
         conn.execute(
             "CREATE TABLE rows (device_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
             "label_id INTEGER, label_name TEXT, PRIMARY KEY(device_id, sequence))"
         )
+        batch: list[tuple[str, int, int, str]] = []
+
+        def flush_batch() -> None:
+            if not batch:
+                return
+            conn.executemany(
+                "INSERT OR IGNORE INTO rows(device_id, sequence, label_id, label_name) "
+                "VALUES (?, ?, ?, ?)",
+                batch,
+            )
+            batch.clear()
+
         for p in csv_paths:
             if not p.exists():
                 continue
@@ -262,13 +280,14 @@ def _scan_rows(csv_paths: list[Path]) -> tuple[int, list[dict]]:
                             label_id = int(parts[_LABEL_COL_ID])
                         except (ValueError, IndexError):
                             label_id = 0
-                        conn.execute(
-                            "INSERT OR IGNORE INTO rows(device_id, sequence, label_id, label_name) "
-                            "VALUES (?, ?, ?, ?)",
-                            (parts[_DEV_COL], sequence, label_id, parts[_LABEL_COL_NAME].strip()),
+                        batch.append(
+                            (parts[_DEV_COL], sequence, label_id, parts[_LABEL_COL_NAME].strip())
                         )
+                        if len(batch) >= 5000:
+                            flush_batch()
             except OSError:
                 continue
+        flush_batch()
         conn.commit()
         row_count = int(conn.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
         labels = [
@@ -476,7 +495,7 @@ async def export_manifest(session_id: str):
         return any(_mtime(p) >= _mtime(src) for p in per_role.get(role_key, []))
 
     late_has_rows = bool(late_summary and late_summary.get("devices")) or any(
-        f["kind"] == "late" for f in files
+        f["kind"] == "late" and int(f.get("size", 0) or 0) > 0 for f in files
     )
     if late_has_rows and has_per_role:
         late_pending = any(
@@ -536,9 +555,26 @@ async def export_manifest(session_id: str):
 
     data_paths = [Path(f["path"]) for f in files if f["kind"] in _SCAN_KINDS]
     recovery_paths = [Path(r["csv_path"]) for r in recovery if r.get("csv_exists")]
-    data_rows, labels = await asyncio.get_event_loop().run_in_executor(
-        None, _scan_rows, data_paths + recovery_paths
-    )
+    scan_paths = data_paths + recovery_paths
+    fingerprint: list[tuple[str, int, int]] = []
+    for path in scan_paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        fingerprint.append((str(path), stat.st_size, stat.st_mtime_ns))
+    scan_key = tuple(fingerprint)
+    cached = _manifest_scan_cache.get(session_id)
+    if cached is not None and cached[0] == scan_key:
+        data_rows, labels = cached[1]
+    else:
+        data_rows, labels = await asyncio.get_event_loop().run_in_executor(
+            None, _scan_rows, scan_paths
+        )
+        _manifest_scan_cache[session_id] = (scan_key, (data_rows, labels))
+        # Keep this process-local cache bounded when operators run many sessions.
+        if len(_manifest_scan_cache) > 64:
+            _manifest_scan_cache.pop(next(iter(_manifest_scan_cache)))
 
     meta = _session_meta(session_id)
     return {
@@ -573,8 +609,12 @@ async def export_manifest(session_id: str):
 @router.get("/export/{session_id}/file")
 async def export_file(session_id: str, name: str = Query(...)):
     """Stream one session artifact. `name` is a basename owned by the session."""
-    safe = Path(name).name
-    if safe != name or not safe.startswith(f"{session_id}_"):
+    # Some Chromium download paths can be reported with Windows separators even though
+    # the API contract is a basename. Normalize those separators before applying the
+    # basename/session guard; never relax the session prefix or folder containment checks.
+    normalized = name.replace("\\", "/")
+    safe = Path(normalized).name
+    if not safe.startswith(f"{session_id}_"):
         raise HTTPException(status_code=400, detail="invalid filename")
     for folder in _session_folders(session_id):
         fp = (folder / safe).resolve()

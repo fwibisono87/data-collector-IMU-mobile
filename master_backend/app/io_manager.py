@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 _FSYNC_INTERVAL = int(os.getenv("FSYNC_INTERVAL_SEC", "5"))
 _LATE_ACCEPT_SEC = int(os.getenv("LATE_ACCEPT_SEC", "600"))
 _SORT_ON_CLOSE = os.getenv("SORT_CSV_ON_CLOSE", "true").lower() == "true"
+_SORT_REPLACE_ATTEMPTS = max(1, int(os.getenv("SORT_REPLACE_ATTEMPTS", "5")))
+_SORT_REPLACE_BACKOFF_SEC = float(os.getenv("SORT_REPLACE_BACKOFF_SEC", "0.2"))
 _DEFAULT_LABEL_ID = 0
 _DEFAULT_LABEL_NAME = "0"
 
@@ -141,6 +143,7 @@ def _sort_rows_by_timestamp(path: Path) -> dict:
     out_of_order = 0
     previous_ts: int | None = None
     head: list[str] = []
+    replacement_succeeded = False
     try:
         try:
             db_path.unlink()
@@ -173,7 +176,8 @@ def _sort_rows_by_timestamp(path: Path) -> dict:
                 return {"reordered": 0}
 
             # Never truncate the only good CSV in place. A process death during the rewrite
-            # leaves the original intact and the temporary file is removed on restart.
+            # leaves the original intact; a failed replacement leaves this temporary output
+            # available for recovery instead of deleting it in the finalizer.
             with open(tmp, "w", encoding="utf-8", newline="") as out:
                 out.writelines(head)
                 for (payload,) in conn.execute(
@@ -182,7 +186,8 @@ def _sort_rows_by_timestamp(path: Path) -> dict:
                     out.write(payload)
                 out.flush()
                 os.fsync(out.fileno())
-            os.replace(tmp, path)
+            _replace_sorted_csv_with_retry(tmp, path)
+            replacement_succeeded = True
             return {"reordered": out_of_order}
         finally:
             conn.close()
@@ -191,10 +196,40 @@ def _sort_rows_by_timestamp(path: Path) -> dict:
             db_path.unlink()
         except OSError:
             pass
+        # If replacement failed, retain the fully-written sorted output as a recovery
+        # artifact. A transient Windows AV/indexer lock should not destroy the only copy
+        # that could be installed after the session is closed.
+        if replacement_succeeded:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _replace_sorted_csv_with_retry(source: Path, target: Path) -> None:
+    """Atomically install a sorted CSV, tolerating short-lived Windows file locks.
+
+    Windows can briefly deny ``os.replace`` while an AV/indexing process has opened the
+    just-written temporary file. Retrying only the replace keeps the original CSV intact
+    and avoids masking persistent failures as successful finalization.
+    """
+    last_error: OSError | None = None
+    for attempt in range(_SORT_REPLACE_ATTEMPTS):
         try:
-            tmp.unlink()
-        except OSError:
-            pass
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            # WinError 5 (access denied) and 32 (sharing violation) are the transient
+            # lock cases. Other errors indicate a real path/filesystem problem and should
+            # fail immediately.
+            winerror = getattr(exc, "winerror", None)
+            if not isinstance(exc, PermissionError) and winerror not in (5, 32):
+                raise
+            last_error = exc
+            if attempt + 1 < _SORT_REPLACE_ATTEMPTS:
+                time.sleep(_SORT_REPLACE_BACKOFF_SEC * (2 ** attempt))
+    assert last_error is not None
+    raise last_error
 
 
 class IoManager:
@@ -501,6 +536,7 @@ class IoManager:
                     sha = _sha256(writer._path)
                 except OSError:
                     sha = ""
+                sort_tmp = writer._path.with_name(writer._path.name + ".sort.tmp")
                 results[device_id] = {
                     "path": str(writer._path),
                     "rows": writer._rows_written,
@@ -509,6 +545,8 @@ class IoManager:
                     "close_error": str(exc),
                     "reordered": 0,
                 }
+                if sort_tmp.exists():
+                    results[device_id]["sort_recovery_path"] = str(sort_tmp)
 
         # No rename pass. Files used to be reopened under a corrected `_<n>hz_` token here,
         # which could fail and leave a stale label on correct data; now the name never

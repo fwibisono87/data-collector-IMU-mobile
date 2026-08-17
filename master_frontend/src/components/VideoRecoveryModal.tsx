@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   clearChunks,
+  invalidateSessionSaved,
   listAllChunkGroups,
   markCameraSaved,
   markSessionSaved,
@@ -48,7 +49,7 @@ async function saveOneCamera(
       // Finalizing reads the chunks twice (parse, then write), so each pass drives half
       // the progress bar rather than filling it twice.
       let pass = 0;
-      await finalizeWebmStream(
+      const result = await finalizeWebmStream(
         (onChunk) => {
           pass += 1;
           let done = 0;
@@ -60,6 +61,11 @@ async function saveOneCamera(
         },
         async (chunk) => { await writable.write(chunk); },
       );
+      if (!result.ok || result.ebmlHeaders !== 1 || result.bytesWritten <= 0) {
+        throw new Error(
+          `video validation failed${result.error ? `: ${result.error}` : ""}`,
+        );
+      }
       await writable.close();
     } catch (e) {
       try { await writable.abort(); } catch { /* ignore */ }
@@ -134,9 +140,10 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
     setError("");
     setProgress(p => ({ ...p, [k]: "" }));
     try {
+      await invalidateSessionSaved(sessionId);
       const result = await saveOneCamera(group, (done, total) =>
         setProgress(p => ({ ...p, [k]: `saving chunk ${done}/${total}…` })));
-      if (result.confirmed) await markCameraSaved(sessionId, camId, group.bytes);
+      if (result.confirmed) await markCameraSaved(sessionId, camId, group.bytes, true);
       setProgress(p => ({ ...p, [k]: "" }));
       await refresh();
     } catch (e) {
@@ -161,6 +168,7 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
     let failed = false;
     let allConfirmed = true;
     try {
+      await invalidateSessionSaved(sessionId);
       for (const cam of cams) {
         const camKey = keyOf(sessionId, cam.camId);
         let confirmed = false;
@@ -183,7 +191,7 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
         if (!confirmed) allConfirmed = false;
         savedCams.set(cam.camId, cam.bytes);
         totalBytes += cam.bytes;
-        if (confirmed) await markCameraSaved(sessionId, cam.camId, cam.bytes);
+        if (confirmed) await markCameraSaved(sessionId, cam.camId, cam.bytes, true);
       }
     } finally {
       mark(sessionId, undefined, undefined);
@@ -196,7 +204,7 @@ export default function VideoRecoveryModal({ open, onClose }: Props) {
     // be a stale closure from the render that created this handler.
     if (!aborted && !failed && allConfirmed && savedCams.size === cams.length) {
       try {
-        await markSessionSaved(sessionId, totalBytes);
+        await markSessionSaved(sessionId, totalBytes, true);
         await refresh();
       } catch (e) {
         setError(`Could not mark ${sessionId} saved: ${e}`);

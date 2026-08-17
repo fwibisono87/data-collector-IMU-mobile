@@ -32,8 +32,8 @@ Plan file schema (JSON):
 Allowed safe ADB actions (anything else is rejected at plan load):
     wifi_off    adb -s <serial> shell svc wifi disable
     wifi_on     adb -s <serial> shell svc wifi enable
-    screen_off  adb -s <serial> shell input keyevent 223    (KEYCODE_SLEEP)
-    screen_on   adb -s <serial> shell input keyevent 224    (KEYCODE_WAKEUP)
+    screen_off  adb -s <serial> shell input keyevent 223    (KEYCODE_SLEEP; may be unavailable on locked-down builds)
+    screen_on   adb -s <serial> shell input keyevent 224    (KEYCODE_WAKEUP; may be unavailable on locked-down builds)
     force_stop  adb -s <serial> shell am force-stop <package_name>
     launch      adb -s <serial> shell monkey -p <package_name>
                             -c android.intent.category.LAUNCHER 1
@@ -82,6 +82,7 @@ HTTP_TIMEOUT_SEC = 8.0
 ADB_SNAPSHOT_TIMEOUT_SEC = 30.0
 ADB_CMD_TIMEOUT_SEC = 30.0
 TAIL_MAX_CHARS = 1000
+SCREEN_INJECTION_DENIED = "INJECT_EVENTS permission"
 
 # Actions that don't need a package name, keyed by action name.
 SAFE_ACTIONS: dict[str, list[str]] = {
@@ -522,6 +523,25 @@ class SoakRunner:
         fault.executed = True
         ok = (fault.error is None and not fault.timed_out
               and fault.returncode == 0)
+        if (fault.action in {"screen_off", "screen_on"} and not ok
+                and SCREEN_INJECTION_DENIED in fault.stderr_tail):
+            # Some production Android builds reject shell input injection even over an
+            # authorised ADB connection. Report this as an unsupported test action rather
+            # than a device/app failure; the recording remains fully monitored and the
+            # evidence explicitly shows that the screen transition was not exercised.
+            fault.skipped = True
+            fault.executed = False
+            fault.skipped_reason = (
+                "screen input injection unavailable on this Android build: "
+                f"{SCREEN_INJECTION_DENIED}")
+            self._log_event("WARN", "fault_skipped", {
+                "fault_index": fault.index,
+                "serial": fault.serial,
+                "action": fault.action,
+                "reason": fault.skipped_reason,
+                "command": " ".join(fault.command),
+            })
+            return
         if not ok:
             self.degraded = True
         self._log_event("INFO" if ok else "ERROR", "fault_result", {

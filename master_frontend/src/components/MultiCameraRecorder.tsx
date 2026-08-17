@@ -5,6 +5,8 @@ import {
   clearConfirmedChunks,
   nextChunkIndex,
   recordCameraEvent,
+  listAllChunkGroups,
+  listCameraEvents,
 } from "@/lib/video_backup";
 
 // ── Public contract (consumed by page.tsx) ──────────────────────────────────
@@ -208,12 +210,43 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus, b
     setFlash(true);                          // operator-facing sync cue (parity with old)
     setTimeout(() => setFlash(false), 100);
   };
+  const recoverStoppedRecording = async (recorder: MediaRecorder): Promise<CameraResult | null> => {
+    const sessionId = sessionRef.current;
+    if (!sessionId) return null;
+    if (writeErrorRef.current) throw new Error(`${camId} video recorder failed: ${String(writeErrorRef.current)}`);
+
+    // MediaRecorder can become inactive without our stop() callback winning the race
+    // (track/device teardown, browser lifecycle, or a renderer interruption). The chunks
+    // are still the authoritative footage. Recover a durable stop marker from that ledger
+    // instead of reporting a missing camera and exporting stopped_at_ms=0.
+    const group = (await listAllChunkGroups()).find(
+      g => g.sessionId === sessionId && g.camId === camId && g.chunks > 0,
+    );
+    if (!group) return null;
+    const events = await listCameraEvents(sessionId);
+    const existingStop = events
+      .filter(e => e.camId === camId && e.type === "stopped")
+      .slice(-1)[0];
+    const stoppedAtMs = existingStop?.atMs ?? Date.now();
+    if (!existingStop) {
+      await recordCameraEvent(sessionId, camId, "stopped", `chunks=${group.chunks};recovered_inactive_recorder`);
+      postCameraMark(backendIp, sessionId, {
+        cam_id: camId, event: "stopped", ts_ms: stoppedAtMs, device_id: deviceId, label,
+      });
+    }
+    setIsRecording(false);
+    return {
+      camId, deviceId, label, mime: recorder.mimeType || "video/webm", sessionId,
+      chunkCount: group.chunks, startedAtMs: startedAtRef.current,
+      flashAtMs: flashAtRef.current, stoppedAtMs,
+    };
+  };
+
   const stopFn = async (): Promise<CameraResult | null> => {
     const recorder = mediaRef.current;
     if (!recorder) return null;
     if (recorder.state === "inactive") {
-      if (writeErrorRef.current) throw new Error(`${camId} video recorder failed: ${String(writeErrorRef.current)}`);
-      return null;
+      return recoverStoppedRecording(recorder);
     }
     const mime = recorder.mimeType || "";
     await new Promise<void>((resolve, reject) => {
@@ -234,7 +267,10 @@ function CameraTile({ camId, deviceId, label, deviceEpoch, register, onStatus, b
     if (chunkCount === 0) return null;
     // Do NOT clear here — chunks stay in IndexedDB so footage survives a blocked/aborted
     // download. They are GC'd at the start of the NEXT session (see startRecording). [Finding A]
-    void recordCameraEvent(sessionRef.current, camId, "stopped", `chunks=${chunkCount}`);
+    // The end-session modal reads lifecycle events immediately after every camera stop
+    // resolves. Await the IndexedDB transaction so a successful stop always has a durable
+    // marker before the modal evaluates camera integrity.
+    await recordCameraEvent(sessionRef.current, camId, "stopped", `chunks=${chunkCount}`);
     postCameraMark(backendIp, sessionRef.current, {
       cam_id: camId, event: "stopped", ts_ms: stoppedAtMs,
       device_id: deviceId, label, mime,

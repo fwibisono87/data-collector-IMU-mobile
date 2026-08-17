@@ -39,6 +39,8 @@ interface SavedRecord {
   sessionId: string;
   savedAtMs: number;
   bytes: number;
+  /** Only a marker written after successful WebM validation may unlock cleanup/Close. */
+  videoValidated?: boolean;
 }
 
 interface SavedCameraRecord {
@@ -47,6 +49,7 @@ interface SavedCameraRecord {
   camId: string;
   savedAtMs: number;
   bytes: number;
+  videoValidated?: boolean;
 }
 
 export interface CameraEvent {
@@ -192,6 +195,14 @@ export interface CameraSegment {
   to: number;
 }
 
+/** Byte ranges split at every WebM EBML header found in one camera's backup. */
+export interface CameraByteSegment {
+  from: number;
+  to: number;
+}
+
+const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
+
 /**
  * Chunk-index ranges for a camera, one per MediaRecorder run.
  *
@@ -217,6 +228,56 @@ export async function cameraSegments(sessionId: string, camId: string): Promise<
   return bounds.map((from, i) => ({
     from,
     to: i + 1 < bounds.length ? bounds[i + 1] : Infinity,
+  }));
+}
+
+/**
+ * Find every WebM stream boundary in a camera's raw backup.
+ *
+ * A browser can emit a second EBML header without our React lifecycle seeing a second
+ * MediaRecorder `started` event (for example when a camera track is replaced while the
+ * session remains live). Lifecycle-only ranges therefore still produced stacked WebM
+ * files. MediaRecorder puts the header at the beginning of the first Blob for each run;
+ * inspect only those Blob boundaries so an identical byte sequence inside video payload
+ * is not mistaken for a new stream.
+ */
+export async function cameraByteSegments(sessionId: string, camId: string): Promise<CameraByteSegment[]> {
+  const db = await openDb();
+  const keys: string[] = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAllKeys();
+    req.onsuccess = () => resolve(req.result as string[]);
+    req.onerror = () => reject(req.error);
+  });
+
+  const mine = keys
+    .map(k => ({ key: k, parsed: parseKey(k) }))
+    .filter(x => x.parsed && x.parsed.sessionId === sessionId && x.parsed.camId === camId)
+    .sort((a, b) => a.parsed!.index - b.parsed!.index);
+
+  const starts: number[] = [];
+  let byteOffset = 0;
+  for (const { key } of mine) {
+    const rec: ChunkRecord | undefined = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(key);
+      req.onsuccess = () => resolve(req.result as ChunkRecord | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    if (!rec) continue;
+    const head = new Uint8Array(await rec.blob.slice(0, 4).arrayBuffer());
+    if (head.length === 4 && EBML_MAGIC.every((b, k) => head[k] === b)) {
+      starts.push(byteOffset);
+    }
+    byteOffset += rec.blob.size;
+  }
+
+  const uniqueStarts = Array.from(new Set(starts)).sort((a, b) => a - b);
+  if (uniqueStarts.length === 0) return [{ from: 0, to: byteOffset }];
+  const bounds = uniqueStarts[0] === 0 ? uniqueStarts : [0, ...uniqueStarts];
+  return bounds.map((from, i) => ({
+    from,
+    to: i + 1 < bounds.length ? bounds[i + 1] : byteOffset,
   }));
 }
 
@@ -295,6 +356,50 @@ export async function streamChunkRange(
     });
     if (!rec) continue;
     await onChunk(rec.blob, parsed!.index);
+    n++;
+  }
+  return n;
+}
+
+/** Stream a camera's raw bytes from a half-open byte range without reassembling the file. */
+export async function streamCameraByteRange(
+  sessionId: string,
+  camId: string,
+  fromByte: number,
+  toByte: number,
+  onChunk: (blob: Blob, index: number) => Promise<void> | void,
+): Promise<number> {
+  const db = await openDb();
+  const keys: string[] = await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAllKeys();
+    req.onsuccess = () => resolve(req.result as string[]);
+    req.onerror = () => reject(req.error);
+  });
+
+  const mine = keys
+    .map(k => ({ key: k, parsed: parseKey(k) }))
+    .filter(x => x.parsed && x.parsed.sessionId === sessionId && x.parsed.camId === camId)
+    .sort((a, b) => a.parsed!.index - b.parsed!.index);
+
+  let byteOffset = 0;
+  let n = 0;
+  for (const { key, parsed } of mine) {
+    const rec: ChunkRecord | undefined = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(key);
+      req.onsuccess = () => resolve(req.result as ChunkRecord | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    if (!rec) continue;
+    const chunkStart = byteOffset;
+    const chunkEnd = chunkStart + rec.blob.size;
+    byteOffset = chunkEnd;
+    if (chunkEnd <= fromByte || chunkStart >= toByte) continue;
+    const start = Math.max(0, fromByte - chunkStart);
+    const end = Math.min(rec.blob.size, toByte - chunkStart);
+    if (end <= start) continue;
+    await onChunk(rec.blob.slice(start, end), parsed!.index);
     n++;
   }
   return n;
@@ -386,11 +491,15 @@ export async function clearChunks(sessionId: string, camId?: string): Promise<vo
  * Record that this session's footage reached disk. ONLY call this after a write handle has
  * closed successfully — not after `a.click()`, which cannot report failure.
  */
-export async function markSessionSaved(sessionId: string, bytes = 0): Promise<void> {
+export async function markSessionSaved(
+  sessionId: string,
+  bytes = 0,
+  videoValidated = false,
+): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SAVED, "readwrite");
-    const rec: SavedRecord = { sessionId, savedAtMs: Date.now(), bytes };
+    const rec: SavedRecord = { sessionId, savedAtMs: Date.now(), bytes, videoValidated };
     tx.objectStore(SAVED).put(rec);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -398,12 +507,17 @@ export async function markSessionSaved(sessionId: string, bytes = 0): Promise<vo
 }
 
 /** Confirm one camera's file reached disk. This lets recovery be completed camera-by-camera. */
-export async function markCameraSaved(sessionId: string, camId: string, bytes = 0): Promise<void> {
+export async function markCameraSaved(
+  sessionId: string,
+  camId: string,
+  bytes = 0,
+  videoValidated = false,
+): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SAVED_CAMERAS, "readwrite");
     const rec: SavedCameraRecord = {
-      key: `${sessionId}__${camId}`, sessionId, camId, savedAtMs: Date.now(), bytes,
+      key: `${sessionId}__${camId}`, sessionId, camId, savedAtMs: Date.now(), bytes, videoValidated,
     };
     tx.objectStore(SAVED_CAMERAS).put(rec);
     tx.oncomplete = () => resolve();
@@ -420,7 +534,11 @@ export async function listSavedSessions(): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SAVED, "readonly");
     const req = tx.objectStore(SAVED).getAll();
-    req.onsuccess = () => resolve((req.result as SavedRecord[]).map(r => r.sessionId));
+    req.onsuccess = () => resolve(
+      (req.result as SavedRecord[])
+        .filter(r => r.videoValidated === true)
+        .map(r => r.sessionId),
+    );
     req.onerror = () => reject(req.error);
   });
 }
@@ -430,8 +548,35 @@ async function listSavedCameras(): Promise<string[]> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(SAVED_CAMERAS, "readonly");
     const req = tx.objectStore(SAVED_CAMERAS).getAll();
-    req.onsuccess = () => resolve((req.result as SavedCameraRecord[]).map(r => r.key));
+    req.onsuccess = () => resolve(
+      (req.result as SavedCameraRecord[])
+        .filter(r => r.videoValidated === true)
+        .map(r => r.key),
+    );
     req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Invalidate a prior save proof before retrying an export. This does not delete any chunks
+ * or files; it only prevents an old/failed export from unlocking Close or cleanup after the
+ * new attempt fails validation.
+ */
+export async function invalidateSessionSaved(sessionId: string): Promise<void> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([SAVED, SAVED_CAMERAS], "readwrite");
+    tx.objectStore(SAVED).delete(sessionId);
+    const req = tx.objectStore(SAVED_CAMERAS).openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      const value = cursor.value as SavedCameraRecord;
+      if (value.sessionId === sessionId) cursor.delete();
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
 

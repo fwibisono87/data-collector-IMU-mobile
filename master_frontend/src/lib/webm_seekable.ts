@@ -50,24 +50,19 @@ export interface FinalizeResult {
 
 const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
 
-/** Counts EBML headers across chunk boundaries by carrying the last 3 bytes over. */
+/** Counts EBML headers at MediaRecorder Blob boundaries. */
 class HeaderCounter {
   count = 0;
-  private carry: number[] = [];
 
   feed(bytes: Uint8Array): void {
-    // Only the seam needs the carry; the body is scanned in place.
-    const seam = [...this.carry, ...Array.from(bytes.subarray(0, 3))];
-    for (let i = 0; i + 4 <= seam.length && i < this.carry.length; i++) {
-      if (EBML_MAGIC.every((b, k) => seam[i + k] === b)) this.count++;
-    }
-    for (let i = 0; i + 4 <= bytes.length; i++) {
-      if (
-        bytes[i] === 0x1a && bytes[i + 1] === 0x45 &&
-        bytes[i + 2] === 0xdf && bytes[i + 3] === 0xa3
-      ) this.count++;
-    }
-    this.carry = Array.from(bytes.subarray(Math.max(0, bytes.length - 3)));
+    // The EBML ID can occur naturally in compressed video payload. A new
+    // MediaRecorder stream starts a fresh Blob with the header at byte 0, so
+    // counting only Blob boundaries avoids rejecting a valid recording because
+    // of a payload coincidence while still detecting an appended recorder run.
+    if (
+      bytes.length >= 4 && bytes[0] === EBML_MAGIC[0] && bytes[1] === EBML_MAGIC[1] &&
+      bytes[2] === EBML_MAGIC[2] && bytes[3] === EBML_MAGIC[3]
+    ) this.count++;
   }
 }
 

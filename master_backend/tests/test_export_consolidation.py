@@ -260,6 +260,22 @@ def test_manifest_prefers_per_role_pending(store: dict):
     assert m["whole"] is False
 
 
+def test_manifest_ignores_empty_late_sidecar(store: dict):
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(1, 1, "DEV-CHEST"),
+    ])
+    (folder / f"{SESSION_ID}_chest_sensor_data_late.csv").write_bytes(b"")
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status": "PASS", "devices": []}', encoding="utf-8"
+    )
+
+    manifest = _run(export_manifest(SESSION_ID))
+
+    assert manifest["late_pending"] is False
+    assert manifest["recovery_pending"] is False
+
+
 # ── Version-tolerant merge ────────────────────────────────────────────────────
 
 

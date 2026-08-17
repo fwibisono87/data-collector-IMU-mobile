@@ -20,7 +20,7 @@ import MultiCameraRecorder, {
 import AmbientBackdrop from "@/components/AmbientBackdrop";
 import RecoveryModal from "@/components/RecoveryModal";
 import VideoRecoveryModal from "@/components/VideoRecoveryModal";
-import { clearChunks, listUnconfirmedSessions } from "@/lib/video_backup";
+import { clearChunks, isSessionSaved, listUnconfirmedSessions } from "@/lib/video_backup";
 import EndSessionModal, {
   type EndSessionInfo,
   type EndSessionVideoResult,
@@ -35,6 +35,11 @@ type Sample = { acc: number[]; gyro: number[]; ts: number };
 
 const PENDING_END_KEY = "imu.pending-end-session.v1";
 const ACKED_END_KEY = "imu.acked-end-session.v1";
+
+function normalizeBackendHost(value: string): string {
+  const host = value.trim();
+  return host.toLowerCase() === "localhost" ? "127.0.0.1" : host;
+}
 
 function readPendingEnd(): EndSessionInfo | null {
   try {
@@ -132,26 +137,88 @@ export default function Home() {
     finalizationInFlightRef.current = "";
   }, [endSession]);
 
+  const handleEndSessionClose = useCallback(() => {
+    const sid = endSession?.sessionId;
+    if (sid) {
+      // Closing is only exposed after a successful ZIP write. Repeat the acknowledgement
+      // here so a remounted/recovered modal cannot reopen the same terminal session after
+      // the operator has already confirmed the export.
+      localStorage.setItem(ACKED_END_KEY, sid);
+      localStorage.removeItem(PENDING_END_KEY);
+    }
+    setEndSession(null);
+    setEndVideoResults([]);
+    setEndMissed([]);
+    // The STOP response normally broadcasts IDLE, but a late modal/reconnect race can
+    // leave the dashboard showing FINALIZING. Ask the backend for an authoritative snapshot
+    // as the modal closes rather than leaving the operator on stale local state.
+    if (wsClient.isConnected) wsClient.getState();
+  }, [endSession]);
+
   // A terminal dialog is a recoverable workflow, not transient React state. Restore the
   // local pending session first; if the browser lost localStorage as well, ask the backend
   // ledger for the newest terminal record and reconstruct the same identity from disk.
   useEffect(() => {
     if (!isWsConnected || !backendIp || sessionState === "RECORDING" || endSession) return;
-    const pending = readPendingEnd();
-    const acked = localStorage.getItem(ACKED_END_KEY);
-    if (pending && pending.sessionId !== acked) {
-      setEndSession(pending);
-      return;
-    }
     let cancelled = false;
-    fetch(`http://${backendIp}:8000/session/recovery`)
-      .then(r => r.ok ? r.json() as Promise<{ sessions?: Array<Record<string, unknown>> }> : null)
-      .then(data => {
+    const restore = async () => {
+      const pending = readPendingEnd();
+      let acked = localStorage.getItem(ACKED_END_KEY);
+
+      // IndexedDB is the durable proof that the ZIP reached disk. LocalStorage can be
+      // missing after an origin change (127.0.0.1 vs localhost) or a browser cleanup;
+      // never reopen an already-exported session merely because that small acknowledgement
+      // record disappeared.
+      if (pending && pending.sessionId !== acked) {
+        let belongsToLiveBackend = true;
+        try {
+          const healthResponse = await fetch(`http://${backendIp}:8000/health`);
+          if (healthResponse.ok) {
+            const health = await healthResponse.json() as { session_state?: string; session_id?: string };
+            belongsToLiveBackend = String(health.session_id ?? "") === pending.sessionId ||
+              String(health.session_state ?? "") === "RECORDING";
+          }
+        } catch {
+          // Keep the pending session if the health probe is unavailable; the recovery
+          // endpoint below remains the fallback for a temporarily disconnected backend.
+        }
+        if (!belongsToLiveBackend) {
+          // A stale RECORDING ledger entry from an older backend/test process must not
+          // strand the dashboard in an empty end-session dialog after a reload.
+          localStorage.removeItem(PENDING_END_KEY);
+        } else {
+          const pendingSaved = await isSessionSaved(pending.sessionId).catch(() => false);
+          if (pendingSaved) {
+            acked = pending.sessionId;
+            localStorage.setItem(ACKED_END_KEY, acked);
+            localStorage.removeItem(PENDING_END_KEY);
+          } else if (!cancelled) {
+            setEndSession(pending);
+            return;
+          }
+        }
+      }
+
+      try {
+        const [response, healthResponse] = await Promise.all([
+          fetch(`http://${backendIp}:8000/session/recovery`),
+          fetch(`http://${backendIp}:8000/health`),
+        ]);
+        const data = response.ok
+          ? await response.json() as { sessions?: Array<Record<string, unknown>> }
+          : null;
+        const health = healthResponse.ok
+          ? await healthResponse.json() as { session_state?: string; session_id?: string }
+          : null;
+        const liveState = String(health?.session_state ?? "");
+        const liveSessionId = String(health?.session_id ?? "");
         if (cancelled || !data?.sessions?.length) return;
         const terminal = data.sessions.find(s => {
           const state = String(s.state ?? "");
-          return (s.terminal === true || s.startup_in_progress === true ||
-            ["RECORDING", "FINALIZING", "VALIDATING", "ERROR"].includes(state)) &&
+          const activeRecording = state === "RECORDING" && liveState === "RECORDING" &&
+            String(s.session_id ?? "") === liveSessionId;
+          return (s.terminal === true || s.startup_in_progress === true || activeRecording ||
+            ["FINALIZING", "VALIDATING", "ERROR"].includes(state)) &&
             String(s.session_id ?? "") !== acked;
         });
         if (!terminal) return;
@@ -161,10 +228,19 @@ export default function Home() {
           sessionTag: String(terminal.session_tag ?? ""),
           operator: String(terminal.operator ?? ""),
         };
+        const restoredSaved = await isSessionSaved(restored.sessionId).catch(() => false);
+        if (restoredSaved) {
+          localStorage.setItem(ACKED_END_KEY, restored.sessionId);
+          localStorage.removeItem(PENDING_END_KEY);
+          return;
+        }
         localStorage.setItem(PENDING_END_KEY, JSON.stringify(restored));
         setEndSession(restored);
-      })
-      .catch(() => {});
+      } catch {
+        // The live dashboard remains usable if the recovery endpoint is temporarily down.
+      }
+    };
+    void restore();
     return () => { cancelled = true; };
   }, [backendIp, endSession, isWsConnected, sessionState]);
 
@@ -245,12 +321,30 @@ export default function Home() {
           (previousState === "RECORDING" || previousState === "FINALIZING" ||
             previousState === "VALIDATING" || readPendingEnd()?.sessionId === su.session_id)
         ) {
-          void recoverTerminalSession({
+          const ended: EndSessionInfo = {
             sessionId: su.session_id,
             subject: su.subject ?? subject,
             sessionTag: su.session_tag ?? sessionTag,
             operator: su.operator ?? operator,
-          });
+          };
+          // STOP normally produces a late IDLE update after the export modal has already
+          // closed. Do not interpret that acknowledgement as a second terminal session;
+          // the old path reopened the modal and made the operator download the same ZIP
+          // again. The IndexedDB marker covers reload/origin-change cases where the local
+          // storage acknowledgement is absent.
+          const acknowledged = localStorage.getItem(ACKED_END_KEY) === su.session_id;
+          if (!acknowledged) {
+            void isSessionSaved(su.session_id).then(saved => {
+              if (saved) {
+                localStorage.setItem(ACKED_END_KEY, su.session_id);
+                localStorage.removeItem(PENDING_END_KEY);
+                return;
+              }
+              void recoverTerminalSession(ended);
+            }).catch(() => {
+              void recoverTerminalSession(ended);
+            });
+          }
         }
 
       } else if (msg.type === "LATE_DELIVERY") {
@@ -312,8 +406,9 @@ export default function Home() {
     const saved = localStorage.getItem("backendIp");
     if (!saved) return;
 
-    setBackendIp(saved);
-    wsClient.connect(saved);
+    const host = normalizeBackendHost(saved);
+    setBackendIp(host);
+    wsClient.connect(host);
 
     let tries = 0;
     const poll = setInterval(() => {
@@ -346,20 +441,22 @@ export default function Home() {
   const handleConnect = () => {
     armAudio();   // the click is the required user gesture before browser audio can play
     setConnectError("");
-    wsClient.connect(backendIp);
+    const host = normalizeBackendHost(backendIp);
+    setBackendIp(host);
+    wsClient.connect(host);
 
     // Poll until WS opens (max 5s).
     let tries = 0;
     const poll = setInterval(() => {
       if (wsClient.isConnected) {
         clearInterval(poll);
-        localStorage.setItem("backendIp", backendIp);
+        localStorage.setItem("backendIp", host);
         setIsWsConnected(true);
         setView("dashboard");
         wsClient.getState();
       } else if (++tries > 25) {
         clearInterval(poll);
-        probeBackend(backendIp).then(probe => {
+        probeBackend(host).then(probe => {
           if (probe.ok) {
             const ipHint = probe.lanIp && probe.lanIp !== backendIp
               ? ` Backend reports its IP is ${probe.lanIp} — try that.`
@@ -765,7 +862,7 @@ export default function Home() {
           missed={endMissed}
           backendIp={backendIp}
           recheckTick={endRecheckTick}
-          onClose={() => setEndSession(null)}
+          onClose={handleEndSessionClose}
           onDownloadComplete={(sid) => {
             localStorage.setItem(ACKED_END_KEY, sid);
             localStorage.removeItem(PENDING_END_KEY);

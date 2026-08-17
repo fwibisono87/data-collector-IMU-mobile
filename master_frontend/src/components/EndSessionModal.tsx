@@ -12,10 +12,11 @@ import {
 } from "@/lib/export_client";
 import { streamZipToDisk, canStreamSave, type StreamZipEntry } from "@/lib/zip_stream";
 import {
-  streamChunks,
-  streamChunkRange,
-  cameraSegments,
+  cameraByteSegments,
+  streamCameraByteRange,
   markSessionSaved,
+  isSessionSaved,
+  invalidateSessionSaved,
   listAllChunkGroups,
   listCameraEvents,
   type ChunkGroup,
@@ -117,6 +118,7 @@ export default function EndSessionModal({
   const [bundleResult, setBundleResult] = useState("");
   const [cameraGroups, setCameraGroups] = useState<ChunkGroup[]>([]);
   const [cameraEvents, setCameraEvents] = useState<CameraEvent[]>([]);
+  const sessionKey = session?.sessionId ?? "";
 
   // After a browser reload there is no in-memory CameraResult, but IndexedDB still has
   // the session's chunks. Reconstruct those cameras so the recovered footage is included
@@ -158,7 +160,14 @@ export default function EndSessionModal({
       .filter(e => e.type === "track_ended" || e.type === "write_error")
       .map(e => `${e.camId}: ${e.type.replace("_", " ")}`),
     ...cameraGroups
-      .filter(g => eventFor(g.camId, "started") && !eventFor(g.camId, "stopped"))
+      // The stop result is returned only after the IndexedDB stopped event has been
+      // committed, but the modal can render before its first evidence read observes that
+      // event. Prefer that in-memory proof while the short refresh below catches up.
+      .filter(g => {
+        const result = effectiveVideoResults.find(v => v.camId === g.camId);
+        const hasStoppedResult = Boolean(result?.stoppedAtMs);
+        return eventFor(g.camId, "started") && !eventFor(g.camId, "stopped") && !hasStoppedResult;
+      })
       .map(g => `${g.camId}: no durable stop marker`),
   ];
 
@@ -224,24 +233,44 @@ export default function EndSessionModal({
       setManifest(m);
     } catch (e) {
       setManifest(null);
-      setDataError(`Could not read session data from backend: ${e}`);
+      setDataError(
+        `Backend finalization is still unavailable (${e instanceof Error ? e.message : String(e)}). ` +
+        "The recording may still be intact; use Re-check in a moment before treating it as missing.",
+      );
     } finally {
       setPhase("idle");
       setProgressText("");
     }
   }, [session, backendIp]);
 
-  // (Re)load whenever opened or externally poked (late delivery arrived).
+  const refreshCameraEvidence = useCallback(async () => {
+    if (!session) return;
+    const [groups, events] = await Promise.all([
+      listAllChunkGroups(),
+      listCameraEvents(session.sessionId),
+    ]);
+    setCameraGroups(groups.filter(g => g.sessionId === session.sessionId));
+    setCameraEvents(events);
+  }, [session]);
+
+  // (Re)load whenever opened or externally poked (late delivery arrived). Stop markers
+  // are written asynchronously to the browser ledger, so take a few bounded follow-up
+  // snapshots; this removes a false "no durable stop marker" warning without keeping the
+  // modal in a polling loop forever.
   useEffect(() => {
     if (!session) return;
     loadManifest();
-    listAllChunkGroups()
-      .then(groups => setCameraGroups(groups.filter(g => g.sessionId === session.sessionId)))
-      .catch(() => setCameraGroups([]));
-    listCameraEvents(session.sessionId)
-      .then(setCameraEvents)
-      .catch(() => setCameraEvents([]));
-  }, [session, recheckTick, loadManifest]);
+    void refreshCameraEvidence().catch(() => {
+      setCameraGroups([]);
+      setCameraEvents([]);
+    });
+    const timers = [500, 1500, 3500, 7000].map(delay =>
+      window.setTimeout(() => {
+        void refreshCameraEvidence().catch(() => { /* retain the last good evidence */ });
+      }, delay),
+    );
+    return () => timers.forEach(timer => window.clearTimeout(timer));
+  }, [session, recheckTick, loadManifest, refreshCameraEvidence]);
 
   // Reset the success/error state only when a NEW session is opened, not on re-check —
   // a re-check after a successful download must not silently reset the user's ability
@@ -251,11 +280,27 @@ export default function EndSessionModal({
     setDownloadError("");
     setPhase("idle");
     setProgressText("");
-  }, [session]);
+    if (!sessionKey) return;
+
+    // The modal can receive a fresh EndSessionInfo object after a late STATE_UPDATE,
+    // or be recreated after a dashboard reload. The ZIP is already durable in that
+    // case, so restore the close affordance from the IndexedDB save marker instead of
+    // forcing the operator to download the same recording again.
+    let cancelled = false;
+    isSessionSaved(sessionKey)
+      .then(saved => {
+        if (!cancelled && saved) setDownloaded(true);
+      })
+      .catch(() => { /* a missing IndexedDB record leaves the download action available */ });
+    return () => { cancelled = true; };
+  }, [sessionKey]);
 
   // ── Pull & consolidate ──────────────────────────────────────────────────
   const handleConsolidate = async () => {
     if (!session) return;
+    // Consolidation is independent of browser ZIP export. Do not leave a stale ZIP
+    // progress message visible while this workflow is running or after it completes.
+    setDownloadProgress("");
     setPhase("waiting");
     setConsolidateResult("");
     setDataError("");
@@ -337,23 +382,49 @@ export default function EndSessionModal({
     videoReport: VideoFinalizeReport[],
   ): Promise<StreamZipEntry[]> => {
     const entries: StreamZipEntry[] = [];
+    const cameraFiles = new Map<string, string[]>();
+    const videoDone: Promise<void>[] = [];
+    // Read the ledger at export time. The modal can render before the final IndexedDB
+    // event transaction becomes visible, so a captured `cameraEvents` state value can be
+    // stale even when the stop result is already safe to export.
+    const exportCameraEvents = await listCameraEvents(sid);
 
     // Video — streamed chunk-by-chunk straight from IndexedDB, never concatenated, and
     // finalized on the way out so the saved file carries a real Duration and Cues.
     // One file per MediaRecorder run: a second run writes a second EBML header, and a
     // player stops dead at that boundary (this is what broke session 1786677865027).
     for (const r of effectiveVideoResults) {
-      const segments = await cameraSegments(sid, r.camId);
+      // Lifecycle events are not enough to detect every browser-level MediaRecorder
+      // restart: a replaced track can put a second EBML header in the same recorder
+      // range without a second React "started" event. Split on the actual byte headers
+      // so every exported part is independently playable.
+      const segments = await cameraByteSegments(sid, r.camId);
       segments.forEach((seg, i) => {
         const suffix = i === 0 ? "" : `_part${i + 1}`;
         const path = `videos/${sid}_${r.camId}_video_sync${suffix}.${_ext(r)}`;
+        const files = cameraFiles.get(r.camId) ?? [];
+        files.push(path);
+        cameraFiles.set(r.camId, files);
+        let resolveVideo: () => void = () => {};
+        let rejectVideo: (error: unknown) => void = () => {};
+        const done = new Promise<void>((resolve, reject) => {
+          resolveVideo = resolve;
+          rejectVideo = reject;
+        });
+        videoDone.push(done);
         entries.push({
           path,
           write: async (sink) => {
-            const read = (onChunk: (b: Blob) => Promise<void>) =>
-              streamChunkRange(sid, r.camId, seg.from, seg.to, onChunk).then(() => {});
-            const res = await finalizeWebmStream(read, trackBytes(sink, tally));
-            videoReport.push({ path, camId: r.camId, ...res });
+            try {
+              const read = (onChunk: (b: Blob) => Promise<void>) =>
+                streamCameraByteRange(sid, r.camId, seg.from, seg.to, onChunk).then(() => {});
+              const res = await finalizeWebmStream(read, trackBytes(sink, tally));
+              videoReport.push({ path, camId: r.camId, ...res });
+              resolveVideo();
+            } catch (error) {
+              rejectVideo(error);
+              throw error;
+            }
           },
         });
       });
@@ -402,7 +473,11 @@ export default function EndSessionModal({
       device_id: r.deviceId,
       browser_label: r.label,
       mime: r.mime,
-      file: `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+      // A recorder restart creates separate playable files. Keep the legacy `file`
+      // field for consumers that only handle one run, while explicitly listing every
+      // segment so a restarted camera is never mistaken for one stacked/corrupt file.
+      file: cameraFiles.get(r.camId)?.[0] ?? `videos/${sid}_${r.camId}_video_sync.${_ext(r)}`,
+      files: cameraFiles.get(r.camId) ?? [],
       started_at_ms: r.startedAtMs,
       flash_at_ms: r.flashAtMs,
       stopped_at_ms: r.stoppedAtMs,
@@ -410,7 +485,7 @@ export default function EndSessionModal({
       entries.push({
         path: "cameras.json",
         write: async (sink) => {
-          await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify({ session_id: sid, cameras, camera_events: cameraEvents }, null, 2)));
+          await trackBytes(sink, tally)(new TextEncoder().encode(JSON.stringify({ session_id: sid, cameras, camera_events: exportCameraEvents }, null, 2)));
       },
     });
     if (missed.length > 0) {
@@ -427,6 +502,10 @@ export default function EndSessionModal({
     entries.push({
       path: "video_report.json",
       write: async (sink) => {
+        // ZIP entries are fed concurrently. Wait until every video finalizer has
+        // reported before serializing this evidence; otherwise the archive can contain
+        // playable videos but an empty `videos` array and a misleading `healthy: true`.
+        await Promise.all(videoDone);
         const payload = {
           session_id: sid,
           videos: videoReport,
@@ -441,12 +520,16 @@ export default function EndSessionModal({
   const handleDownload = async () => {
     if (!session || downloading) return;
     setDownloading(true);
+    // A retry must not inherit an older success marker. Keep the chunks, but require this
+    // exact export attempt to pass video validation before restoring Saved/Close.
+    setDownloaded(false);
     setDownloadError("");
     setDownloadProgress("Preparing…");
     const sid = session.sessionId;
     const prefix = `${session.subject || "subject"}_${session.sessionTag || "session"}_${sid}`
       .replace(/\s+/g, "_");
     try {
+      await invalidateSessionSaved(sid);
       // Fresh manifest at click-time (data artifacts are re-pulled by each entry).
       let m = manifest;
       if (!m) {
@@ -457,17 +540,39 @@ export default function EndSessionModal({
       const tally = { total: 0 };
       if (canStreamSave()) {
         setDownloadProgress("Streaming videos to disk…");
-        const videoReport: VideoFinalizeReport[] = [];
-        const entries = await buildStreamEntries(m, sid, tally, videoReport);
-        const ok = await streamZipToDisk(`${prefix}.zip`, entries, setDownloadProgress);
+      const videoReport: VideoFinalizeReport[] = [];
+      // Keep the picker in the original click stack. Byte-level camera segmentation is
+      // asynchronous and must happen only after Edge has granted the file handle.
+      const ok = await streamZipToDisk(
+        `${prefix}.zip`,
+        () => buildStreamEntries(m, sid, tally, videoReport),
+        setDownloadProgress,
+      );
         if (!ok) {
           // User cancelled the file picker — no error, and the session is NOT marked saved.
           setDownloadProgress("");
           return;
         }
+        // A successfully closed file handle only proves that bytes reached disk. The
+        // finalizer also validates that every camera segment is a single WebM stream and
+        // that metadata rebuilding succeeded. Keep the IndexedDB backup and the Close
+        // affordance locked if the archive contains a raw/corrupt/stacked recording.
+        const expectedVideos = effectiveVideoResults.length;
+        const invalidVideos = videoReport.filter(v => !v.ok || v.ebmlHeaders !== 1 || v.bytesWritten <= 0);
+        if ((expectedVideos > 0 && videoReport.length === 0) || invalidVideos.length > 0) {
+          const details = invalidVideos
+            .map(v => `${v.camId}: ${v.error ?? `${v.ebmlHeaders} EBML headers`}`)
+            .join("; ");
+          setDownloadError(
+            `ZIP was saved, but video validation failed${details ? ` (${details})` : ""}. ` +
+            "The browser backup was retained; do not delete it until the recording is recovered.",
+          );
+          setDownloadProgress("");
+          return;
+        }
         // Only here has the write handle closed successfully. This is the sole place a save
         // is confirmed — never on a click or a cancel/throw. [incident 2026-08-07]
-        await markSessionSaved(sid, tally.total);
+        await markSessionSaved(sid, tally.total, true);
         setDownloaded(true);
         onDownloadComplete(sid);
       } else throw new Error("This browser cannot safely export a long recording. Open this session in Chrome or Edge.");
@@ -475,6 +580,9 @@ export default function EndSessionModal({
       setDownloadError(`Download failed: ${e}`);
     } finally {
       setDownloading(false);
+      // A completed/failed ZIP attempt must not leave its last progress label behind
+      // after control returns to the end-session modal.
+      setDownloadProgress("");
     }
   };
 
@@ -570,8 +678,10 @@ export default function EndSessionModal({
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm">
               <div className="text-amber-300 font-bold mb-1">Data requires review before analysis</div>
               <ul className="list-disc list-inside text-[11px] text-amber-200/90 space-y-0.5">
-                {(m ? reasons : ["session data not found on backend"]).map((r, i) => <li key={i}>{r}</li>)}
-                {!m && dataError && <li>{dataError}</li>}
+                {(m
+                  ? reasons
+                  : [dataError || "Backend finalization is still in progress; use Re-check before treating data as missing."]
+                ).map((r, i) => <li key={i}>{r}</li>)}
                 {m && m.analysis_ready_imu === false && <li>IMU acceptance checks failed — export remains available, but this data is not analysis-ready.</li>}
                 {cameraProblems.length > 0 && <li>Camera integrity issue: {cameraProblems.join("; ")}</li>}
               </ul>
@@ -678,7 +788,7 @@ export default function EndSessionModal({
             </p>
           )}
           {downloadError && <div className="text-[11px] text-red-400 text-center">{downloadError}</div>}
-          {downloadProgress && <div className="text-[11px] text-gray-500 text-center">{downloadProgress}</div>}
+          {downloading && downloadProgress && <div className="text-[11px] text-gray-500 text-center">{downloadProgress}</div>}
           <div className="flex items-center gap-2">
             <button
               onClick={handleDownload}
@@ -692,7 +802,14 @@ export default function EndSessionModal({
               <span className="text-[11px] text-green-400 whitespace-nowrap">✓ Saved</span>
             )}
             {downloaded && (
-              <button onClick={onClose} className="btn-success px-4 py-2 text-xs font-bold">
+              <button
+                type="button"
+                onClick={event => {
+                  event.preventDefault();
+                  onClose();
+                }}
+                className="btn-success px-4 py-2 text-xs font-bold"
+              >
                 Close
               </button>
             )}

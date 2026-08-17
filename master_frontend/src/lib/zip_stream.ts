@@ -32,6 +32,8 @@ export interface StreamZipEntry {
   write: (sink: (chunk: Uint8Array | Blob) => Promise<void>) => Promise<void>;
 }
 
+export type StreamZipEntries = StreamZipEntry[] | (() => Promise<StreamZipEntry[]>);
+
 // JSZip's NodejsStreamInputAdapter consumes any object with .on/.pause/.resume and emits the
 // raw chunk via the "data" event. We implement the smallest such object ourselves so there is
 // no dependency on Node's stream module (unavailable in the browser bundle) or on JSZip's
@@ -180,12 +182,12 @@ async function runStreamToDisk(
   });
 
   await Promise.all(feeds);
-  onProgress?.("Finalizing…");
+  onProgress?.("Finishing ZIP write…");
 }
 
 export async function streamZipToDisk(
   suggestedName: string,
-  entries: StreamZipEntry[],
+  entries: StreamZipEntries,
   onProgress?: (msg: string) => void,
 ): Promise<boolean> {
   if (!canStreamSave()) {
@@ -204,9 +206,13 @@ export async function streamZipToDisk(
     throw err;
   }
 
+  // Acquire the real file handle before doing any asynchronous preparation. Chromium's
+  // picker requires the original click gesture; a camera byte scan here would otherwise
+  // turn a valid export into a SecurityError before the dialog appeared.
+  const resolvedEntries = typeof entries === "function" ? await entries() : entries;
   const writable = await handle.createWritable();
   try {
-    await runStreamToDisk(entries, writable, onProgress);
+    await runStreamToDisk(resolvedEntries, writable, onProgress);
     await writable.close();
     return true;
   } catch (err) {
