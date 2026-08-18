@@ -444,3 +444,87 @@ async def test_ledger_write_is_durable_and_atomic(rig):
     assert json.loads(path.read_text())["session_id"] == session_id
     # No temporary file survives a successful write.
     assert not list(path.parent.glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_runs_the_same_finalize_job(rig):
+    """A session interrupted by a process death is finalized by the ordinary steps.
+
+    Startup used to run a second, divergent implementation of finalization, so a fix in
+    one path silently did not apply to the other. Recovery now drives the same
+    FinalizeJob — which means an interrupted session also gets validated and bundled.
+    """
+    session_id = await start_session(rig)
+    await stream(rig, "dev-chest", 200)
+
+    # Simulate SIGKILL: the CSV handle is released with its bytes on disk, and the ledger
+    # is left mid-RECORDING with no terminal marker.
+    for writer in list(rig.io._writers.values()):
+        await writer.close(sort=False)
+    rig.io._writers.clear()
+    rig.io._session_open = False
+    if rig.manager._offline_check_task:
+        rig.manager._offline_check_task.cancel()
+        rig.manager._offline_check_task = None
+    rig.manager.state = rig.sm_module.SessionState.IDLE
+    rig.manager.session_id = ""
+    rig.io._session_id = ""
+
+    record = rig.manager._ledger.read(session_id)
+    assert record["state"] == "RECORDING" and not record.get("terminal")
+
+    await rig.manager.recover_interrupted_sessions()
+
+    recovered = rig.manager._ledger.read(session_id)
+    assert recovered["terminal"] is True
+    assert recovered["recovered_after_backend_restart"] is True
+    assert recovered["stop_reason"] == "backend_restart_recovery"
+    # The same three steps as a live stop, all attempted.
+    assert [s["step"] for s in recovered["finalize"]["steps"]] == [
+        "close_writers", "validate", "bundle",
+    ]
+    assert recovered["integrity_report"]["session_id"] == session_id
+    # And an interrupted session is bundled too, which the old recovery path never did.
+    folder = rig.ssd_path / "Data_Riset_IMU" / "Subject_Tag"
+    assert (folder / f"{session_id}_bundle.zip").exists()
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_redo_a_step_that_already_finished(rig):
+    """Resume, not restart: a persisted 'done' step is skipped on the next startup."""
+    session_id = await start_session(rig)
+    await stream(rig, "dev-chest", 50)
+    for writer in list(rig.io._writers.values()):
+        await writer.close(sort=False)
+    rig.io._writers.clear()
+    rig.io._session_open = False
+    if rig.manager._offline_check_task:
+        rig.manager._offline_check_task.cancel()
+        rig.manager._offline_check_task = None
+    rig.manager.state = rig.sm_module.SessionState.IDLE
+    rig.manager.session_id = ""
+    rig.io._session_id = ""
+
+    # Pretend the crash happened after close_writers had completed.
+    record = rig.manager._ledger.read(session_id)
+    record["finalize"] = {"steps": [{"step": "close_writers", "state": "done", "detail": ""}]}
+    rig.manager._ledger.write(session_id, record)
+
+    collected = []
+    original = rig.manager._collect_recovery_artifacts
+
+    def spy(rec):
+        collected.append(rec.get("session_id"))
+        return original(rec)
+
+    rig.manager.__class__._collect_recovery_artifacts = staticmethod(spy)
+    try:
+        await rig.manager.recover_interrupted_sessions()
+    finally:
+        rig.manager.__class__._collect_recovery_artifacts = staticmethod(original)
+
+    assert collected == [], "close_writers was re-run despite being marked done"
+    recovered = rig.manager._ledger.read(session_id)
+    steps = {s["step"]: s["state"] for s in recovered["finalize"]["steps"]}
+    assert steps["close_writers"] == "done"
+    assert steps["validate"] in ("done", "failed")
