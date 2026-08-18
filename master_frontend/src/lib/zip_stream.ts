@@ -49,6 +49,7 @@ interface SourceHandle {
   stream: SourceStream;
   pushChunk(chunk: Uint8Array): Promise<void>;
   endStream(): void;
+  fail(err: unknown): void;
 }
 
 const SOURCE_BUFFER_MAX = 512 * 1024;
@@ -104,8 +105,12 @@ function createSource(): SourceHandle {
       if (errored) return;
       while (bytesInBuffer >= SOURCE_BUFFER_MAX && !ended && !errored) {
         // Wait for the consumer to drain before buffering more — this is what bounds memory.
+        // `errored` is the escape hatch: without it, a consumer that stops draining because
+        // the disk write failed left this loop spinning on a zero-delay timer forever,
+        // pinning the tab at the moment the operator most needed to retry.
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
+      if (ended || errored) return;
       buffer.push(chunk);
       bytesInBuffer += chunk.byteLength;
       flush();
@@ -113,6 +118,9 @@ function createSource(): SourceHandle {
     endStream() {
       ended = true;
       flush();
+    },
+    fail(err) {
+      emitError(err);
     },
   };
 }
@@ -123,10 +131,13 @@ async function runStreamToDisk(
   onProgress?: (msg: string) => void,
 ): Promise<void> {
   const zip = new JSZip();
+  const sources: SourceHandle[] = [];
   const feeds: Promise<void>[] = [];
+  const feedErrors: unknown[] = [];
 
   for (const entry of entries) {
     const source = createSource();
+    sources.push(source);
     zip.file(entry.path, source.stream as unknown as Uint8Array);
 
     feeds.push(
@@ -139,9 +150,18 @@ async function runStreamToDisk(
           await source.pushChunk(chunk);
         })
         .then(() => { source.endStream(); })
-        .catch((err) => { source.endStream(); throw err; }),
+        // Fail the member rather than ending it. endStream() let JSZip finish the entry
+        // with a correct CRC over truncated content, producing a structurally valid
+        // archive containing a silently short CSV or video. The error is recorded here
+        // instead of rethrown so this promise can never become an unhandled rejection
+        // when the generator rejects first.
+        .catch((err) => { feedErrors.push(err); source.fail(err); }),
     );
   }
+
+  const failAllSources = (err: unknown) => {
+    for (const source of sources) source.fail(err);
+  };
 
   // Start generation immediately so the upstream chunks are consumed as they arrive (never
   // all buffered). The generator reads file-by-file in insertion order.
@@ -151,37 +171,47 @@ async function runStreamToDisk(
     streamFiles: true,
   });
 
-  await new Promise<void>((resolve, reject) => {
-    let writeFailed: unknown = null;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let writeFailed: unknown = null;
 
-    generator.on("data", async (chunk: Uint8Array) => {
-      generator.pause();
-      try {
-        await writable.write(chunk);
-      } catch (err) {
-        writeFailed = err;
-      } finally {
-        if (writeFailed) {
-          reject(writeFailed);
-        } else {
-          generator.resume();
+      generator.on("data", async (chunk: Uint8Array) => {
+        generator.pause();
+        try {
+          await writable.write(chunk);
+        } catch (err) {
+          writeFailed = err;
+        } finally {
+          if (writeFailed) {
+            reject(writeFailed);
+          } else {
+            generator.resume();
+          }
         }
-      }
-    });
+      });
 
-    generator.on("end", () => {
-      if (writeFailed) return; // already rejecting
-      resolve();
-    });
+      generator.on("end", () => {
+        if (writeFailed) return; // already rejecting
+        resolve();
+      });
 
-    generator.on("error", (err: Error) => {
-      reject(err);
-    });
+      generator.on("error", (err: Error) => {
+        reject(err);
+      });
 
-    generator.resume();
-  });
+      generator.resume();
+    });
+  } catch (err) {
+    // The consumer has stopped draining. Release every producer that is parked on
+    // backpressure before propagating, then let them settle so nothing is left running
+    // against a dead writable.
+    failAllSources(err);
+    await Promise.allSettled(feeds);
+    throw err;
+  }
 
   await Promise.all(feeds);
+  if (feedErrors.length > 0) throw feedErrors[0];
   onProgress?.("Finishing ZIP write…");
 }
 
@@ -216,8 +246,11 @@ export async function streamZipToDisk(
     await writable.close();
     return true;
   } catch (err) {
-    // Best-effort: try to release the handle even on failure so the file isn't left locked.
-    await writable.close().catch(() => {});
+    // abort(), never close(): on a FileSystemWritableFileStream close() is the COMMIT.
+    // Closing here published however many bytes had been written under the operator's
+    // chosen filename — a valid-looking archive holding a truncated recording. abort()
+    // discards the partial file and releases the handle.
+    await writable.abort().catch(() => {});
     throw err;
   }
 }

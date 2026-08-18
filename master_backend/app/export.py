@@ -792,6 +792,39 @@ async def _build_bundle_locked(
         )
 
 
+class BundleUnavailable(Exception):
+    """No artifacts exist for this session, so there is nothing to archive."""
+
+
+async def build_session_bundle(session_id: str) -> dict:
+    """Write the session's data artifacts to <session_id>_bundle.zip on the SSD.
+
+    Shared by the HTTP endpoints and by the finalize job, so the archive an operator
+    downloads on demand and the one written automatically at STOP are produced by exactly
+    one code path. Raises BundleUnavailable when the session has no artifacts at all.
+    """
+    if not session_id or any(c in session_id for c in "/\\"):
+        raise ValueError("invalid session_id")
+    folders = _session_folders(session_id)
+    files = _session_files(session_id)
+    recovery = _recovery_manifest(session_id)
+    if (not folders and not recovery) or (
+        not files and not any(r.get("csv_exists") for r in recovery)
+    ):
+        raise BundleUnavailable(f"no artifacts found for session {session_id}")
+
+    output_folder = folders[0] if folders else _recovery_dir(session_id)
+    out = output_folder / f"{session_id}{BUNDLE_SUFFIX}"
+    result = await _build_bundle_locked(session_id, out, files, recovery)
+    await audit.log("INFO", "session_bundled", {
+        "session_id": session_id,
+        "path": result["path"],
+        "entries": len(result["entries"]),
+        "size": result["size"],
+    })
+    return result
+
+
 @router.post("/export/{session_id}/bundle")
 async def export_bundle(session_id: str):
     """Assemble the session's data artifacts into a zip on the SSD, server-side.
@@ -802,28 +835,15 @@ async def export_bundle(session_id: str):
     path: the operator can obtain a complete data bundle with the dashboard closed, crashed, or
     on a different machine.
     """
-    if not session_id or any(c in session_id for c in "/\\"):
-        raise HTTPException(status_code=400, detail="invalid session_id")
-    folders = _session_folders(session_id)
-    files = _session_files(session_id)
-    recovery = _recovery_manifest(session_id)
-    if (not folders and not recovery) or (not files and not any(r.get("csv_exists") for r in recovery)):
-        raise HTTPException(status_code=404, detail=f"no artifacts found for session {session_id}")
-
-    output_folder = folders[0] if folders else _recovery_dir(session_id)
-    out = output_folder / f"{session_id}{BUNDLE_SUFFIX}"
     try:
-        result = await _build_bundle_locked(session_id, out, files, recovery)
+        result = await build_session_bundle(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except BundleUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         await audit.log("ERROR", "bundle_failed", {"session_id": session_id, "error": str(exc)})
         raise HTTPException(status_code=500, detail=f"could not write bundle: {exc}") from exc
-
-    await audit.log("INFO", "session_bundled", {
-        "session_id": session_id,
-        "path": result["path"],
-        "entries": len(result["entries"]),
-        "size": result["size"],
-    })
     return {"session_id": session_id, "contains_video": False, **result}
 
 

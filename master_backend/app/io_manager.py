@@ -15,6 +15,7 @@ from pathlib import Path
 import aiofiles
 
 from .audit_logger import audit
+from .dedup_store import dedup
 from .csv_schema import (
     CSV_HEADER as _CSV_HEADER,
     metadata_line,
@@ -305,6 +306,11 @@ class IoManager:
         return self._session_id
 
     @property
+    def session_open(self) -> bool:
+        """True while writers for a session are open (i.e. close_session is still owed)."""
+        return self._session_open or bool(self._writers) or bool(self._rescue_writers)
+
+    @property
     def label_timeline(self) -> list[dict]:
         """JSON-safe label transitions for the current/just-ended session."""
         return [
@@ -407,7 +413,23 @@ class IoManager:
     ) -> None:
         # A new session starting while a previous late-delivery window is still open must
         # not leak its file handles or silently drop the pending summary (plan R7).
-        await self.finalize_late(force=True)
+        # Guarded: a failure to tidy the *previous* session must never prevent the next
+        # one from starting. Before this, one failed late-summary write left the window
+        # permanently armed and every subsequent START raised here.
+        try:
+            await self.finalize_late(force=True)
+        except Exception as exc:
+            await audit.log("ERROR", "late_finalize_before_open_failed", {
+                "session_id": session_id, "error": str(exc),
+            })
+            self._reset_late_state()
+
+        # Retire any writer still held from a previous session. close_session clears
+        # these, but a session that ended by any other route (abort, crash recovery,
+        # a failed close) left them in place — the old handle was then silently replaced
+        # and never flushed, and a stale rescue writer was closed at the *next* stop,
+        # putting the previous session's path and row count into this session's results.
+        await self._retire_writers()
 
         self._session_id = session_id
         folder_name = f"{subject_name}_{session_tag}".replace(" ", "_")
@@ -429,6 +451,31 @@ class IoManager:
         rates = device_rates or {}
         for device_id, role in device_roles.items():
             await self._open_writer_for(device_id, role, rates.get(device_id, 0.0))
+
+    async def _retire_writers(self) -> None:
+        """Release every open writer without claiming its output is a finalized artifact."""
+        stale = {**self._writers, **self._rescue_writers}
+        for device_id, writer in stale.items():
+            try:
+                await writer.close()
+            except Exception as exc:
+                await audit.log("ERROR", "stale_writer_close_failed", {
+                    "device_id": device_id, "path": str(writer._path), "error": str(exc),
+                })
+                await writer.abandon()
+        if stale:
+            await audit.log("WARN", "stale_writers_retired", {
+                "count": len(stale), "session_id": self._session_id,
+            })
+        self._writers.clear()
+        self._rescue_writers.clear()
+
+    def _reset_late_state(self) -> None:
+        """Drop late-window bookkeeping after a failed finalize, so it cannot re-arm."""
+        self._late_writers.clear()
+        self._late_rows.clear()
+        self._late_session_id = ""
+        self._late_base = None
 
     async def write_packet(self, pkt: SensorPacket) -> None:
         primary_writer = self._writers.get(pkt.device_id)
@@ -598,14 +645,26 @@ class IoManager:
                 **closed,
                 "rows_appended": self._late_rows.get(device_id, 0),
             }
-        if summary["devices"] and self._late_base is not None:
-            (self._late_base / f"{self._late_session_id}_late_delivery.json").write_text(
-                json.dumps(summary, indent=2)
-            )
-            await audit.log("WARN", "late_delivery_finalized", summary)
-        self._late_writers.clear()
-        self._late_rows.clear()
-        self._late_session_id = ""
+        try:
+            if summary["devices"] and self._late_base is not None:
+                (self._late_base / f"{self._late_session_id}_late_delivery.json").write_text(
+                    json.dumps(summary, indent=2)
+                )
+                await audit.log("WARN", "late_delivery_finalized", summary)
+        except OSError as exc:
+            # The sidecar CSVs are already closed and fsynced above; only the summary
+            # failed. Record that and still tear the window down — leaving it armed used
+            # to make every subsequent session start raise here forever.
+            await audit.log("ERROR", "late_summary_write_failed", {
+                "session_id": self._late_session_id, "error": str(exc),
+            })
+        finally:
+            self._reset_late_state()
+            # The dedup bitsets are the memory that stops an already-written packet being
+            # re-accepted. They belong to the delivery window, not to the stop: clearing
+            # them at STOP (while this window stayed open for LATE_ACCEPT_SEC) let a
+            # reconnecting phone re-deliver rows that were already on disk.
+            dedup.clear()
         return summary if summary["devices"] else None
 
 

@@ -17,11 +17,20 @@ from master_backend.proto.commands import Command, CommandType
 
 from .audit_logger import audit
 from .dedup_store import dedup
+from .finalize_job import FinalizeContext, FinalizeJob
 from .io_manager import io_manager
-from .integrity_validator import IntegrityValidator
 from .session_ledger import SessionLedger
 
 logger = logging.getLogger(__name__)
+
+
+class IllegalTransition(RuntimeError):
+    """A lifecycle command was issued from a state that does not permit it.
+
+    Raised rather than silently returning an empty result: a repeated STOP used to be
+    acknowledged as success and broadcast an empty integrity report, which overwrote the
+    real one on every connected dashboard.
+    """
 
 _DEVICE_OFFLINE_SEC = 8.0   # matches Flutter _pongTimeoutSec in websocket_client.dart
 _TRUE_HZ_WINDOW = 5         # seconds of true_hz history averaged for the preflight gate
@@ -123,6 +132,28 @@ class SessionManager:
         self._recording_started_epoch_ms: int = 0
         self._preflight_failed: list[str] = []
         self._stop_reason: str = ""
+        # Lifecycle observers (the WebSocket layer registers itself). Every transition and
+        # every finalize step is published here, so no component has to poll and no slow
+        # operation is invisible.
+        self._observers: list = []
+        self._finalize_job: FinalizeJob | None = None
+        self._finalize_task: asyncio.Task | None = None
+        self._last_report: dict = {}
+
+    # ── Lifecycle observation ────────────────────────────────────────────────
+
+    def add_observer(self, callback) -> None:
+        """Register an async callback invoked with every lifecycle event."""
+        self._observers.append(callback)
+
+    async def _notify(self, event: dict) -> None:
+        for callback in list(self._observers):
+            try:
+                await callback(event)
+            except Exception as exc:
+                # An observer is a reporting channel. It must never be able to fail the
+                # operation it is reporting on.
+                logger.debug("lifecycle observer failed: %s", exc)
 
     # ── Device registry ──────────────────────────────────────────────────────
 
@@ -351,15 +382,28 @@ class SessionManager:
         self._offline_check_task = asyncio.create_task(self._monitor_offline())
         return True, self.session_id
 
-    async def stop_recording(self, reason: str = "operator_stop") -> dict:
-        if self.state != SessionState.RECORDING:
-            return {}
+    async def request_stop(self, reason: str = "operator_stop") -> str:
+        """Begin finalization and return immediately.
 
-        # Arm late delivery before STOP reaches phones. Once we transition out of RECORDING,
-        # a reconnecting phone may immediately flush its buffered tail.
+        Everything slow — closing writers, re-sorting, hashing, validating, bundling —
+        runs in a background job whose progress is broadcast to every dashboard. The
+        command that triggered this is acknowledged in milliseconds, so a long finalize
+        can no longer be mistaken for a hung backend, and a client retry can no longer
+        re-enter finalization.
+
+        Raises IllegalTransition if the session is not RECORDING.
+        """
+        if self.state != SessionState.RECORDING:
+            raise IllegalTransition(
+                f"cannot stop from {self.state.value}: only a RECORDING session can be stopped"
+            )
+
         self._stop_reason = reason
+        # Arm late delivery before STOP reaches phones. Once we transition out of
+        # RECORDING, a reconnecting phone may immediately flush its buffered tail.
         io_manager.arm_late_window()
         await self._transition(SessionState.FINALIZING)
+
         # Notify mobile nodes while their control sockets are still live.
         stop_cmd = Command(
             type=CommandType.STOP_SESSION,
@@ -369,6 +413,7 @@ class SessionManager:
         await self.broadcast_control(stop_cmd)
         if self._offline_check_task:
             self._offline_check_task.cancel()
+            self._offline_check_task = None
 
         # Close any open offline and telemetry intervals.
         for dev in self._devices.values():
@@ -377,76 +422,145 @@ class SessionManager:
             _close_telemetry_gap(dev)
             dev.substate = DeviceSubstate.FINALIZED
 
-        try:
-            file_results = await io_manager.close_session(self._session_true_hz())
-        except Exception as exc:
-            # Finalization must produce a terminal ledger even if one artifact close or
-            # rename fails. The surviving files remain exportable and the report makes the
-            # close failure explicit instead of leaving the dashboard waiting forever.
-            file_results = {}
-            await audit.log("ERROR", "session_close_failed", {
-                "session_id": self.session_id,
-                "error": str(exc),
-            })
-        await audit.log("INFO", "session_finalizing", {"reason": reason, "files": file_results})
+        await self._save_state()
+        await audit.log("INFO", "session_finalizing", {"reason": reason})
+        self._start_finalize_job(reason)
+        return self.session_id
 
-        await self._transition(SessionState.VALIDATING)
-        try:
-            report = await IntegrityValidator().run(
-                session_id=self.session_id,
-                file_results=file_results,
-                devices=list(self._devices.values()),
-                scheduled_start_ms=self.scheduled_start_ms,
-                label_timeline=io_manager.label_timeline,
-                session_start_ms=self._recording_started_epoch_ms,
-                session_end_ms=int(time.time() * 1000),
-            )
-        except Exception as exc:
-            report = {
-                "session_id": self.session_id,
-                "status": "FAIL",
-                "analysis_ready": False,
-                "analysis_ready_reasons": [f"validator exception: {exc}"],
-                "devices": [],
-                "cross_device_checks": {},
-            }
-            await audit.log("ERROR", "validation_failed", {
-                "session_id": self.session_id,
-                "error": str(exc),
-            })
-        await audit.log("INFO", "validation_complete", {"status": report.get("status")})
+    def _start_finalize_job(
+        self,
+        reason: str,
+        *,
+        steps: dict | None = None,
+        collect_artifacts=None,
+    ) -> FinalizeJob:
+        ctx = FinalizeContext(
+            session_id=self.session_id,
+            reason=reason,
+            scheduled_start_ms=self.scheduled_start_ms,
+            session_start_ms=self._recording_started_epoch_ms,
+            session_end_ms=int(time.time() * 1000),
+            devices=list(self._devices.values()),
+            label_timeline=io_manager.label_timeline,
+            true_hz=self._session_true_hz(),
+            collect_artifacts=collect_artifacts,
+            persist=self._persist_finalize_progress,
+            notify=self._notify,
+            enter_state=self._enter_state_by_name,
+        )
+        job = FinalizeJob(ctx, steps)
+        self._finalize_job = job
+        self._finalize_task = asyncio.create_task(
+            self._run_finalize(job), name=f"finalize-{self.session_id}"
+        )
+        return job
 
-        await self._transition(SessionState.IDLE)
-        try:
-            await self._save_state(
-                terminal=True,
-                report=report,
-                file_results=file_results,
-                reason=reason,
-            )
-        except Exception as exc:
-            # A ledger write failure must not turn a successfully closed/validated CSV into
-            # a frontend STOP exception. The report file and data remain authoritative; the
-            # next startup can still discover them from the session folder.
-            await audit.log("ERROR", "terminal_ledger_write_failed", {
-                "session_id": self.session_id,
-                "error": str(exc),
-            })
-        dedup.clear()
+    async def _enter_state_by_name(self, name: str) -> None:
+        await self._transition(SessionState(name))
 
-        # Re-assert state for anyone who reconnected during finalisation (plan D1).
-        from .ws_handler import _state_pong
-        await self.broadcast_control(_state_pong())
+    async def _persist_finalize_progress(self, job: FinalizeJob) -> None:
+        """Checkpoint step progress so a restart resumes instead of restarting."""
+        if not self.session_id:
+            return
+        data = self._ledger.read(self.session_id) or {"session_id": self.session_id}
+        data["finalize"] = job.snapshot()
+        data["updated_at_ms"] = int(time.time() * 1000)
+        self._ledger.write(self.session_id, data)
+
+    async def _run_finalize(self, job: FinalizeJob) -> dict:
+        """Drive one finalize job to a terminal ledger record, whatever happens inside."""
+        report: dict = {}
+        try:
+            report = await job.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # FinalizeJob.run isolates each step, so reaching here means the runner
+            # itself broke. Still produce a terminal record rather than leaving the
+            # dashboard waiting forever.
+            logger.error("finalize runner crashed: %s", exc, exc_info=True)
+            await audit.log("ERROR", "finalize_runner_crashed", {
+                "session_id": self.session_id, "error": str(exc),
+            })
+        finally:
+            if not report:
+                report = {
+                    "session_id": self.session_id,
+                    "status": "FAIL",
+                    "analysis_ready": False,
+                    "analysis_ready_reasons": [
+                        f"finalization did not produce a report (failed steps: "
+                        f"{', '.join(job.failed_steps) or 'unknown'})"
+                    ],
+                    "devices": [],
+                    "cross_device_checks": {},
+                }
+            self._last_report = report
+            await self._transition(SessionState.IDLE)
+            try:
+                await self._save_state(
+                    terminal=True,
+                    report=report,
+                    file_results=job.ctx.file_results,
+                    reason=job.ctx.reason,
+                )
+            except Exception as exc:
+                # A ledger write failure must not turn successfully closed and validated
+                # CSVs into a failed session. The report file and the data on disk remain
+                # authoritative; the next startup rediscovers them from the folder.
+                await audit.log("ERROR", "terminal_ledger_write_failed", {
+                    "session_id": self.session_id, "error": str(exc),
+                })
+            await self._notify({
+                "type": "FINALIZE_COMPLETE",
+                "session_id": self.session_id,
+                "integrity_report": report,
+                "finalize": job.snapshot(),
+            })
         return report
 
+    async def wait_for_finalize(self) -> None:
+        """Block until the in-flight finalize job settles. Used by tests and shutdown."""
+        task = self._finalize_task
+        if task is not None and not task.done():
+            await asyncio.gather(task, return_exceptions=True)
+
+    @property
+    def finalize_snapshot(self) -> dict | None:
+        return self._finalize_job.snapshot() if self._finalize_job else None
+
+    async def stop_recording(self, reason: str = "operator_stop") -> dict:
+        """Stop and wait for finalization to complete, returning the integrity report.
+
+        Kept for callers that genuinely need the synchronous shape — process shutdown and
+        the test suite. Interactive callers should use request_stop and follow the
+        broadcast progress instead of holding a socket open across the whole job.
+        """
+        try:
+            await self.request_stop(reason)
+        except IllegalTransition:
+            return {}
+        await self.wait_for_finalize()
+        return self._last_report or {}
     async def abort(self, reason: str = "error") -> None:
         await audit.log("ERROR", "session_aborted", {"reason": reason})
-        if self.state == SessionState.RECORDING:
+        # Close unconditionally rather than only from RECORDING. Aborting out of
+        # FINALIZING/VALIDATING used to leave the writers open, and because open_session
+        # never cleared them the stale handles were carried into the next session.
+        if io_manager.session_open:
             await io_manager.close_session()
         await self._transition(SessionState.ERROR)
         dedup.clear()
 
     async def _transition(self, new_state: SessionState) -> None:
+        """Advance the lifecycle: record it durably, then tell everyone.
+
+        The broadcast is unconditional and lives here rather than at the call sites, so a
+        state can no longer exist only in this process. FINALIZING and VALIDATING used to
+        be written to the audit log and nowhere else, which is why the dashboard sat on
+        RECORDING for the whole of finalization with no way to tell a slow close from a
+        hang.
+        """
         old = self.state
         self.state = new_state
         await audit.log(
@@ -454,6 +568,17 @@ class SessionManager:
             "state_transition",
             {"from": old, "to": new_state, "session_id": self.session_id},
         )
+        if self.session_id:
+            try:
+                await self._persist_state()
+            except Exception as exc:
+                logger.warning("state checkpoint failed at %s: %s", new_state, exc)
+        await self._notify({
+            "type": "STATE_TRANSITION",
+            "from": old.value if isinstance(old, SessionState) else str(old),
+            "to": new_state.value,
+            "session_id": self.session_id,
+        })
 
     # ── Broadcast helpers ────────────────────────────────────────────────────
 
@@ -642,19 +767,43 @@ class SessionManager:
             session_id = str(record.get("session_id", ""))
             if not session_id:
                 continue
+
+            async def collect(rec=record):
+                return await asyncio.get_event_loop().run_in_executor(
+                    None, self._collect_recovery_artifacts, rec
+                )
+
+            async def persist(job, sid=session_id):
+                data = self._ledger.read(sid) or {"session_id": sid}
+                data["finalize"] = job.snapshot()
+                data["updated_at_ms"] = int(time.time() * 1000)
+                self._ledger.write(sid, data)
+
+            ctx = FinalizeContext(
+                session_id=session_id,
+                reason="backend_restart_recovery",
+                scheduled_start_ms=int(record.get("scheduled_start_ms", 0) or 0),
+                session_start_ms=int(record.get("recording_started_ms", 0) or 0),
+                session_end_ms=int(time.time() * 1000),
+                label_timeline=list(record.get("label_timeline", [])),
+                collect_artifacts=collect,
+                persist=persist,
+                notify=self._notify,
+            )
+            # Resume rather than restart. A finalize that got as far as closing and
+            # validating before the process died does not redo that work, and — more
+            # importantly — recovery now runs the *same* steps as a live stop instead of
+            # a second implementation that could drift from it.
+            saved_steps = {
+                str(entry.get("step")): {
+                    key: value for key, value in entry.items() if key != "step"
+                }
+                for entry in ((record.get("finalize") or {}).get("steps") or [])
+                if entry.get("step")
+            }
+            job = FinalizeJob(ctx, saved_steps)
             try:
-                file_results, devices = await asyncio.get_event_loop().run_in_executor(
-                    None, self._collect_recovery_artifacts, record
-                )
-                report = await IntegrityValidator().run(
-                    session_id=session_id,
-                    file_results=file_results,
-                    devices=devices,
-                    scheduled_start_ms=int(record.get("scheduled_start_ms", 0) or 0),
-                    label_timeline=list(record.get("label_timeline", [])),
-                    session_start_ms=int(record.get("recording_started_ms", 0) or 0),
-                    session_end_ms=int(time.time() * 1000),
-                )
+                report = await job.run()
                 updated = self._ledger.read(session_id) or dict(record)
                 updated.update({
                     "state": SessionState.IDLE.value,
@@ -663,7 +812,8 @@ class SessionManager:
                     "stop_reason": "backend_restart_recovery",
                     "finalized_at_ms": int(time.time() * 1000),
                     "integrity_report": report,
-                    "file_results": file_results,
+                    "file_results": ctx.file_results,
+                    "finalize": job.snapshot(),
                     "recovered_after_backend_restart": True,
                 })
                 self._ledger.write(session_id, updated)
@@ -671,6 +821,7 @@ class SessionManager:
                     "session_id": session_id,
                     "status": report.get("status"),
                     "analysis_ready": report.get("analysis_ready"),
+                    "failed_steps": job.failed_steps,
                 })
             except Exception as exc:
                 # Keep it discoverable and non-terminal so a later startup/retry or the
@@ -679,6 +830,7 @@ class SessionManager:
                 failed.update({
                     "state": SessionState.ERROR.value,
                     "recovery_error": str(exc),
+                    "finalize": job.snapshot(),
                     "updated_at_ms": int(time.time() * 1000),
                 })
                 self._ledger.write(session_id, failed)

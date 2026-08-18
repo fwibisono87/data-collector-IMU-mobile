@@ -20,7 +20,7 @@ from master_backend.proto.commands import (
 from .audit_logger import audit
 from .dedup_store import dedup
 from .io_manager import io_manager
-from .session_manager import SessionState, session_manager
+from .session_manager import IllegalTransition, SessionState, session_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -363,7 +363,26 @@ async def frontend_ws(websocket: WebSocket) -> None:
                 msg = json.loads(text)
             except Exception:
                 continue
-            await _handle_frontend_msg(msg, websocket)
+            try:
+                await _handle_frontend_msg(msg, websocket)
+            except Exception as exc:
+                # Mirrors the device control channel: one failed command must not close
+                # the operator's connection. Losing this socket at STOP was indistinguish-
+                # able from the backend dying, right when the operator needed to know
+                # whether their recording had survived.
+                logger.warning("frontend command error: %s", exc, exc_info=True)
+                await audit.log("ERROR", "frontend_command_failed", {
+                    "type": msg.get("type", ""), "error": str(exc),
+                })
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "ACK",
+                        "command_id": msg.get("command_id", ""),
+                        "status": "fail",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    }))
+                except Exception:
+                    return
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -404,18 +423,29 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
                 })
 
         case "STOP_SESSION":
+            # STOP now only *starts* finalization. It returns as soon as the session has
+            # left RECORDING, and the job's progress arrives as broadcast state. Three
+            # failure modes die with this: the ACK can no longer time out, a retry can no
+            # longer re-enter finalization and blank the integrity report, and an
+            # exception can no longer escape into the socket handler.
             reason = payload.get("reason", "operator_stop")
-            report = await session_manager.stop_recording(reason)
+            try:
+                await session_manager.request_stop(reason)
+            except IllegalTransition as exc:
+                await ws.send_text(json.dumps({
+                    "type": "ACK",
+                    "command_id": command_id,
+                    "status": "fail",
+                    "detail": str(exc),
+                }))
+                return
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
                 "status": "ok",
+                "detail": "finalizing",
             }))
-            await broadcast_to_frontends({
-                "type": "STATE_UPDATE",
-                **_state_snapshot(),
-                "integrity_report": report,
-            })
+            await audit.log("INFO", "session_stop", {"reason": reason})
 
         case "SET_LABEL":
             label_id = int(payload.get("label_id", 0))
@@ -501,7 +531,37 @@ def _state_snapshot() -> dict:
             "connected": len(session_manager.online_devices),
             "roles": session_manager.connected_roles,
         },
+        # Per-step finalization progress, so a dashboard that connects mid-finalize sees
+        # what is happening instead of an unexplained non-IDLE state.
+        "finalize": session_manager.finalize_snapshot,
     }
+
+
+async def _on_lifecycle_event(event: dict) -> None:
+    """Publish every lifecycle event the session manager emits.
+
+    Registered once at import. This is the only reason FINALIZING and VALIDATING are
+    visible to an operator at all — previously a transition wrote an audit line and
+    nothing else, so the dashboard held RECORDING for the entire finalize.
+    """
+    kind = event.get("type")
+    if kind == "STATE_TRANSITION":
+        await broadcast_to_frontends({"type": "STATE_UPDATE", **_state_snapshot()})
+        # Re-assert to phones too: one that reconnected mid-finalize would otherwise sit
+        # in RECORDING until its next heartbeat (plan D1).
+        await session_manager.broadcast_control(_state_pong())
+    elif kind == "FINALIZE_PROGRESS":
+        await broadcast_to_frontends(event)
+    elif kind == "FINALIZE_COMPLETE":
+        await broadcast_to_frontends({
+            "type": "STATE_UPDATE",
+            **_state_snapshot(),
+            "integrity_report": event.get("integrity_report") or None,
+            "finalize": event.get("finalize"),
+        })
+
+
+session_manager.add_observer(_on_lifecycle_event)
 
 
 # ── Live sensor data stream for dashboard chart (JSON, 20 fps) ───────────────

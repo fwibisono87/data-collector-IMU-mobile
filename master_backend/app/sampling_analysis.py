@@ -60,50 +60,141 @@ def _zero() -> dict:
     }
 
 
-def analyse_device(rows, *, device_id: str = "", role: str = "",
-                   expected_hz: float | None = None) -> dict:
+def analyse_rows(row_iter, *, device_id: str = "", role: str = "",
+                 expected_hz: float | None = None) -> dict:
+    """Single-pass sampling analysis over an iterable of parsed CSV rows.
+
+    Streaming, because this runs at STOP on every device CSV of the session. The previous
+    implementation took a fully materialised list and walked it four times; a forty-minute
+    device at ~100 rows/s is ~240,000 rows, each a list of fourteen strings, so validating a
+    three-device session allocated hundreds of megabytes at exactly the moment finalisation
+    most needs to be reliable.
+
+    Only two things are retained across the pass and both are small: the list of
+    inter-sample deltas (needed for median/p95) and the set of sequence numbers (needed for
+    presence and gap width). Everything else — run lengths, held-sample counts, sequence
+    gap spans, declared-kind agreement — is accumulated incrementally.
+    """
     stats = _zero()
     stats["device_id"] = device_id
     stats["role"] = role
-    stats["rows"] = len(rows)
 
-    timestamps = []
-    seqs = []
-    seq_timestamp_rows = []
-    # Parsed independently: a row with a readable timestamp but an unreadable sequence
-    # (or vice versa) must not silently drop the other value, which `continue` did.
-    for row in rows:
+    total_rows = 0
+    usable = 0
+    first_ts = last_ts = None
+    min_ts = max_ts = None
+    dts: list[int] = []
+    prev_ts_for_dt = None
+
+    seqs: set[int] = set()
+    seq_total = 0
+    seq_min = seq_max = None
+
+    prev_pair = None                 # (timestamp, sequence) of the last fully-parsed row
+    gaps: list[dict] = []
+
+    run_lengths: Counter = Counter()
+    run_len = 0
+    prev_triple = None
+    distinct_acc_events = 0
+
+    held_count = 0
+    prev_six = None
+
+    declared_total = 0
+    declared_held = 0
+    declared_agree = 0
+    declared_prev_six = None
+
+    for row in row_iter:
+        total_rows += 1
+
         try:
             timestamp = int(row[0])
-            timestamps.append(timestamp)
         except (ValueError, IndexError):
             timestamp = None
+        else:
+            usable += 1
+            if first_ts is None:
+                first_ts = timestamp
+            last_ts = timestamp
+            min_ts = timestamp if min_ts is None else min(min_ts, timestamp)
+            max_ts = timestamp if max_ts is None else max(max_ts, timestamp)
+            if prev_ts_for_dt is not None:
+                dts.append(timestamp - prev_ts_for_dt)
+            prev_ts_for_dt = timestamp
+
         try:
             sequence = int(row[COL_SEQUENCE])
-            seqs.append(sequence)
         except (ValueError, IndexError):
             sequence = None
-        if timestamp is not None and sequence is not None:
-            seq_timestamp_rows.append((timestamp, sequence))
+        else:
+            seqs.add(sequence)
+            seq_total += 1
+            seq_min = sequence if seq_min is None else min(seq_min, sequence)
+            seq_max = sequence if seq_max is None else max(seq_max, sequence)
 
-    usable = len(timestamps)
+        if timestamp is not None and sequence is not None:
+            if prev_pair is not None:
+                previous_ts, previous_seq = prev_pair
+                missing_in_run = sequence - previous_seq - 1
+                # CSVs are timestamp-sorted on close; ignore replay/order reversals here
+                # and only describe forward sequence loss.
+                if missing_in_run > 0 and timestamp >= previous_ts:
+                    gaps.append({
+                        "start_ms": previous_ts,
+                        "end_ms": timestamp,
+                        "duration_ms": timestamp - previous_ts,
+                        "missing": missing_in_run,
+                        "previous_sequence": previous_seq,
+                        "next_sequence": sequence,
+                    })
+            prev_pair = (timestamp, sequence)
+
+        triple = (row[COL_ACC_X], row[COL_ACC_Y], row[COL_ACC_Z])
+        if triple == prev_triple:
+            run_len += 1
+        else:
+            if prev_triple is not None:
+                run_lengths[run_len] += 1
+                distinct_acc_events += 1
+            run_len = 1
+            prev_triple = triple
+
+        six = (row[COL_ACC_X], row[COL_ACC_Y], row[COL_ACC_Z],
+               row[COL_GYRO_X], row[COL_GYRO_Y], row[COL_GYRO_Z])
+        if six == prev_six:
+            held_count += 1
+        prev_six = six
+
+        if len(row) > COL_SAMPLE_KIND and row[COL_SAMPLE_KIND] != "":
+            declared_total += 1
+            if row[COL_SAMPLE_KIND] == "1":
+                declared_held += 1
+            detected_held = 1 if six == declared_prev_six else 0
+            try:
+                if detected_held == int(row[COL_SAMPLE_KIND]):
+                    declared_agree += 1
+            except ValueError:
+                pass
+            declared_prev_six = six
+
+    if prev_triple is not None:
+        run_lengths[run_len] += 1
+        distinct_acc_events += 1
+
+    stats["rows"] = total_rows
+
     if usable < 2:
-        reference = expected_hz if (expected_hz and expected_hz > 0) else 0.0
-        stats["reference_hz"] = reference
+        stats["reference_hz"] = expected_hz if (expected_hz and expected_hz > 0) else 0.0
         return stats
 
-    first_ts = timestamps[0]
-    last_ts = timestamps[-1]
-    stats["first_timestamp_ms"] = min(timestamps)
-    stats["last_timestamp_ms"] = max(timestamps)
+    stats["first_timestamp_ms"] = min_ts
+    stats["last_timestamp_ms"] = max_ts
     span_s = (last_ts - first_ts) / 1000.0
     stats["span_s"] = span_s
     stats["nominal_hz"] = usable / span_s if span_s else 0.0
 
-    dts = []
-    for a, b in zip(timestamps, timestamps[1:]):
-        dts.append(b - a)
-    non_positive = sum(1 for d in dts if d <= 0)
     sorted_d = sorted(dts)
     stats["dt_ms"] = {
         "median": statistics.median(dts),
@@ -111,113 +202,55 @@ def analyse_device(rows, *, device_id: str = "", role: str = "",
         "p95": sorted_d[int(len(sorted_d) * 0.95)] if sorted_d else 0,
         "max": max(dts) if dts else 0,
         "min": min(dts) if dts else 0,
-        "non_positive": non_positive,
+        "non_positive": sum(1 for d in dts if d <= 0),
     }
 
-    runs = []
-    run_len = 0
-    prev_triple = None
-    for row in rows:
-        triple = (row[COL_ACC_X], row[COL_ACC_Y], row[COL_ACC_Z])
-        if triple == prev_triple:
-            run_len += 1
-        else:
-            if prev_triple is not None:
-                runs.append(run_len)
-            run_len = 1
-            prev_triple = triple
-    if prev_triple is not None:
-        runs.append(run_len)
-    distinct_acc_events = len(runs)
     stats["true_sensor_hz"] = distinct_acc_events / span_s if span_s else 0.0
-    stats["acc_run_length_hist"] = dict(sorted(Counter(runs).items()))
+    stats["acc_run_length_hist"] = dict(sorted(run_lengths.items()))
+    # Denominator is the total row count, matching the loop above — `usable` counts only
+    # rows with a parseable timestamp, so using it here would mix two row populations.
+    stats["held_row_pct"] = 100.0 * held_count / total_rows if total_rows else 0.0
 
-    held_count = 0
-    prev_six = None
-    for row in rows:
-        six = (row[COL_ACC_X], row[COL_ACC_Y], row[COL_ACC_Z],
-               row[COL_GYRO_X], row[COL_GYRO_Y], row[COL_GYRO_Z])
-        if six == prev_six:
-            held_count += 1
-        prev_six = six
-    # Denominator is len(rows), matching the loop above — `usable` counts only rows with a
-    # parseable timestamp, so using it here would mix two different row populations.
-    stats["held_row_pct"] = 100.0 * held_count / len(rows) if rows else 0.0
-
-    present = len(set(seqs))
-    if seqs:
-        seq_min = min(seqs)
-        seq_max = max(seqs)
+    present = len(seqs)
+    if seq_total:
         span = seq_max - seq_min + 1
         missing = max(0, span - present)
-        missing_pct = 100.0 * missing / span if span else 0.0
-        present_sorted = sorted(set(seqs))
+        present_sorted = sorted(seqs)
         largest_gap = 0
         if len(present_sorted) > 1:
             largest_gap = max(b - a - 1 for a, b in zip(present_sorted, present_sorted[1:]))
-        duplicates = len(seqs) - present
+        stats["sequence"] = {
+            "min": seq_min,
+            "max": seq_max,
+            "present": present,
+            "missing": missing,
+            "missing_pct": 100.0 * missing / span if span else 0.0,
+            "largest_gap": largest_gap,
+            "duplicates": seq_total - present,
+            "gaps": gaps,
+        }
     else:
-        seq_min = 0
-        seq_max = 0
-        missing = 0
-        missing_pct = 0.0
-        largest_gap = 0
-        duplicates = 0
-    stats["sequence"] = {
-        "min": seq_min,
-        "max": seq_max,
-        "present": present,
-        "missing": missing,
-        "missing_pct": missing_pct,
-        "largest_gap": largest_gap,
-        "duplicates": duplicates,
-        "gaps": [],
-    }
-
-    # The percentage above is useful as a summary, but acceptance needs exact time spans
-    # so a gap can be compared with the durable label timeline. CSVs are timestamp-sorted
-    # on close; ignore replay/order reversals here and only describe forward sequence loss.
-    gaps = []
-    for (previous_ts, previous_seq), (current_ts, current_seq) in zip(
-        seq_timestamp_rows, seq_timestamp_rows[1:]
-    ):
-        missing_in_run = current_seq - previous_seq - 1
-        if missing_in_run > 0 and current_ts >= previous_ts:
-            gaps.append({
-                "start_ms": previous_ts,
-                "end_ms": current_ts,
-                "duration_ms": current_ts - previous_ts,
-                "missing": missing_in_run,
-                "previous_sequence": previous_seq,
-                "next_sequence": current_seq,
-            })
-    stats["sequence"]["gaps"] = gaps
-
-    declared_rows = [r for r in rows if len(r) > COL_SAMPLE_KIND and r[COL_SAMPLE_KIND] != ""]
-    if declared_rows:
-        declared_held = sum(1 for r in declared_rows if r[COL_SAMPLE_KIND] == "1")
-        held_row_pct_declared = 100.0 * declared_held / len(declared_rows)
-        agree = 0
-        prev_six = None
-        count = 0
-        for r in declared_rows:
-            six = (r[COL_ACC_X], r[COL_ACC_Y], r[COL_ACC_Z],
-                   r[COL_GYRO_X], r[COL_GYRO_Y], r[COL_GYRO_Z])
-            detected_held = 1 if six == prev_six else 0
-            if detected_held == int(r[COL_SAMPLE_KIND]):
-                agree += 1
-            prev_six = six
-            count += 1
-        agreement_pct = 100.0 * agree / count if count else 0.0
-        stats["declared"] = {
-            "held_row_pct_declared": held_row_pct_declared,
-            "agreement_pct": agreement_pct,
+        stats["sequence"] = {
+            "min": 0, "max": 0, "present": 0, "missing": 0, "missing_pct": 0.0,
+            "largest_gap": 0, "duplicates": 0, "gaps": gaps,
         }
 
-    reference = expected_hz if (expected_hz and expected_hz > 0) else stats["nominal_hz"]
-    stats["reference_hz"] = reference
+    if declared_total:
+        stats["declared"] = {
+            "held_row_pct_declared": 100.0 * declared_held / declared_total,
+            "agreement_pct": 100.0 * declared_agree / declared_total,
+        }
+
+    stats["reference_hz"] = (
+        expected_hz if (expected_hz and expected_hz > 0) else stats["nominal_hz"]
+    )
     return stats
 
+
+def analyse_device(rows, *, device_id: str = "", role: str = "",
+                   expected_hz: float | None = None) -> dict:
+    """List-taking wrapper around analyse_rows, kept for callers that already have rows."""
+    return analyse_rows(rows, device_id=device_id, role=role, expected_hz=expected_hz)
 
 def classify(stats: dict, thresholds: dict | None = None) -> tuple:
     merged = dict(DEFAULT_THRESHOLDS)

@@ -13,7 +13,7 @@ from pathlib import Path
 from .audit_logger import audit
 from .csv_schema import is_header_line, is_valid_data_row, parse_row
 from .io_manager import io_manager
-from .sampling_analysis import analyse_device, classify
+from .sampling_analysis import analyse_rows, classify
 
 # Thresholds default here; overridable per-run through env (read inside run so tests
 # can monkeypatch os.environ).
@@ -40,25 +40,29 @@ def _analyse_csv(path: str, device_id: str, role: str) -> dict:
     A missing/unreadable file degrades gracefully: returns {} so the caller knows the
     sampling checks could not run but is not forced to raise.
     """
-    rows = []
-    invalid_rows = 0
+    counter = {"invalid": 0}
+
+    def _rows(handle):
+        for line in handle:
+            fields = parse_row(line)
+            # `device_id or None` — an empty id means "do not filter by device", which
+            # is how the consolidated per-role pass calls this: those files hold every
+            # device for the role, so filtering on "" would reject every single row.
+            if fields is not None and is_valid_data_row(
+                fields, expected_device_id=device_id or None
+            ):
+                yield fields
+            elif line.strip() and not line.lstrip().startswith("#") and not is_header_line(line):
+                counter["invalid"] += 1
+
     try:
+        # Streamed, not materialised: the analyser consumes rows as they are parsed, so
+        # memory is flat in session length instead of proportional to it.
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                fields = parse_row(line)
-                # `device_id or None` — an empty id means "do not filter by device", which
-                # is how the consolidated per-role pass calls this: those files hold every
-                # device for the role, so filtering on "" would reject every single row.
-                if fields is not None and is_valid_data_row(
-                    fields, expected_device_id=device_id or None
-                ):
-                    rows.append(fields)
-                elif line.strip() and not line.lstrip().startswith("#") and not is_header_line(line):
-                    invalid_rows += 1
+            stats = analyse_rows(_rows(f), device_id=device_id, role=role)
     except OSError:
         return {}
-    stats = analyse_device(rows, device_id=device_id, role=role)
-    stats["invalid_rows"] = invalid_rows
+    stats["invalid_rows"] = counter["invalid"]
     return stats
 
 

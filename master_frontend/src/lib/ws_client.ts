@@ -42,16 +42,37 @@ export interface AckMsg {
   detail?: string;
 }
 
-export type FrontendMsg = StateUpdate | AckMsg | { type: string; [k: string]: unknown };
+export interface FinalizeStep {
+  step: string;
+  state: "pending" | "running" | "done" | "failed" | "skipped";
+  detail?: string;
+  started_ms?: number;
+  ended_ms?: number;
+}
+
+export interface FinalizeProgress {
+  type: "FINALIZE_PROGRESS";
+  session_id: string;
+  started_ms: number;
+  finished_ms: number;
+  steps: FinalizeStep[];
+  failed: string[];
+}
+
+export type FrontendMsg =
+  | StateUpdate | AckMsg | FinalizeProgress
+  | { type: string; [k: string]: unknown };
 
 type Listener = (msg: FrontendMsg) => void;
 type LiveListener = (samples: Record<string, { acc: number[]; gyro: number[]; ts: number }>) => void;
 
 const ACK_TIMEOUT_MS = 2000;
 const ACK_MAX_RETRIES = 3;
-// STOP includes server-side fsync, sort, and validation. Retrying it every two seconds makes
-// the dashboard claim failure while the backend is correctly finalizing the session.
-const STOP_ACK_TIMEOUT_MS = 120_000;
+// STOP now only *starts* finalization on the backend and is acknowledged as soon as the
+// session leaves RECORDING; the close/sort/validate/bundle work reports itself through
+// FINALIZE_PROGRESS. The old 120 s timeout existed because the ACK was withheld for the
+// whole job — and its retry then re-entered STOP and blanked the integrity report.
+const STOP_ACK_TIMEOUT_MS = 15_000;
 
 function newCommandId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -164,6 +185,7 @@ class WsClient {
     };
     ws.onclose = () => {
       this._emitConn(false);
+      this._rejectPending("Backend connection closed before the command was acknowledged.");
       if (generation === this.connectionGeneration) {
         setTimeout(() => {
           if (generation === this.connectionGeneration) this._connectControl(ip, generation);
@@ -222,12 +244,29 @@ class WsClient {
         }
       }, timeoutMs);
 
-      this.pendingAcks.set(id, { msg, attempts: attempt, resolve, reject, timer });
-
-      if (this.controlWs?.readyState === WebSocket.OPEN) {
-        this.controlWs.send(msg);
+      // Fail now rather than in six minutes. Previously the message was silently dropped
+      // when the socket was mid-reconnect while the timeout stayed armed, so a STOP that
+      // was never transmitted still took 3 x 120 s to report failure — with the cameras
+      // recording throughout.
+      if (this.controlWs?.readyState !== WebSocket.OPEN) {
+        clearTimeout(timer);
+        reject(new Error("Not connected to the backend — the command was not sent."));
+        return;
       }
+
+      this.pendingAcks.set(id, { msg, attempts: attempt, resolve, reject, timer });
+      this.controlWs.send(msg);
     });
+  }
+
+  /** Fail every in-flight command when the socket drops, instead of leaving them to time out. */
+  private _rejectPending(reason: string): void {
+    const pending = Array.from(this.pendingAcks.values());
+    this.pendingAcks.clear();
+    for (const p of pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(reason));
+    }
   }
 
   private _resolveAck(ack: AckMsg): void {

@@ -2,7 +2,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
-import { wsClient, type SessionState, type DeviceInfo, type StateUpdate } from "@/lib/ws_client";
+import {
+  wsClient,
+  type SessionState, type DeviceInfo, type StateUpdate, type FinalizeProgress,
+} from "@/lib/ws_client";
 import { armAudio } from "@/lib/alert_sound";
 import StatusBanner from "@/components/StatusBanner";
 import SessionForm from "@/components/SessionForm";
@@ -107,6 +110,10 @@ export default function Home() {
   const [endVideoResults, setEndVideoResults] = useState<EndSessionVideoResult[]>([]);
   const [endMissed, setEndMissed] = useState<string[]>([]);
   const [endRecheckTick, setEndRecheckTick] = useState(0);
+  // Per-step finalization progress from the backend. Before this existed the dashboard
+  // held RECORDING for the whole close/sort/validate span with no way to tell a healthy
+  // slow finalize from a hang.
+  const [finalize, setFinalize] = useState<FinalizeProgress | null>(null);
   const [scheduledStartMs, setScheduledStartMs] = useState(0);
   const [cameraStartRetry, setCameraStartRetry] = useState(0);
   const endSessionOpenRef = useRef(false);
@@ -304,7 +311,13 @@ export default function Home() {
         // restart clear stale cards instead of lingering until a manual reload.
         if (su.devices) setDevices(su.devices);
         if (su.quorum) setQuorum(su.quorum);
-        if (su.integrity_report) setIntegrityReport(su.integrity_report);
+        // Guard against an empty report overwriting a real one. The backend no longer
+        // sends `{}`, but a mixed-version pair must not lose the operator's verdict.
+        if (su.integrity_report && Object.keys(su.integrity_report).length > 0) {
+          setIntegrityReport(su.integrity_report);
+        }
+        const snapshot = (msg as { finalize?: FinalizeProgress | null }).finalize;
+        if (snapshot) setFinalize(snapshot);
 
         if (su.state === "RECORDING" && su.session_id) {
           const active: EndSessionInfo = {
@@ -347,6 +360,8 @@ export default function Home() {
           }
         }
 
+      } else if (msg.type === "FINALIZE_PROGRESS") {
+        setFinalize(msg as unknown as FinalizeProgress);
       } else if (msg.type === "LATE_DELIVERY") {
         // A phone flushed its buffered tail after STOP, into a *_late.csv sidecar
         // (plan DD-4). If the export modal is open it re-checks itself; otherwise the
@@ -495,21 +510,33 @@ export default function Home() {
   const handleStop = async () => {
     if (isStopping) return;          // guard double-click → no spurious "Not recording" alert
     setIsStopping(true);
+    setFinalize(null);
     // Capture identity BEFORE the stop call — a late STATE_UPDATE broadcast after the ACK
     // could otherwise describe the session differently than the one we just ended.
     const ended = { sessionId, subject, sessionTag, operator };
-    let stopError = "";
-    try {
-      await wsClient.stopSession("operator_stop");
-    } catch (e) {
-      stopError = String(e);
-      console.error("session stop on backend failed", e);
-    }
+
+    // Tell the backend and finalize the cameras concurrently. Camera finalisation used to
+    // sit behind the backend round trip, so an unreachable backend kept every camera
+    // recording for as long as STOP took to fail. Neither depends on the other: the
+    // backend owns the CSVs, the browser owns the footage.
+    const backendStop = wsClient
+      .stopSession("operator_stop")
+      .then(() => "")
+      .catch((e) => {
+        console.error("session stop on backend failed", e);
+        return String(e instanceof Error ? e.message : e);
+      });
     // The state-update path normally opens this modal. Calling the same idempotent
     // recovery helper here covers a lost ACK/broadcast and guarantees the manual Stop
     // path cannot strand camera finalisation in a separate code path.
-    await recoverTerminalSession(ended);
-    if (stopError) alert(`Session stop reported a problem: ${stopError}`);
+    const [stopError] = await Promise.all([backendStop, recoverTerminalSession(ended)]);
+    if (stopError) {
+      alert(
+        `The backend did not confirm the stop: ${stopError}\n\n` +
+        "Your footage has been finalized locally. Check the end-of-session dialog — " +
+        "if the recording reached the backend it can still be downloaded from there.",
+      );
+    }
   };
 
   const handleLabel = async (id: number) => {
@@ -862,6 +889,7 @@ export default function Home() {
           missed={endMissed}
           backendIp={backendIp}
           recheckTick={endRecheckTick}
+          finalize={finalize}
           onClose={handleEndSessionClose}
           onDownloadComplete={(sid) => {
             localStorage.setItem(ACKED_END_KEY, sid);

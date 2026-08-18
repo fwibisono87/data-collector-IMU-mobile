@@ -23,6 +23,25 @@ import {
   type CameraEvent,
 } from "@/lib/video_backup";
 import { finalizeWebmStream, type FinalizeResult } from "@/lib/webm_seekable";
+import type { FinalizeProgress } from "@/lib/ws_client";
+
+const STEP_LABEL: Record<string, string> = {
+  close_writers: "Closing and checksumming CSVs",
+  validate: "Validating captured data",
+  bundle: "Writing backup archive to the backend",
+};
+
+const STEP_MARK: Record<string, string> = {
+  done: "✓", running: "…", failed: "✕", skipped: "–", pending: "·",
+};
+
+const STEP_TONE: Record<string, string> = {
+  done: "text-green-400",
+  running: "text-cyan-300",
+  failed: "text-red-400",
+  skipped: "text-gray-500",
+  pending: "text-gray-600",
+};
 
 /** What one written video file turned out to be, recorded for the bundle and the UI. */
 interface VideoFinalizeReport extends FinalizeResult {
@@ -57,6 +76,7 @@ interface Props {
   missed: string[];
   backendIp: string;
   recheckTick: number;              // bump externally (e.g. LATE_DELIVERY) to re-fetch
+  finalize?: FinalizeProgress | null;   // live per-step backend finalization progress
   onClose: () => void;              // only reachable after a successful download
   onDownloadComplete: (sessionId: string) => void;
 }
@@ -102,6 +122,7 @@ export default function EndSessionModal({
   missed,
   backendIp,
   recheckTick,
+  finalize,
   onClose,
   onDownloadComplete,
 }: Props) {
@@ -645,6 +666,35 @@ export default function EndSessionModal({
           {m && <div>Data rows: <span className="text-gray-200 tabular-nums">{dataRows.toLocaleString()}</span></div>}
           <div>Videos: <span className="text-gray-200 tabular-nums">{effectiveVideoResults.length}</span>{cameraProblems.length > 0 && <span className="text-red-400"> ({cameraProblems.length} issue(s))</span>}</div>
         </div>
+
+        {/* Backend finalization progress — the operator's window into the slowest part
+            of a stop. Rendered until every step settles, then replaced by the verdict. */}
+        {finalize && finalize.steps?.some(s => s.state !== "pending") && (
+          <div className="shrink-0 glass-card p-2">
+            <div className="text-[11px] text-gray-400 mb-1">
+              Backend finalization
+              {finalize.finished_ms > 0 && finalize.failed.length === 0 && (
+                <span className="text-green-400"> — complete</span>
+              )}
+              {finalize.failed.length > 0 && (
+                <span className="text-red-400"> — {finalize.failed.length} step(s) failed</span>
+              )}
+            </div>
+            <ul className="space-y-0.5">
+              {finalize.steps.map(s => (
+                <li key={s.step} className="text-[11px] flex gap-2 items-baseline">
+                  <span className={`${STEP_TONE[s.state] ?? "text-gray-500"} w-3 tabular-nums`}>
+                    {STEP_MARK[s.state] ?? "·"}
+                  </span>
+                  <span className={s.state === "pending" ? "text-gray-600" : "text-gray-300"}>
+                    {STEP_LABEL[s.step] ?? s.step}
+                  </span>
+                  {s.detail && <span className="text-red-300/80 truncate">{s.detail}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Labels used */}
         {m && (
