@@ -22,6 +22,13 @@ class RecoveryUploader {
 
   static const int _chunkBytes = 256 * 1024;
   static const int _maxRetries = 5;
+  // A half-open Wi-Fi association — common as a phone drifts to the edge of range, which
+  // is exactly when rescue upload matters — leaves an HttpClient request waiting forever
+  // by default. Without these the upload neither completed nor failed, so the completion
+  // marker was never written and the dashboard waited on a phone that had stopped making
+  // progress.
+  static const Duration _connectTimeout = Duration(seconds: 10);
+  static const Duration _requestTimeout = Duration(seconds: 45);
 
   String _baseUrl = '';
 
@@ -77,7 +84,21 @@ class RecoveryUploader {
   Future<Map<String, String>?> _parseMeta(File f) async {
     final raf = await f.open();
     try {
-      final first = utf8.decode(await raf.read(512), allowMalformed: true);
+      // Read up to the first newline rather than a fixed 512 bytes. A long
+      // subject/tag/operator could push device_id past that window, and a truncated value
+      // was silently accepted — uploading the session under a mangled device id.
+      final buffer = <int>[];
+      while (buffer.length < 8192) {
+        final block = await raf.read(512);
+        if (block.isEmpty) break;
+        final newline = block.indexOf(0x0A);
+        if (newline >= 0) {
+          buffer.addAll(block.sublist(0, newline));
+          break;
+        }
+        buffer.addAll(block);
+      }
+      final first = utf8.decode(buffer, allowMalformed: true);
       if (first.startsWith('#')) {
         final m = <String, String>{};
         final id = RegExp(r'(\w+)=([^,\s]+)').allMatches(first);
@@ -105,7 +126,7 @@ class RecoveryUploader {
     // of materialising the whole CSV in the Dart heap (which could kill the app mid-recovery).
     final sha = await _sha256File(f);
 
-    final client = HttpClient();
+    final client = HttpClient()..connectionTimeout = _connectTimeout;
     RandomAccessFile? reader;
     try {
       // Resume point already stored on the backend.
@@ -132,7 +153,8 @@ class RecoveryUploader {
           last: true,
           sha: sha,
         );
-        final body = await response.transform(utf8.decoder).join();
+        final body =
+            await response.transform(utf8.decoder).join().timeout(_requestTimeout);
         try {
           final finalized = jsonDecode(body) as Map<String, dynamic>;
           return response.statusCode == 200 &&
@@ -161,7 +183,8 @@ class RecoveryUploader {
           sha: sha,
         );
         final statusCode = response.statusCode;
-        final responseText = await response.transform(utf8.decoder).join();
+        final responseText =
+            await response.transform(utf8.decoder).join().timeout(_requestTimeout);
         Map<String, dynamic>? server;
         try {
           server = jsonDecode(responseText) as Map<String, dynamic>;
@@ -233,7 +256,7 @@ class RecoveryUploader {
       req.headers.set('X-Sha256', sha);
     }
     req.add(chunk);
-    return await req.close();
+    return await req.close().timeout(_requestTimeout);
   }
 
   Future<Map<String, dynamic>?> _status(
@@ -246,9 +269,10 @@ class RecoveryUploader {
           'session_id': sessionId,
         });
         final req = await client.getUrl(uri);
-        final res = await req.close();
+        final res = await req.close().timeout(_requestTimeout);
         if (res.statusCode == 200) {
-          final body = await res.transform(utf8.decoder).join();
+          final body =
+              await res.transform(utf8.decoder).join().timeout(_requestTimeout);
           return jsonDecode(body) as Map<String, dynamic>;
         }
       } catch (_) {}

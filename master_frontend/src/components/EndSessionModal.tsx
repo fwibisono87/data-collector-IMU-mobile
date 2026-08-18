@@ -343,7 +343,10 @@ export default function EndSessionModal({
           recTotal,
           recComplete: recovery.filter(r => r.complete).length,
         });
-        if (!m.late_pending && !m.recovery_pending) break;   // nothing more expected
+        // Nothing more expected — including nothing still in flight. Without the
+        // uploads_in_progress term this broke out while a phone was still sending and
+        // consolidated without its rows.
+        if (!m.late_pending && !m.recovery_pending && !m.uploads_in_progress) break;
         if (prevSig !== "" && sig === prevSig) {
           unchangedStreak++;
           if (unchangedStreak >= 3) break;                   // stable → proceed
@@ -615,7 +618,10 @@ export default function EndSessionModal({
   const hasConsolidatedData = Boolean(
     m && Array.isArray(m.files) && m.files.some(f => f.kind === "consolidated"),
   );
-  const hasPendingPhoneData = Boolean(m?.late_pending || m?.recovery_pending);
+  const hasPendingPhoneData = Boolean(
+    m?.late_pending || m?.recovery_pending || m?.uploads_in_progress,
+  );
+  const transfers = m?.transfers_in_progress ?? [];
   // A PARTIAL integrity report can be expected after intentional disconnects. It must not
   // keep the operator in a perpetual "consolidate" state once the consolidated artifacts are
   // current and no phone still has data to deliver.
@@ -735,11 +741,23 @@ export default function EndSessionModal({
                 {m && m.analysis_ready_imu === false && <li>IMU acceptance checks failed — export remains available, but this data is not analysis-ready.</li>}
                 {cameraProblems.length > 0 && <li>Camera integrity issue: {cameraProblems.join("; ")}</li>}
               </ul>
-              {(m?.late_pending || m?.recovery_pending) && (
+              {hasPendingPhoneData && (
                 <p className="text-[10px] text-gray-500 mt-1">
                   Phones can still flush buffered rows for up to 10 minutes after stop. Use
                   “Pull &amp; consolidate” to fetch them, or Re-check before downloading.
                 </p>
+              )}
+              {transfers.length > 0 && (
+                <ul className="mt-1 space-y-0.5">
+                  {transfers.map(t => (
+                    <li key={t.device_id} className="text-[10px] text-amber-200/90 tabular-nums">
+                      {t.state === "corrupt" ? "✕" : "↑"} {t.role || t.device_id.slice(0, 8)} —{" "}
+                      {t.state === "corrupt"
+                        ? `upload failed verification (${t.corrupt_attempts}×), phone will resend`
+                        : `sending ${(t.received_bytes / 1048576).toFixed(1)} of ${(t.total_bytes / 1048576).toFixed(1)} MB`}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           )}

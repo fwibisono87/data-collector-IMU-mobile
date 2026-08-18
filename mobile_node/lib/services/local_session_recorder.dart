@@ -103,7 +103,12 @@ class LocalSessionRecorder {
       _events = eventsFile.openWrite(
           mode: eventsExists ? FileMode.append : FileMode.write);
       _sessionId = sessionId;
-      _rows = 0;
+      // Seed from what is already in the file, not zero. On a resumed session (the
+      // foreground engine was killed and restarted mid-recording) this counter is written
+      // into the integrity sidecar next to a sha256 and byte count taken over the WHOLE
+      // file, so zeroing it made a resumed session report only its final fragment's rows
+      // and look like data loss that never happened.
+      _rows = exists ? await _countRows(_file!) : 0;
       _lastError = null;
       _ioChain = Future<void>.value();
       _flushQueued = false;
@@ -126,6 +131,26 @@ class LocalSessionRecorder {
 
   static String _sanitize(String s) =>
       s.replaceAll(RegExp(r'[^\w.-]+'), '_').replaceAll(RegExp(r'_+'), '_');
+
+  /// Count data rows already in a rescue CSV, streaming so a long recording is never
+  /// materialised in the Dart heap. Metadata (`#`) and header lines do not count.
+  Future<int> _countRows(File f) async {
+    var rows = 0;
+    try {
+      await for (final line in f
+          .openRead()
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (line.isEmpty || line.startsWith('#') || line.startsWith('timestamp_ms')) {
+          continue;
+        }
+        rows++;
+      }
+    } catch (e) {
+      debugPrint('LocalSessionRecorder: row recount failed: $e');
+    }
+    return rows;
+  }
 
   /// A killed process can leave a partial final CSV line (no trailing newline).
   /// Trim it on reopen so the merged dataset has no malformed row. Keeping
@@ -316,9 +341,27 @@ class LocalSessionRecorder {
     return files;
   }
 
+  /// Delete old rescue CSVs, but never one that has not been confirmed uploaded.
+  ///
+  /// This file is documented above as the system's data guarantee, and pruning used to
+  /// drop it on a pure recency rule: starting a 21st session deleted the oldest recording
+  /// whether or not the backend had ever received it. The dashboard already refuses to
+  /// reclaim unconfirmed video for exactly this reason; the phone now applies the same
+  /// rule to its own copy.
   Future<void> _prune() async {
     final files = await listSessions();
-    for (final f in files.skip(_maxSessionsKept)) {
+    if (files.length <= _maxSessionsKept) return;
+    var kept = 0;
+    var retainedUnuploaded = 0;
+    for (final f in files) {
+      if (kept < _maxSessionsKept) {
+        kept++;
+        continue;
+      }
+      if (!await _isUploaded(f)) {
+        retainedUnuploaded++;
+        continue; // never reclaim data the backend has not confirmed
+      }
       try {
         final sidecar = File('${f.path}.events.jsonl');
         if (await sidecar.exists()) await sidecar.delete();
@@ -327,5 +370,33 @@ class LocalSessionRecorder {
         await f.delete();
       } catch (_) {}
     }
+    if (retainedUnuploaded > 0) {
+      debugPrint('LocalSessionRecorder: retained $retainedUnuploaded '
+          'un-uploaded session(s) past the prune limit');
+    }
+  }
+
+  /// True when RecoveryUploader wrote a completion marker matching this exact file.
+  Future<bool> _isUploaded(File f) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final markers = Directory(dir.path)
+          .listSync()
+          .whereType<File>()
+          .where((m) => m.path.contains('recovery_uploaded_'));
+      final length = await f.length();
+      for (final marker in markers) {
+        try {
+          final data =
+              jsonDecode(await marker.readAsString()) as Map<String, dynamic>;
+          if (data['file'] == f.path && data['bytes'] == length) return true;
+        } catch (_) {
+          continue;
+        }
+      }
+    } catch (_) {
+      // If we cannot prove it was uploaded, keep it.
+    }
+    return false;
   }
 }

@@ -35,6 +35,16 @@ export interface LabelStat {
   row_count: number;
 }
 
+export interface TransferInfo {
+  device_id: string;
+  role: string;
+  state: string;            // receiving | corrupt
+  received_bytes: number;
+  total_bytes: number;
+  updated_at_ms: number;
+  corrupt_attempts: number;
+}
+
 export interface ExportManifest {
   session_id: string;
   found: boolean;
@@ -51,6 +61,10 @@ export interface ExportManifest {
   reasons: string[];
   late_pending: boolean;
   recovery_pending: boolean;
+  // A phone transfer that has started but not verified. recovery_pending only covers
+  // uploads that already completed, so on its own it cannot see data still arriving.
+  uploads_in_progress?: boolean;
+  transfers_in_progress?: TransferInfo[];
   per_roles: string[];
   labels_used: LabelStat[];
   data_rows: number;

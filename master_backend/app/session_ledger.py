@@ -7,6 +7,7 @@ was lost. Every write is an atomic replace in the same directory.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -26,10 +27,29 @@ class SessionLedger:
         return self.root / f"{session_id}.state.json"
 
     def write(self, session_id: str, record: dict[str, Any]) -> None:
+        """Atomically install a new record, durably.
+
+        os.replace is atomic against concurrent readers, but the rename can reach the disk
+        before the bytes behind it do — leaving a zero-length or partial state file after a
+        power loss, which is exactly the scenario this ledger exists to survive. fsync the
+        contents first, then the directory entry.
+        """
         target = self.path(session_id)
         tmp = target.with_suffix(target.suffix + ".tmp")
-        tmp.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+        payload = json.dumps(record, indent=2, sort_keys=True)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, target)
+        # Directory fsync makes the rename itself durable. Not available on every
+        # platform (Windows rejects opening a directory), so failure is non-fatal.
+        with contextlib.suppress(OSError, AttributeError):
+            dir_fd = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
 
     def read(self, session_id: str) -> dict[str, Any] | None:
         try:

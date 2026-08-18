@@ -554,6 +554,12 @@ class WebSocketClient {
         'reason': 'state_resync',
         'session_id': ended
       });
+      // Offer the rescue CSV exactly as the explicit STOP_SESSION path does. Without
+      // this, a phone that learned the session ended from the heartbeat — which is what
+      // happens whenever the backend restarts and finalizes the session at startup — sat
+      // on its local copy indefinitely: it is still *connected*, so no reconnect is
+      // coming to trigger _afterConnectReconcile, and nothing else offers the file.
+      unawaited(RecoveryUploader().uploadPending(onlySessionId: ended));
     } else if (serverRecording && sid != null && _activeSessionId != sid) {
       // A session is running that we are not part of — we missed the START, or a new
       // session began while we were dark. Adopt it and start a fresh dedup namespace.
@@ -688,15 +694,13 @@ class WebSocketClient {
         'count': moved.length,
         'session_id': orphanSessionId,
       });
+      // One event, carrying the session the bytes actually belonged to. This used to be
+      // emitted twice, the second time reading buf.sessionId — which quarantine() has
+      // already cleared, so the operator saw a duplicate alert naming a null session.
       _emitEvent({
         'type': 'buffer_orphaned',
         'files': moved,
         'session_id': orphanSessionId
-      });
-      _emitEvent({
-        'type': 'buffer_orphaned',
-        'files': moved,
-        'session_id': buf.sessionId
       });
       return;
     }

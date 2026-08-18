@@ -58,6 +58,22 @@ _DEV_COL = 10
 _SEQ_COL = 9
 _consolidate_locks: dict[str, asyncio.Lock] = {}
 _bundle_locks: dict[str, asyncio.Lock] = {}
+# Per-session locks accumulate one entry per session for the lifetime of the process.
+# A rig that runs for weeks would otherwise grow these without bound.
+_MAX_TRACKED_LOCKS = 256
+
+
+def _lock_for(locks: dict, key) -> asyncio.Lock:
+    """Get (or create) a per-key lock, evicting the oldest idle one past the cap."""
+    lock = locks.get(key)
+    if lock is None:
+        if len(locks) >= _MAX_TRACKED_LOCKS:
+            for stale_key, stale_lock in list(locks.items()):
+                if not stale_lock.locked():
+                    locks.pop(stale_key, None)
+                    break
+        lock = locks.setdefault(key, asyncio.Lock())
+    return lock
 _manifest_scan_cache: dict[str, tuple[tuple[tuple[str, int, int], ...], tuple[int, list[dict]]]] = {}
 
 
@@ -523,6 +539,25 @@ async def export_manifest(session_id: str):
             or max(_mtime(csv) for _, csv in recovery_sources) > session_mtime
         )
 
+    # `recovery_pending` answers "have VERIFIED uploads been folded into the consolidation".
+    # It structurally cannot see a transfer that is still running or one that failed its
+    # digest, so a phone mid-upload was invisible and the export modal's wait loop declared
+    # "nothing more expected" and consolidated without it. These two say what is still owed.
+    transfers_in_progress = [
+        {
+            "device_id": r.get("device_id", ""),
+            "role": _recovery_role(r),
+            "state": r.get("state", "receiving"),
+            "received_bytes": int(r.get("received_bytes", 0) or 0),
+            "total_bytes": int(r.get("total_bytes", 0) or 0),
+            "updated_at_ms": int(_mtime(Path(r["csv_path"])) * 1000) if r.get("csv_exists") else 0,
+            "corrupt_attempts": int(r.get("corrupt_attempts", 0) or 0),
+        }
+        for r in recovery
+        if not r.get("verified")
+    ]
+    uploads_in_progress = bool(transfers_in_progress)
+
     # Fall back to the ledger's copy: a dashboard that reconnects after the backend
     # restarted has no in-memory integrity report, and reporting UNKNOWN for a session
     # that already passed would read as a regression.
@@ -593,6 +628,11 @@ async def export_manifest(session_id: str):
         "reasons": reasons,
         "late_pending": late_pending,
         "recovery_pending": recovery_pending,
+        # Phone transfers that have started but not verified. Separate from
+        # recovery_pending on purpose: that flag is about consolidation currency, this one
+        # is about data that has not arrived yet.
+        "uploads_in_progress": uploads_in_progress,
+        "transfers_in_progress": transfers_in_progress,
         "per_roles": sorted(per_role.keys()),
         "labels_used": labels,
         "data_rows": data_rows,
@@ -679,7 +719,7 @@ async def export_consolidate(session_id: str):
         )
         return result, per_role
 
-    lock = _consolidate_locks.setdefault(session_id, asyncio.Lock())
+    lock = _lock_for(_consolidate_locks, session_id)
     async with lock:
         try:
             result, per_role = await asyncio.get_event_loop().run_in_executor(
@@ -703,12 +743,30 @@ async def export_consolidate(session_id: str):
             None, validate_consolidated, session_id, validation_inputs
         )
         validation_path = primary_folder / f"{session_id}_consolidated_validation.json"
-        validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+        # Sidecars are guarded separately from the merge. The merged CSVs are already
+        # durable by this point; a failure to write a report about them must not be
+        # reported to the operator as "consolidation failed", which invited them to redo
+        # a merge that had in fact succeeded.
+        sidecar_errors: list[str] = []
+        try:
+            validation_path.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+        except OSError as exc:
+            sidecar_errors.append(f"validation sidecar: {exc}")
+            await audit.log("ERROR", "consolidated_validation_write_failed", {
+                "session_id": session_id, "error": str(exc),
+            })
 
         # Complementary to the above, not a duplicate: this reconstructs each device from
         # the ledger and re-runs the FULL validator over the merged files, so the export
         # carries rate/disconnect evidence too — not just the sequence-gap verdict.
-        revalidated = await _revalidate_consolidated(session_id, per_role["per_role"])
+        try:
+            revalidated = await _revalidate_consolidated(session_id, per_role["per_role"])
+        except Exception as exc:
+            revalidated = None
+            sidecar_errors.append(f"revalidation: {exc}")
+            await audit.log("ERROR", "consolidated_revalidation_failed", {
+                "session_id": session_id, "error": str(exc),
+            })
 
         summary_path = primary_folder / f"{session_id}_consolidation.json"
         summary = {
@@ -719,7 +777,13 @@ async def export_consolidate(session_id: str):
             **result,
             "validation": validation,
         }
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        try:
+            summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        except OSError as exc:
+            sidecar_errors.append(f"consolidation summary: {exc}")
+            await audit.log("ERROR", "consolidation_summary_write_failed", {
+                "session_id": session_id, "error": str(exc),
+            })
 
     await audit.log("INFO", "session_consolidated", {
         "session_id": session_id,
@@ -734,6 +798,9 @@ async def export_consolidate(session_id: str):
         "per_role": per_role["per_role"],
         "integrity_report": revalidated,
         "validation": validation,
+        # Non-empty means the data merged correctly but a report about it could not be
+        # written. The caller shows this as a warning, not as a failed consolidation.
+        "sidecar_errors": sidecar_errors,
     }
 
 
@@ -785,7 +852,7 @@ async def _build_bundle_locked(
     session_id: str, out: Path, files: list[dict], recovery: list[dict]
 ) -> dict:
     """Serialize bundle rebuilds for one session so two download paths cannot share a .tmp."""
-    lock = _bundle_locks.setdefault(session_id, asyncio.Lock())
+    lock = _lock_for(_bundle_locks, session_id)
     async with lock:
         return await asyncio.get_event_loop().run_in_executor(
             None, _build_bundle, session_id, out, files, recovery

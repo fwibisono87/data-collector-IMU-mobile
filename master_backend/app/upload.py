@@ -141,7 +141,8 @@ async def upload_csv(request: Request):
     body = await request.body()
     if offset < 0 or total < 0 or len(body) > _MAX_CHUNK_BYTES:
         raise HTTPException(status_code=400, detail="invalid upload offsets or chunk size")
-    lock = _upload_locks.setdefault((session_id, device_id), asyncio.Lock())
+    from .export import _lock_for
+    lock = _lock_for(_upload_locks, (session_id, device_id))
     async with lock:
         info = _load_info(session_id, device_id)
         csv = _csv_path(session_id, device_id)
@@ -169,9 +170,29 @@ async def upload_csv(request: Request):
         })
         if complete:
             if not sha or info["received_bytes"] != total or _sha256(csv) != sha:
+                # Reset the transfer instead of parking it. Leaving the bad bytes with
+                # received_bytes == total made the phone take its zero-byte finalize path
+                # on every retry, recompute the same failing digest, and 422 forever — the
+                # upload could never complete and never be seen as pending either.
+                attempts = int(info.get("corrupt_attempts", 0)) + 1
+                info["corrupt_attempts"] = attempts
                 info["state"] = "corrupt"
+                try:
+                    csv.unlink()
+                except OSError:
+                    pass
+                info["received_bytes"] = 0
+                info["complete"] = False
+                info["sha256_verified"] = False
                 _save_info(info)
-                raise HTTPException(status_code=422, detail="final size or sha256 verification failed")
+                await audit.log("ERROR", "recovery_upload_corrupt", {
+                    "session_id": session_id, "device_id": device_id,
+                    "attempts": attempts, "expected_sha256": sha,
+                })
+                raise HTTPException(
+                    status_code=422,
+                    detail="final size or sha256 verification failed; transfer reset, resend from 0",
+                )
             info.update({"sha256": sha, "sha256_verified": True, "complete": True, "state": "verified"})
             await audit.log("INFO", "recovery_upload_complete", {
                 "session_id": session_id, "device_id": device_id, "bytes": info["received_bytes"],
