@@ -77,7 +77,12 @@ class WebSocketClient {
 
   // Keep this aligned with pubspec.yaml. It is sent to the backend so operators can see
   // whether a phone is running the build that was actually tested.
-  static const String _reportedAppVersion = '2.2.0';
+  // Bumped for the session-lifecycle work: rescue upload on state-resync stop, upload
+  // timeouts, prune that never reclaims un-uploaded data, honest resumed row counts.
+  // The dashboard surfaces this per device — without a bump, a phone carrying these
+  // fixes is indistinguishable from one that does not, which is the exact failure the
+  // device card exists to catch.
+  static const String _reportedAppVersion = '2.3.0';
   static const Duration _telemetryStaleAfter = Duration(seconds: 12);
 
   String? get serverState => _serverState;
