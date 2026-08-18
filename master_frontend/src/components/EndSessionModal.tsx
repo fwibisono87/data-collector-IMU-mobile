@@ -661,6 +661,15 @@ export default function EndSessionModal({
           </span>
         </div>
 
+        {/* Scrolling body. Every section below is optional, and with all of them rendered
+            (finalize progress + labels + per-device integrity + consolidate result + errors)
+            the content exceeds the 88vh cap. The panel is overflow-hidden and every child
+            was shrink-0, so the excess was simply clipped — and because the download block
+            is last, the primary action was what disappeared. Pressing Re-check cleared two
+            of the result blocks and made it fit again, which is why it looked intermittent.
+            The body scrolls; the header and the download footer stay pinned. */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 -mr-2 pr-2">
+
         {/* Session stats */}
         <div className="shrink-0 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-400">
           <div>Session <span className="text-gray-200 tabular-nums">{session.sessionId}</span></div>
@@ -842,8 +851,11 @@ export default function EndSessionModal({
           <div className="shrink-0 text-[11px] text-red-400">{dataError}</div>
         )}
 
-        {/* Download */}
-        <div className="shrink-0 mt-auto pt-1 border-t border-white/10 flex flex-col gap-2">
+        </div>{/* /scrolling body */}
+
+        {/* Download — pinned. This is the action the dialog exists for; it must never be
+            the thing that gets pushed out of view. */}
+        <div className="shrink-0 pt-1 border-t border-white/10 flex flex-col gap-2">
           {!canStreamSave() && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300">
               This browser cannot safely export long recordings. Reopen this session in Chrome
