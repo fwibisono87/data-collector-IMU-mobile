@@ -66,7 +66,13 @@ class DeviceWriter:
             )
             self._last_fsync = now
 
-    async def close(self) -> dict:
+    async def close(self, *, sort: bool = True) -> dict:
+        """Flush, fsync and close. `sort=False` skips the re-order pass.
+
+        Retiring a writer left over from a previous session must still make its bytes
+        durable, but must not spend an unbounded re-sort inside START — the merge that
+        consolidates that session re-sorts anyway.
+        """
         if self._file:
             await self._file.flush()
             await asyncio.get_event_loop().run_in_executor(
@@ -74,7 +80,7 @@ class DeviceWriter:
             )
             await self._file.close()
             self._file = None
-        if _SORT_ON_CLOSE:
+        if _SORT_ON_CLOSE and sort:
             reorder = await asyncio.get_event_loop().run_in_executor(
                 None, _sort_rows_by_timestamp, self._path
             )
@@ -430,6 +436,10 @@ class IoManager:
         # and never flushed, and a stale rescue writer was closed at the *next* stop,
         # putting the previous session's path and row count into this session's results.
         await self._retire_writers()
+        # Bitsets are keyed by (device, session) so they cannot collide across sessions,
+        # but without this they would accumulate for the life of the process on a rig that
+        # runs many sessions between restarts.
+        dedup.clear()
 
         self._session_id = session_id
         folder_name = f"{subject_name}_{session_tag}".replace(" ", "_")
@@ -457,7 +467,7 @@ class IoManager:
         stale = {**self._writers, **self._rescue_writers}
         for device_id, writer in stale.items():
             try:
-                await writer.close()
+                await writer.close(sort=False)
             except Exception as exc:
                 await audit.log("ERROR", "stale_writer_close_failed", {
                     "device_id": device_id, "path": str(writer._path), "error": str(exc),
