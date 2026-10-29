@@ -1,3 +1,5 @@
+> **Historical — describes the pre-v3 system; see [docs/rebuild/SPEC.md](docs/rebuild/SPEC.md).**
+
 # mul_cam_plan_audit.md — Reviewer audit (Opus) of Sonnet's multi-camera implementation
 
 > **Scope of this audit:** commit `85cb2ce` on `experiment/operational-fixes`, against the

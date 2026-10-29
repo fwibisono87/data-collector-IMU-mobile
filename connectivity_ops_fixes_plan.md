@@ -1,3 +1,5 @@
+> **Historical — describes the pre-v3 system; see [docs/rebuild/SPEC.md](docs/rebuild/SPEC.md).**
+
 # Connectivity, Startup & Mid-Session Disconnect — Analysis & Surgical Fix Plan
 
 **Author:** Opus (senior reviewer / analysis)

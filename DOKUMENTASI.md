@@ -1,3 +1,5 @@
+> **Historical — describes the pre-v3 system; see [docs/rebuild/SPEC.md](docs/rebuild/SPEC.md).**
+
 # Dokumentasi Teknis — IMU Telemetry System
 
 > Dokumen referensi teknis (gaya JavaDoc/API reference) untuk seluruh komponen kode dalam repositori ini.

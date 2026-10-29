@@ -1,202 +1,277 @@
 # Startup Guide
 
-This guide covers the standard setup for the three runtime parts of the system:
+The system is **one process on one laptop** plus **one APK on each phone**:
 
-- Backend: FastAPI service in `master_backend/`
-- Operator dashboard: Next.js app in `master_frontend/`
-- Mobile client: Flutter app in `mobile_node/`
+- `master_backend/run.py` — FastAPI. Serves the phone WebSockets (`/ws/telemetry`,
+  `/ws/control`, `/upload/csv`), the camera service (one ffmpeg per USB camera), the
+  session/ZIP pipeline **and the dashboard** (static build) on port **8000**.
+- `mobile_node/` — the native Kotlin app **IMU Node**. Nothing else runs on the phones.
 
-The recommended order is backend first, then dashboard, then the phones.
+There is no Node at runtime, no second web server, and no port 3000. `http://<laptop>:8000/`
+is the dashboard.
 
-## Prerequisites
-
-- Python 3.10+
-- Node.js 18+
-- Flutter 3.3+ if you are building or running the mobile client
-- `protoc` if you need to regenerate shared protobuf bindings
-- Windows with a writable local storage path for session files
-
-## Quick start (all-in-one)
-
-Assumes env + build already done (see first-time setup below if not):
-
-- Double-click **`start.bat`**, or run **`.\start.ps1`**, or **`make start`**.
-- It prints the **Backend LAN IP** to type into the phones, then launches backend +
-  frontend in separate windows and opens the dashboard.
-
-To check the backend IP anytime WITHOUT stopping it, run **`.\ops\ip.ps1`** (or `make ip`)
-in a second terminal.
-
-### For peers pulling this repo
-
-1. Check out this branch: `git fetch && git checkout experiment/operational-frontend-fixes && git pull`.
-2. You need your own `master_backend/.env` (copy from `.env.example`), `master_backend/venv/`,
-   and `master_frontend/node_modules/` — none of these travel with git. `start.ps1` warns if
-   any are missing instead of failing outright.
-3. The phones do **not** update from git — Flutter changes need a fresh
-   `flutter build apk --release` and reinstall per phone.
-
-See `connectivity_ops_fixes_plan.md` §9a for the full peer-onboarding rationale.
+Order of a normal day: laptop first (`start.bat`), then the phones (open the app), then
+Setup → Start.
 
 ---
 
-## 1. Backend setup
+## 1. First-time setup on Windows (field laptop)
 
-The backend is responsible for session state, WebSocket routing, audit logging, and mDNS discovery.
+### 1.1 Python 3.12
 
-### First-time setup
-
-```powershell
-cd master_backend
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### Configure environment
-
-Create the backend environment file:
+Install **Python 3.12 (64-bit)** from <https://www.python.org/downloads/windows/> and tick
+**"Add python.exe to PATH"** in the installer. Check in a new terminal:
 
 ```powershell
-copy .env.example .env
+python --version        # Python 3.12.x
 ```
 
-Minimum expected values:
+The launcher creates the virtual environment itself (`master_backend\.venv`) and installs
+`master_backend\requirements.txt` — you do not need to do it by hand.
+
+> If an older checkout has `master_backend\venv` next to it, delete it. The launcher and
+> the docs use `master_backend\.venv` (the one that is git-ignored).
+
+### 1.2 ffmpeg
+
+The cameras are captured by ffmpeg on the backend, so `ffmpeg.exe` **and** `ffprobe.exe`
+must be findable. The launcher checks this and refuses to start without them.
+
+```powershell
+mkdir vendor\ffmpeg\bin
+# download https://www.gyan.dev/ffmpeg/builds/ -> ffmpeg-release-essentials.zip
+# copy bin\ffmpeg.exe and bin\ffprobe.exe into vendor\ffmpeg\bin\
+```
+
+Accepted, in this order:
+
+1. `IMU_FFMPEG` / `IMU_FFPROBE` in `master_backend\.env` (full paths);
+2. `vendor\ffmpeg\bin\ffmpeg.exe`, then `vendor\ffmpeg\ffmpeg.exe`;
+3. `PATH`.
+
+Check the important part — a build **with** DirectShow (dshow) support, which every
+Windows build of ffmpeg has:
+
+```powershell
+vendor\ffmpeg\bin\ffmpeg.exe -hide_banner -list_devices true -f dshow -i dummy
+```
+
+It prints the camera names and their `Alternative name @device_pnp_…`; those are what the
+dashboard lists. (The alternative name is the stable key — two identical webcams share the
+friendly name but not the alternative name.)
+
+### 1.3 Environment file
+
+```powershell
+copy master_backend\.env.example master_backend\.env
+```
+
+Minimum to edit:
 
 ```env
-SSD_PATH=D:/IMU_Data_SSD
-RESCUE_PATH=D:/IMU_Data_Rescue
-BIND_HOST=0.0.0.0
+SSD_PATH=D:/IMU_Data_SSD          # session folders + ZIPs + calibration references
+RESCUE_PATH=D:/IMU_Data_Rescue    # rescue uploads pulled off phones
+RECOVERY_PATH=D:/IMU_Data_Recovery
 PORT=8000
+BIND_HOST=0.0.0.0
 LAN_SUBNET=192.168.1.0/24
 FSYNC_INTERVAL_SEC=5
 MAX_CONCURRENT_DEVICES=8
-LATE_ACCEPT_SEC=600             # how long after STOP a phone can still deliver buffered data
-SORT_CSV_ON_CLOSE=true          # repair out-of-order rows from a mid-session reconnect
+LATE_ACCEPT_SEC=600               # how long after STOP a phone may still deliver buffered data
+SORT_CSV_ON_CLOSE=true            # repair out-of-order rows after a mid-session reconnect
 ```
 
-Create the storage directories if they do not already exist:
+Create the directories if they do not exist:
 
 ```powershell
 mkdir D:\IMU_Data_SSD
 mkdir D:\IMU_Data_Rescue
+mkdir D:\IMU_Data_Recovery
 ```
 
-### Run the backend
+`start_all.ps1` fails fast if one of the required keys is missing: a backend that silently
+falls back to `./data` on `C:` is only discovered a session too late.
 
-Run this from the repository root, not from inside `master_backend/`:
+### 1.4 The dashboard build
+
+The built dashboard is committed in `master_backend/app/static/` — the laptop needs no
+Node. After a `git pull` that touched `dashboard/src/`, rebuild it **on a machine with
+Node** and commit the output:
+
+```bash
+make dashboard        # cd dashboard && npm ci && npm run build
+```
+
+## 2. Daily start on Windows
+
+Double-click **`start.bat`**, or in a terminal:
 
 ```powershell
-master_backend\venv\Scripts\activate
-python master_backend/run.py
+.\start_all.ps1      # full: checks/repairs the venv and installs requirements
+.\start.ps1          # daily: never touches pip (see below)
+.\ops\ip.ps1         # print the LAN IP, dashboard URL and /health any time, read-only
 ```
 
-If you prefer to call uvicorn directly:
+What `start_all.ps1` does, in order:
 
-```powershell
-uvicorn master_backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+1. validates `master_backend\.env` and exports its values (including `PORT` — `run.py`
+   reads `PORT` *before* the app loads `.env`, so the launcher is what keeps listener and
+   app in agreement);
+2. stops a previous backend and any ffmpeg it left behind (a webcam can be opened by one
+   process at a time);
+3. finds `ffmpeg`/`ffprobe`, or fails with a download hint;
+4. creates or repairs `master_backend\.venv` and installs `requirements.txt`
+   (`start.ps1` skips this step — reinstalling dependencies minutes before a subject
+   arrives is pure risk; run `start_all.ps1` after a `git pull` that changed
+   `requirements.txt`);
+5. starts `master_backend\run.py`, waits for `/health`, prints the LAN IP and the dashboard
+   URL, and opens the dashboard in the default browser;
+6. prints the phone instructions (below).
+
+Stop everything with Ctrl+C in that window or `.\ops\stop.ps1` from another terminal; the
+latter also kills the ffmpeg children (matched by this checkout, never a stranger's
+ffmpeg).
+
+**No auto-reload, anywhere.** `run.py` only reloads when `IMU_DEV_RELOAD=1`, which is a
+development switch: a reload restarts the backend *under a running recording*. The operator
+launchers force it to `0`; use `make dev` on a development machine only.
+
+## 3. Installing the APK on the phones
+
+Build it (Linux/macOS with the Android SDK; `make apk`):
+
+```bash
+cd mobile_node && ./gradlew assembleRelease
+# -> mobile_node/app/build/outputs/apk/release/app-release.apk
 ```
 
-The backend is ready when it logs that uvicorn is running on port 8000.
+Install on every connected phone **without losing data**:
 
-### Backend endpoints
-
-- `ws://<laptop-ip>:8000/ws/telemetry` - sensor stream from the mobile client
-- `ws://<laptop-ip>:8000/ws/control` - command channel between dashboard and mobile client
-- `ws://<laptop-ip>:8000/ws/frontend` - dashboard connection for session state
-- `ws://<laptop-ip>:8000/ws/live` - live chart updates for the dashboard
-
-## 2. Frontend setup
-
-The frontend is the operator dashboard. It handles connection, preflight checks, labeling, integrity review, and camera coordination.
-
-### First-time setup
-
-```powershell
-cd master_frontend
-npm install
+```bash
+./ops/install_phones.sh          # or: make install-phones
 ```
 
-### Run the dashboard
+The script never uninstalls: the phone-local rescue CSVs live in app-specific external
+storage, which Android deletes on uninstall. It reports the version it installed, and if a
+signature mismatch makes `adb install -r` impossible it stops and tells you how to pull the
+data off first. Manual equivalent:
 
-```powershell
-npm run dev
+```bash
+adb install -r mobile_node/app/build/outputs/apk/release/app-release.apk
+adb shell dumpsys package com.example.sensors_app | grep versionName   # confirm
 ```
 
-Open http://localhost:3000 in your browser.
+Then, on each phone: open **IMU Node**, pick a role, and let it connect. Discovery is mDNS
+(`_imu-telemetry._tcp`) — if the laptop is not found, type the IP printed by the launcher.
+The version each phone reports is shown on its card in Setup; all phones in one study must
+be on the same version.
 
-### Production build
+Per-phone MIUI/HyperOS settings (autostart, battery, notifications) are in
+[`docs/REDMI_NOTE_12_SETUP.md`](docs/REDMI_NOTE_12_SETUP.md) — do them once per phone, or the OS
+will kill the recording service mid-session.
 
-```powershell
-npm run build
-npm run start
+## 4. Linux development setup
+
+```bash
+python3 -m venv master_backend/.venv
+master_backend/.venv/bin/pip install -r master_backend/requirements.txt
+apt install ffmpeg                     # or put the binaries in vendor/ffmpeg/bin/
+
+cp master_backend/.env.example master_backend/.env   # SSD_PATH=./data is fine here
+./start_all.sh                         # backend + dashboard on :8000, opens a browser
 ```
 
-## 3. Mobile client setup
+Without real webcams, use synthetic cameras — the whole pipeline (capture, recording,
+calibration, ZIP) runs unchanged:
 
-The Flutter app reads device sensors and connects to the backend over the local network.
+```bash
+IMU_CAMERAS=fake IMU_FAKE_CAMERAS=4 ./start_all.sh
+```
 
-### First-time setup
+Tests and builds:
 
-If you are building the app locally, install Flutter dependencies in `mobile_node/` and make sure the generated protobuf files are present.
+```bash
+make test          # backend fast suite (pytest -m "not slow") + dashboard npm test
+make test-slow     # camera/video/soak suites (minutes, real ffmpeg children)
+make dashboard     # rebuild master_backend/app/static/ (commit the output)
+make apk           # phone APK
+```
 
-### Connection notes
+For a phone over USB without Wi-Fi:
 
-- The app can discover the backend via mDNS when both devices are on the same LAN.
-- If discovery fails, enter the laptop IP manually.
-- The dashboard preflight should pass before starting a recording session.
+```bash
+adb reverse tcp:8000 tcp:8000     # the phone then reaches the laptop on 127.0.0.1:8000
+```
 
-## Typical startup order
+## 5. Environment variables
 
-1. Start the backend first so it can register mDNS and accept WebSocket connections.
-2. Start the frontend second so the operator can confirm the session state and preflight checks.
-3. Open the Flutter app on each phone and connect it to the backend.
-4. Verify the dashboard is ready before starting the recording session.
+The launcher exports everything in `master_backend\.env`; anything you set in the
+environment yourself wins over the file (python-dotenv does not override).
 
-## Finding the laptop IP
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `PORT` | `8000` | The single port: dashboard, `/api/*`, `/ws/*`, `/health`. Must match `PORT` in `.env` — the launcher guarantees it. |
+| `SSD_PATH` | `./data` | Root of all research data: `Data_Riset_IMU/<subject>_<tag>/<sid>_…`, the session ZIPs, `_state/` (notices, draft, session ledger) and `_calibration/`. Point it at the SSD. |
+| `RESCUE_PATH` | `./data_rescue` | Where rescued/late data pulled off phones is staged. |
+| `RECOVERY_PATH` | `./data_recovery` | Staging area for the legacy recovery upload path. |
+| `IMU_CAMERAS` | (real discovery) | `fake` → synthetic `lavfi testsrc2` cameras; `stub` → in-memory test double, no ffmpeg; `off` → no cameras. |
+| `IMU_FAKE_CAMERAS` | `2` | How many fake cameras (`fake:0`…`fake:n-1`). |
+| `IMU_VIDEO_CODEC` | `vp9` | `vp9` or `vp8`. Read at every recording start. VP9 sustains 5×720p30 at ~37 % CPU; VP8 does not keep up on the current laptop (see `master_backend/app/camera/README.md`). |
+| `IMU_FFMPEG` / `IMU_FFPROBE` | `vendor/ffmpeg/`, then `PATH` | Explicit binary paths when ffmpeg is not vendored. |
+| `IMU_CAM_WIDTH` / `IMU_CAM_HEIGHT` / `IMU_CAM_FPS` | `1280` / `720` / `30` | Capture geometry requested from the cameras. |
+| `FSYNC_INTERVAL_SEC` | `5` | CSV fsync interval during recording. |
+| `LATE_ACCEPT_SEC` | `600` | How long after STOP late phone data is still merged. |
+| `SORT_CSV_ON_CLOSE` | `true` | Sort rows by timestamp when closing (repairs a mid-session reconnect). |
+| `MAX_CONCURRENT_DEVICES` | `8` | Phone connection cap. |
+| `BIND_HOST`, `LAN_SUBNET` | `0.0.0.0`, … | Reserved/legacy: `run.py` always binds `0.0.0.0`. Kept so existing `.env` files stay valid. |
+| `IMU_DEV_RELOAD` | unset | Development only: `1` restarts the backend on code changes. Never on the field laptop. |
 
-Run `.\ops\ip.ps1` — it lists every IPv4, marks the LAN one to use, checks whether the
-backend is up on :8000, and probes /health. (Fallback: `ipconfig | findstr "IPv4"`.)
+## 6. Endpoints (for debugging)
 
-Use the IP that is on the same Wi-Fi subnet as the phones, usually something like 192.168.1.x.
+| Path | Who uses it |
+|------|-------------|
+| `http://<laptop>:8000/` | Dashboard (static build, same origin as the API) |
+| `GET /health` | Version/build id, session state, online phones, LAN IP |
+| `GET /api/state`, `POST /api/session/{start,stop,label}` | Dashboard REST |
+| `WS /ws/ui` | Dashboard live updates (snapshots, live samples, finalize progress) |
+| `WS /ws/telemetry`, `WS /ws/control` | Phones (protobuf) |
+| `POST /upload/csv` | Phone rescue upload |
 
-## Common issues
+`/health` reporting `build_id` is the same sha the dashboard shows in its top bar; if they
+differ the browser is running an older bundle.
+
+## 7. Common issues
 
 | Problem | Fix |
 |---------|-----|
-| `ModuleNotFoundError` on backend start | Run from repo root, not from inside `master_backend/` |
-| Port 8000 already in use | `netstat -ano \| findstr :8000` → kill the PID (or `.\ops\stop.ps1`) |
-| Frontend can't reach backend | Dashboard now shows the reason + a checklist on a failed connect; run `.\ops\ip.ps1` to confirm the backend IP and that :8000 is listening. Check the Windows Firewall inbound rule for TCP 8000 on the Private network. |
-| Flutter can't find server via mDNS | Enter the laptop IP manually (the phone now shows a specific failure reason); if it drops mid-session on Xiaomi/Redmi, see `docs/REDMI_NOTE_12_SETUP.md` |
-| Phone disconnects mid-session (Redmi/Xiaomi) | Apply `docs/REDMI_NOTE_12_SETUP.md` per phone (Autostart, Battery = No restrictions, lock in recents, keep Wi-Fi on during sleep). Data is buffered + re-flushed, not lost. |
-| `SSD_PATH` write error on first run | Create the directory or update `.env` to an existing writable path |
+| `FAIL: ffmpeg / ffprobe not found` | See §1.2. The dashboard shows no cameras at all until this is fixed. |
+| Port 8000 already in use | `.\ops\stop.ps1` (kills the backend and its ffmpeg), then start again. If the owner is not this backend, the script says so and leaves it alone. |
+| `ModuleNotFoundError` on backend start | Run from the repo root — or just use `start_all.ps1`, which sets it up. If it persists: delete `master_backend\.venv` and re-run `start_all.ps1`. |
+| Cameras listed but no preview | A webcam can only be opened by one process: close Teams/Zoom/Camera, run `.\ops\stop.ps1`, start again. |
+| Phones cannot find the laptop (mDNS) | Type the IP printed by the launcher in the app. Allow `python.exe` through Windows Firewall on the **Private** network (inbound TCP 8000, UDP 5353). |
+| Phone disconnects mid-session (Redmi/Xiaomi) | [`docs/REDMI_NOTE_12_SETUP.md`](docs/REDMI_NOTE_12_SETUP.md) — autostart, battery "No restrictions", lock in recents, Wi-Fi on during sleep. Data is buffered and re-sent, not lost. |
+| `SSD_PATH` write error on first run | Create the directory or fix the path in `.env`. Readiness shows the backend's own disk check as a blocker. |
+| Dashboard shows `build …` different from `/health` | The static build is stale: `make dashboard` on a Node machine, commit `master_backend/app/static/`, `git pull` on the laptop. |
 
 ---
 
-## What the connectivity alarm means
+## 8. What the phone alarm means
 
-If a phone drops mid-recording, it loops an audible alarm + vibration + a red
-"DISCONNECTED · 00:24 · N packets buffered" banner until it reconnects or the operator
-taps **SILENCE**. This is not a failure — the phone keeps recording locally the whole
-time (see `docs/REDMI_NOTE_12_SETUP.md` → Data recovery) and buffers for replay once the
-network returns. It is a **prompt to go check the phone**, not a data-loss alarm. The
-dashboard mirrors the same signal (a beep + a permanent red banner while any device is
-offline during RECORDING) plus a connectivity event log, so after the session you can see
-exactly when and how long each drop lasted instead of guessing why a report is PARTIAL.
+If a phone drops mid-recording it loops an audible alarm + vibration and shows a red
+**SILENCE** button; the dashboard shows that phone as `OFFLINE mm:ss` with the standing
+guidance *"data is buffering on the phone — do not stop yet"*. Nothing is lost: the phone
+keeps writing its rescue CSV the whole time and replays the buffered packets when the
+network returns (within `LATE_ACCEPT_SEC`). Treat the alarm as **"go and look at the
+phone"**, not as data loss. If it comes back after STOP, the upload appears as a row in the
+Done view ("rescue upload … verified ✓") and the ZIP is rebuilt automatically.
 
 ---
-
-## Optional helper commands
-
-The root `Makefile` includes a few shortcuts:
-
-- `make proto` - regenerate Dart and Python protobuf bindings
-- `make run-backend` - start the backend
-- `make run-frontend` - start the dashboard
-- `make install-backend` - install backend dependencies
-- `make install-frontend` - install frontend dependencies
 
 ## See also
 
-- `docs/REDMI_NOTE_12_SETUP.md` — per-phone MIUI/HyperOS setup to stop mid-session drops.
-- `connectivity_ops_fixes_plan.md` — what changed in the launcher/diagnostics/Redmi fixes and why.
+- [`docs/DEPLOY.md`](docs/DEPLOY.md) — the before-recording-day checklist.
+- [`docs/FIELD_CHECKLIST.md`](docs/FIELD_CHECKLIST.md) — the in-the-field checklist.
+- [`docs/REDMI_NOTE_12_SETUP.md`](docs/REDMI_NOTE_12_SETUP.md) — per-phone OS settings.
+- [`master_backend/ARCHITECTURE.md`](master_backend/ARCHITECTURE.md) — what the backend
+  does between START and ZIP.
+- [`docs/rebuild/SPEC.md`](docs/rebuild/SPEC.md) — why the system looks like this.
