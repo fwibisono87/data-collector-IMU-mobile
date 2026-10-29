@@ -124,15 +124,26 @@ async def _ingest_packet(pkt: SensorPacket) -> None:
 
     Extracted from telemetry_ws so the ingest rules can be driven directly by tests.
     Packets with ``sequence_number >= IDLE_SEQ_BASE`` are the phone's idle stream
-    (SPEC §6.3): they keep the rate/liveness accounting alive — that is the whole point
-    of streaming before START — but never touch the dedup store, a session CSV, a late
-    CSV or the first-packet marker, because they are not session data.
+    (SPEC §6.3): they never touch the dedup store, a session CSV, a late CSV, a
+    writer or the first-packet marker, because they are not session data.
+
+    While NOT recording, idle packets keep feeding the rate/liveness accounting —
+    that is the whole point of streaming before START, and the preflight true_hz
+    gate reads it. While RECORDING they must not: ``packets_received`` and
+    ``acc_changes`` end up in the research file integrity_report.json, so an idle
+    packet still in flight at START (or from a phone that missed START) would
+    inflate a research value. During RECORDING an idle packet only sets the
+    separate ``idle_last_at`` marker ("connected, but not recording").
+
+    The ``_latest_samples`` display cache is updated for every packet in every
+    state — it feeds the live chart (/ws/live today, /ws/ui ``live`` later), and
+    the Setup view's chart would be empty if it only saw RECORDING traffic.
     """
     device_id = pkt.device_id
     idle = pkt.sequence_number >= IDLE_SEQ_BASE
 
     if session_manager.state != SessionState.RECORDING:
-        # Rate accounting must run in EVERY state, not just RECORDING. Phones stream
+        # Rate accounting must run in EVERY non-recording state. Phones stream
         # telemetry from the moment they connect (attachSensorStream is persistent),
         # and preflight gates START on true_hz — so counting only while RECORDING left
         # the gate reading 0 Hz before every session and blocked recording outright.
@@ -157,32 +168,40 @@ async def _ingest_packet(pkt: SensorPacket) -> None:
                     await audit.log("ERROR", "late_write_failed", {
                         "device_id": device_id, "error": str(exc),
                     })
+        _cache_latest_sample(pkt)
         return
 
-    if not idle:
-        if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
-            return
+    if idle:
+        session_manager.note_idle_packet(device_id)
+        _cache_latest_sample(pkt)
+        return
 
-        dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
-        # A device that joined or rejoined after START has no writer yet; without this
-        # every one of its packets is discarded while the dashboard counts them (plan D2).
-        if not io_manager.has_writer(device_id):
-            dev = session_manager.get_device(device_id)
-            if dev is not None:
-                await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
+    if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
+        return
+
+    dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
+    # A device that joined or rejoined after START has no writer yet; without this
+    # every one of its packets is discarded while the dashboard counts them (plan D2).
+    if not io_manager.has_writer(device_id):
+        dev = session_manager.get_device(device_id)
+        if dev is not None:
+            await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
     session_manager.increment_packets(device_id)
     session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
-    if not idle:
-        session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
-        try:
-            await io_manager.write_packet(pkt)
-        except OSError as exc:
-            logger.error("write_packet failed for %s: %s", device_id[:8], exc)
-            await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
-            # Do not re-raise — an I/O error must not drop the WebSocket.
-            # The mobile will activate its blackbox buffer on next reconnect.
-    # Cache latest sample for /ws/live dashboard chart.
-    _latest_samples[device_id] = {
+    session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
+    try:
+        await io_manager.write_packet(pkt)
+    except OSError as exc:
+        logger.error("write_packet failed for %s: %s", device_id[:8], exc)
+        await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
+        # Do not re-raise — an I/O error must not drop the WebSocket.
+        # The mobile will activate its blackbox buffer on next reconnect.
+    _cache_latest_sample(pkt)
+
+
+def _cache_latest_sample(pkt: SensorPacket) -> None:
+    """Refresh the display-only latest-sample cache for the live chart."""
+    _latest_samples[pkt.device_id] = {
         "acc": [round(pkt.acc_x, 4), round(pkt.acc_y, 4), round(pkt.acc_z, 4)],
         "gyro": [round(pkt.gyro_x, 4), round(pkt.gyro_y, 4), round(pkt.gyro_z, 4)],
         "ts": pkt.timestamp_ms,

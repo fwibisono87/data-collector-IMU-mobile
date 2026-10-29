@@ -97,6 +97,11 @@ class DeviceInfo:
     offline_intervals: list = field(default_factory=list)  # [{start_ms, end_ms}]
     telemetry_gaps: list = field(default_factory=list)  # telemetry-only gaps
     last_packet_at: float = 0.0             # time.monotonic() of the last accepted packet
+    # time.monotonic() of the last IDLE-seq packet seen while RECORDING. Idle traffic
+    # must not touch the session counters (they land in integrity_report.json), but a
+    # phone that is connected-and-idling during a session — e.g. it missed START —
+    # still has to be visible as alive.
+    idle_last_at: float = 0.0
     _packets_prev_tick: int = 0
     rate_hz: float = 0.0
     last_acc: tuple | None = None        # last (acc_x, acc_y, acc_z) seen
@@ -264,6 +269,18 @@ class SessionManager:
         if acc != dev.last_acc:
             dev.acc_changes += 1
         dev.last_acc = acc
+
+    def note_idle_packet(self, device_id: str) -> None:
+        """Record an idle-stream packet's arrival without touching session counters.
+
+        ``packets_received``/``acc_changes``/``last_packet_at`` are research values —
+        ``packets_received`` is written into integrity_report.json — so an idle packet
+        in flight at START (or from a phone that missed START) must never inflate
+        them. The separate monotonic marker keeps the phone visibly connected.
+        """
+        dev = self._devices.get(device_id)
+        if dev is not None:
+            dev.idle_last_at = time.monotonic()
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         return self._devices.get(device_id)
