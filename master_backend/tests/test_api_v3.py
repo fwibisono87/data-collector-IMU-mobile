@@ -379,3 +379,21 @@ def test_shutdown_during_recording_stops_the_cameras_and_builds_the_zip(rig, mon
         names = zf.namelist()
     assert "data/manifest.json" in names
     assert any(name.startswith("videos/") for name in names)
+
+
+def test_open_folder_is_501_on_an_unsupported_platform(api, rig, monkeypatch):
+    """API.md: explorer on Windows, xdg-open on Linux, 501 everywhere else."""
+    import sys
+
+    client, _rt = api
+    session_id = "1700000000123"
+    folder = rig.ssd_path / "Data_Riset_IMU" / "Sub_Tag"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / f"{session_id}_chest_sensor_data.csv").write_text("h\n1\n", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    refused = client.post(f"/api/sessions/{session_id}/open-folder")
+    assert refused.status_code == 501
+    assert refused.json()["error"]["code"] == "invalid"
+    # And an unknown session is still a 404, not a 501.
+    assert client.post("/api/sessions/1700000000999/open-folder").status_code == 404

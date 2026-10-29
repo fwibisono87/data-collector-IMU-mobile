@@ -31,6 +31,7 @@ _STATUS_CODES = {
     409: "busy",
     422: "invalid",
     500: "internal",
+    501: "invalid",
 }
 
 
@@ -82,6 +83,11 @@ def invalid(message: str, details: dict | None = None) -> ApiError:
 
 def internal(message: str) -> ApiError:
     return ApiError(500, "internal", message)
+
+
+def not_supported(message: str) -> ApiError:
+    """501: the operation is valid but this platform cannot do it (API.md, open-folder)."""
+    return ApiError(501, "invalid", message)
 
 
 def _is_api(request: Request) -> bool:

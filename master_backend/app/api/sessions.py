@@ -20,7 +20,7 @@ from fastapi.responses import Response, StreamingResponse
 from .. import export as export_module
 from ..session_manager import session_manager
 from ..session_zip import session_zip_name
-from .errors import busy, invalid, not_found
+from .errors import busy, invalid, not_found, not_supported
 from .post_session import PostBusy, session_progress
 from .runtime import Runtime, get_runtime
 from .schema import (
@@ -347,7 +347,7 @@ async def open_folder(session_id: str):
     elif sys.platform.startswith("linux"):
         args = ["xdg-open", str(folder)]
     else:
-        raise invalid("opening a folder is not supported on this platform")
+        raise not_supported("opening a folder is not supported on this platform")
     try:
         # Never block the request on the file manager, and never fail the API if the
         # desktop is headless: the path is also visible in the session detail.
