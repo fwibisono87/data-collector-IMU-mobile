@@ -9,11 +9,11 @@
 set -uo pipefail
 
 PKG="com.example.sensors_app"
-APK="${1:-mobile_node/build/app/outputs/flutter-apk/app-release.apk}"
+APK="${1:-mobile_node/app/build/outputs/apk/release/app-release.apk}"
 
 if [ ! -f "$APK" ]; then
   echo "APK not found: $APK" >&2
-  echo "Build it first:  cd mobile_node && flutter build apk --release" >&2
+  echo "Build it first:  cd mobile_node && ./gradlew assembleRelease" >&2
   exit 1
 fi
 
@@ -41,7 +41,7 @@ if [ -n "$AAPT2" ]; then
 fi
 if [ -z "$WANT_VERSION" ]; then
   # Fall back to the source of truth rather than reporting nothing.
-  WANT_VERSION=$(sed -n 's/^version: *\([0-9.]*\).*/\1/p' mobile_node/pubspec.yaml 2>/dev/null)
+  WANT_VERSION=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' mobile_node/app/build.gradle.kts 2>/dev/null)
 fi
 [ -z "$WANT_VERSION" ] && WANT_VERSION="(unknown)"
 echo "APK: $APK"

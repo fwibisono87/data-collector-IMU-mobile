@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- mDNS discovery of the backend needs the multicast lock; without it a phone on
+         power-saving Wi-Fi never hears the `_imu-telemetry._tcp` advertisements. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+
+    <!-- Sensors. HIGH_SAMPLING_RATE_SENSORS is not strictly required at the ~200 Hz we ask
+         for, but it is one of the runtime prerequisites of the "health" foreground service
+         type and it keeps the fast ODR working on the handsets that gate it. -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
+    <!-- Runtime prerequisite of the "health" foreground-service type on Android 14+; the
+         old Flutter manifest shipped without it (its field phones predate 14). Requested in
+         MainActivity together with POST_NOTIFICATIONS; ImuService degrades gracefully when
+         it is denied. -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION"/>
+
+    <!-- Foreground service + wake locks: acquisition must survive the screen going off. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- Lets the app ask to be exempted from battery optimisation; OEM builds (MIUI/HyperOS)
+         kill a foreground service that is still optimised. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+
+    <!-- Alarm while the link is down during a session: notification, sound and vibration. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.VIBRATE"/>
+
+    <!-- Deliberately NOT declared any more: ACCESS_FINE_LOCATION / ACCESS_COARSE_LOCATION
+         (nothing used them) and RECEIVE_BOOT_COMPLETED (auto-run-on-boot belonged to the
+         flutter_foreground_task plugin; the operator opens the app, the service then survives
+         on its own via START_STICKY). -->
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Theme.SensorsApp"
+        android:allowBackup="false"
+        android:supportsRtl="false">
+        <!-- allowBackup is off on purpose: a device_id restored from a cloud backup onto a
+             second phone would register two phones under one identity and collide on role. -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.SensorsApp"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- One foreground service owns every part of acquisition. stopWithTask=false so
+             swiping the app away from Recents does not stop a recording. -->
+        <service
+            android:name=".ImuService"
+            android:exported="false"
+            android:foregroundServiceType="health"
+            android:stopWithTask="false"/>
+
+        <!-- Target of the notification's SILENCE action. A receiver, not a service start:
+             startService() from a PendingIntent is restricted once the app is backgrounded. -->
+        <receiver
+            android:name=".AlarmActionReceiver"
+            android:exported="false"/>
+    </application>
+
+</manifest>
