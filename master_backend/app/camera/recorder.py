@@ -51,15 +51,22 @@ _ENCODER_CLOSE_TIMEOUT_S = 15.0
 #: Total budget for stopping every camera (spec: must return within 30 s for 5).
 STOP_ALL_BUDGET_S = 25.0
 
+# One thread per encoder. Measured on 600 frames of 720p MJPEG (ffmpeg -benchmark):
+# VP9 with libvpx's default threading + row-mt cost 13-14 CPU-s, single-threaded 6.4 CPU-s
+# for the same output size: thread spin-up outweighs the parallelism at 720p, and five
+# cameras already run five encoders in parallel. At the old setting a 30-minute 5-camera
+# session kept only ~81 % of frames on a loaded machine. VP8 needs cpu-used 16 to be
+# fast at all (cpu-used 8 with default threads took 128 CPU-s), which is why it looked
+# unusable in the first benchmark.
 _CODEC_TABLE = {
     "vp9": {
         "opts": ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
-                 "-row-mt", "1", "-b:v", "2500k", "-g", "60"],
+                 "-row-mt", "0", "-threads", "1", "-b:v", "2500k", "-g", "60"],
         "mime": "video/webm;codecs=vp9",
     },
     "vp8": {
-        "opts": ["-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8",
-                 "-b:v", "2500k", "-g", "60"],
+        "opts": ["-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "16",
+                 "-threads", "1", "-b:v", "2500k", "-g", "60"],
         "mime": "video/webm;codecs=vp8",
     },
 }

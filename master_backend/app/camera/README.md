@@ -111,20 +111,37 @@ master_backend/.venv/bin/python -m master_backend.app.camera.benchmark \
     --duration 60 --cameras 5 --codecs vp9,vp8
 ```
 
+### Encoder settings (revised 2026-10-30 after the 30-minute soak)
+
+The first table below used libvpx's default threading. A 30-minute 5-camera session on a
+loaded machine (load average ~50) then kept only **~81 %** of frames. Encoding cost was
+re-measured in isolation with `ffmpeg -benchmark` on 600 frames (20 s) of 720p MJPEG:
+
+| Settings | CPU-seconds per 20 s of video | Per camera | 5 cameras |
+| --- | --- | --- | --- |
+| vp9 `-cpu-used 8 -row-mt 1` (default threads, old) | 13.3–14.0 | ~66 % of a core | ~3.3 cores |
+| vp9 `-cpu-used 8 -row-mt 1 -threads 2 -tile-columns 2` | 8.5 | ~42 % | ~2.1 cores |
+| **vp9 `-cpu-used 8 -row-mt 0 -threads 1` (current)** | **6.4** | **~32 %** | **~1.6 cores** |
+| vp8 `-cpu-used 8` (default threads, old) | 128 | ~640 % | unusable |
+| vp8 `-cpu-used 16 -threads 1` (current vp8 setting) | ~6.5 | ~32 % | ~1.6 cores |
+
+Output size is identical across the vp9 rows. Threading costs more than it saves at
+720p, and five cameras already give five parallel encoders. VP8 looked unusable only
+because `-cpu-used 8` is not a fast preset for libvpx's VP8 encoder.
+
+With the current vp9 settings, a 5-minute 5-camera session under load kept **97.9–98.6 %**
+of frames (the remainder is mostly the `-re` synthetic source slipping under load), with
+file duration equal to the anchor span to 0.1 s. **vp9 stays the default**, which matches
+the codec of every session recorded so far (`mime: video/webm;codecs=vp9`).
+
+### Original benchmark (superseded settings)
+
 Result on the development machine (12 cores, ffmpeg n9.0.2, 2026-10-30):
 
 | Codec | Encoder fps (target 30) | Frames dropped | Backend+capture+encode CPU | % of machine | Verdict |
 | --- | --- | --- | --- | --- | --- |
-| **vp9** (`libvpx-vp9 -deadline realtime -cpu-used 8 -row-mt 1 -b:v 2500k -g 60`) | **30.0** | **0 / 9244 = 0.00 %** | 448.7 % of one core (backend 46 %, ~22 % per capture, ~58 % per encoder) | **37.4 %** | **SUSTAINS** |
-| vp8 (`libvpx -deadline realtime -cpu-used 8 -b:v 2500k -g 60`) | 2.7 | 5907 / 7275 = 81.20 % | 1119.7 % of one core (backend 33 %, ~15 % per capture, ~200 % per encoder) | 93.3 % | FAILS |
-
-vp9 sustains 5×720p30 with zero drops at ~37 % of the machine; vp8 cannot
-keep up on this ffmpeg build (each encoder burns ~2 cores and still only
-manages ~2.7 fps, the rest of the frames are dropped by the bounded
-recorder queues). Per the spec's rule, **vp9 stays the default codec**
-(`IMU_VIDEO_CODEC` unset → vp9). An earlier vp8 run before the per-frame
-stdin flush showed similar failure, so the drops are genuine encoder
-throughput, not a feeding artifact.
+| vp9 (`-cpu-used 8 -row-mt 1`, default threads) | 30.0 | 0 / 9244 = 0.00 % | 448.7 % of one core | 37.4 % | sustained on an idle machine |
+| vp8 (`-cpu-used 8`, default threads) | 2.7 | 5907 / 7275 = 81.20 % | 1119.7 % of one core | 93.3 % | misconfigured, see above |
 
 ## Reference image URLs (exact)
 
