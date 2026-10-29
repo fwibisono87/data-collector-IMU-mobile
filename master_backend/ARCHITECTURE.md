@@ -22,7 +22,7 @@ are unchanged.
 | `app/api/sessions.py` | Session history/detail, ZIP download (Range), package, open-folder. |
 | `app/api/readiness.py` | START blockers/warnings (disk, phones, draft, state, cameras). |
 | `app/api/snapshot.py` | Whole-dashboard `Snapshot` builder. |
-| `app/api/ws_ui.py` | `/ws/ui` hub: snapshot ≤5 Hz, live 10 Hz, finalize events, calibration drift. |
+| `app/api/ws_ui.py` | `/ws/ui` hub: change-detected snapshots (rebuilt at ≤5 Hz, 5 s heartbeat), live 10 Hz, finalize events, calibration drift. |
 | `app/api/post_session.py` | The `cameras` + `package` job that follows STOP (separate from FinalizeJob). |
 | `app/session_zip.py` | Server-side deliverable ZIP, byte-shaped like the browser's (OUTPUT_CONTRACT §9). |
 | `app/api/jsjson.py` | `JSON.stringify`-compatible serialiser for files inside that ZIP. |
@@ -46,9 +46,11 @@ are unchanged.
    `<folder>/<subject>_<tag>_<sid>.zip` from the manifest + camera result, fsyncs and
    renames it. Late telemetry or a verified rescue upload schedules a 5 s debounced
    rebuild; `POST /api/sessions/{sid}/package` rebuilds on demand (`409 busy` if running).
-7. `/ws/ui` pushes a whole snapshot at ≤5 Hz; the finalize/cameras/package steps appear as
-   `finalize` messages and in `GET /api/sessions/{sid}`. `GET /api/sessions/{sid}/zip`
-   streams the archive with Range support.
+7. `/ws/ui` pushes a whole snapshot on connect and then whenever it changes (rebuilt at
+   ≤5 Hz, sent at least every 5 s), plus `live` samples at 10 Hz; the finalize/cameras/package
+   steps appear as `finalize` messages and in `GET /api/sessions/{sid}`.
+8. `GET /api/sessions/{sid}/zip` streams the archive with Range support; a shutdown that
+   finalises a recording starts steps 5–6 itself, so a restart never loses the deliverable.
 
 State that must survive a restart: the session ledger, `<sid>_cameras.json`, the video
 files, and `_state/sessions/<sid>.post.json`. On startup the backend recovers interrupted
