@@ -325,3 +325,30 @@ async def test_camera_failure_is_recorded_and_does_not_lose_the_video(rig):
     assert record["steps"]["package"]["status"] == "done"
     assert f"videos/{session_id}_cam1_video_sync.webm" in zip_entries(Path(record["zip_path"]))
     assert rig.sm_module.session_manager  # rig sanity
+
+@pytest.mark.asyncio
+async def test_wait_settled_is_bounded_and_never_cancels_work(rig):
+    """Shutdown waits for the chain but must not kill a package that is mid-flight."""
+    _service, _rt, job = camera_runtime(rig, 1)
+    session_id = await start_session(rig)
+    await stream(rig, "dev-chest", 5)
+    await rig.manager.request_stop("operator_stop")
+    await job.on_stopped(session_id)
+    assert await job.wait_settled(session_id, timeout=30.0) is True
+    assert job.record(session_id)["steps"]["package"]["status"] == "done"
+    # Nothing running for an unknown or already-settled session is not a wait.
+    assert await job.wait_settled(session_id) is True
+    assert await job.wait_settled("1700000000009", timeout=0.1) is True
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow():
+        started.set()
+        await release.wait()
+
+    job._tasks["fake"] = asyncio.create_task(slow())          # noqa: SLF001
+    await asyncio.wait_for(started.wait(), timeout=5)
+    assert await job.wait_settled("fake", timeout=0.2) is False
+    release.set()
+    await asyncio.wait_for(job._tasks["fake"], timeout=5)     # still alive, not cancelled

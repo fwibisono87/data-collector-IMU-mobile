@@ -296,3 +296,86 @@ def test_ws_ui_snapshot_draft_ping_and_calibration(api):
                 break
         assert ack is not None and ack["ok"] is False
         assert ack["error"]["code"] == "not_found"
+
+# ── restart ────────────────────────────────────────────────────────────────
+
+def test_restart_finalises_and_packages_an_interrupted_session(rig, monkeypatch):
+    """The §8 restart case, through the real lifespan.
+
+    The backend is killed mid-session: the ledger still says RECORDING and a post record
+    exists with the cameras step not finished and no archive. The next startup must recover
+    the session, finish the post chain and leave a downloadable ZIP.
+    """
+    import asyncio
+
+    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_FAKE_CAMERAS", "1")
+
+    async def crash_mid_session() -> str:
+        from master_backend.app.api.post_session import PostSessionJob
+        from master_backend.app.api.runtime import create_runtime
+        from conftest import start_session, stream
+
+        session_id = await start_session(rig)
+        await stream(rig, "dev-chest", 30)
+        job = PostSessionJob(create_runtime())
+        await job.on_stopped(session_id)      # the record exists; package waits on finalize
+        await asyncio.sleep(0.2)
+        await job.close()                     # the process dies here
+        return session_id
+
+    session_id = asyncio.run(crash_mid_session())
+    post_record = rig.ssd_path / "Data_Riset_IMU" / "_state" / "sessions" / f"{session_id}.post.json"
+    assert post_record.is_file()
+    assert json.loads(post_record.read_text(encoding="utf-8"))["steps"]["package"]["status"] != "done"
+    assert (rig.manager.get_recovery_session(session_id) or {}).get("state") == "RECORDING"
+
+    from master_backend.app.main import app
+
+    with TestClient(app) as client:
+        detail = wait_for_package(client, session_id, timeout=90)
+        statuses = {step["name"]: step["status"] for step in detail["finalize"]}
+        assert statuses["package"] == "done", detail
+        archive = Path(detail["zip_path"])
+        assert archive.is_file()
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+        assert "data/manifest.json" in names
+        assert f"data/{session_id}_chest_sensor_data.csv" in names
+        # The session is terminal now, so a second restart must not repackage it again.
+        ledger = client.get(f"/api/sessions/{session_id}").json()
+        assert ledger["verdict"] in ("PASS", "PARTIAL", "FAIL")
+
+
+def test_shutdown_during_recording_stops_the_cameras_and_builds_the_zip(rig, monkeypatch):
+    """A clean restart must not leave a finished session without its deliverable.
+
+    Shutdown finalises a RECORDING session outside the REST stop handler, so it has to
+    start the post-session chain itself; otherwise the ledger is terminal when the next
+    startup looks for interrupted sessions and nothing ever packages it.
+    """
+    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_FAKE_CAMERAS", "1")
+
+    from master_backend.app.main import app
+
+    with TestClient(app) as client:
+        runtime_module.get_runtime().camera_service.set_selection(
+            [CameraSelectionItem(device_key="fake:0")]
+        )
+        register_phone(rig)
+        fill_draft(client)
+        started = client.post("/api/session/start", json={})
+        assert started.status_code == 200, started.text
+        session_id = started.json()["session_id"]
+        folder = rig.ssd_path / "Data_Riset_IMU" / "Sub_ject_Tag_A"
+        assert folder.is_dir()
+
+    # The context manager ran the lifespan shutdown: finalize, camera stop, package.
+    assert (rig.manager.get_recovery_session(session_id) or {}).get("terminal") is True
+    archives = list(folder.glob(f"*_{session_id}.zip"))
+    assert len(archives) == 1, [p.name for p in folder.iterdir()]
+    with zipfile.ZipFile(archives[0]) as zf:
+        names = zf.namelist()
+    assert "data/manifest.json" in names
+    assert any(name.startswith("videos/") for name in names)

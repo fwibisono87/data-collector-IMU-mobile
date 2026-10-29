@@ -171,6 +171,20 @@ class PostSessionJob:
         )
         return record
 
+    async def wait_settled(self, session_id: str, timeout: float = 60.0) -> bool:
+        """Wait (bounded) for the chain started for ``session_id``; shutdown uses this.
+
+        Never cancels the work: a timed-out package keeps running until ``close()``, so
+        the operator's archive is either finished or left for the next startup to resume.
+        """
+        task = self._tasks.get(session_id)
+        if task is None:
+            return session_id not in self._running
+        if task.done():
+            return True
+        done, _pending = await asyncio.wait({task}, timeout=timeout)
+        return bool(done)
+
     async def package(self, session_id: str) -> Path:
         """Build (or rebuild) the session ZIP now. Raises ``PostBusy`` if one is running."""
         if session_id in self._running:

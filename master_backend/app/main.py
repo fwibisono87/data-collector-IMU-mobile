@@ -121,13 +121,24 @@ async def lifespan(app: FastAPI):
     # Shutdown — finalise an in-flight session so the CSV tail is fsynced, the file is
     # closed, and an integrity report exists. Ctrl-C used to lose up to FSYNC_INTERVAL_SEC
     # of rows and leave the session unfinalised (plan D8).
+    shutdown_session = ""
     try:
         if session_manager.state == SessionState.RECORDING:
+            shutdown_session = session_manager.session_id
             logger.warning("Shutdown during RECORDING — finalising session %s",
-                           session_manager.session_id)
+                           shutdown_session)
             await session_manager.stop_recording("backend_shutdown")
     except Exception as exc:
         logger.error("Shutdown finalisation failed: %s", exc)
+    # That finalize ran outside the REST stop handler, so nothing started the cameras step
+    # or the package one. Without this, a restart mid-session leaves a terminal session
+    # with no ZIP and no post record for the next startup to resume from.
+    if rt.post is not None and shutdown_session:
+        try:
+            await rt.post.on_stopped(shutdown_session)
+            await rt.post.wait_settled(shutdown_session)
+        except Exception as exc:
+            logger.error("Shutdown packaging failed: %s", exc)
     # Tear down the v3 layer in reverse order. The post job goes first so no new package
     # run starts while the writers are closing; the camera service is closed last.
     watchdog.cancel()
