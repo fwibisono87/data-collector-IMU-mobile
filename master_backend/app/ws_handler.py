@@ -59,6 +59,11 @@ def _state_pong(command_id: str = "", device_id: str = "") -> bytes:
     )
 
 
+def latest_samples() -> dict[str, dict]:
+    """Read-only view of the display cache the /ws/ui live stream publishes."""
+    return dict(_latest_samples)
+
+
 def drop_latest_sample(device_id: str) -> None:
     """Remove a pruned device's cached sample so /ws/live stops re-broadcasting it
     and the cache cannot grow unbounded across device churn."""

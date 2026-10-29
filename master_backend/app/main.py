@@ -59,6 +59,19 @@ from .upload import router as recovery_router
 from .export import router as export_router
 from .cameras import router as cameras_router
 from .ws_handler import router as ws_router, _live_broadcaster_loop
+from .api.routes import router as api_router
+from .api.errors import install_error_handlers
+from .api.post_session import PostSessionJob
+from .api.runtime import (
+    camera_router_or_none,
+    check_disk,
+    create_runtime,
+    set_runtime,
+    watchdog_loop,
+    wire_lifecycle,
+)
+from .api.static_site import mount_static
+from .api.ws_ui import UiHub, router as ui_ws_router
 
 
 @asynccontextmanager
@@ -67,10 +80,29 @@ async def lifespan(app: FastAPI):
     _ensure_dirs()
     await _start_audit()
     await _start_mdns()
+    # Capture the list before recovery: recovery finalises those sessions and makes them
+    # terminal, but the post-session job still owes them cameras + package.
+    interrupted = [
+        str(record.get("session_id"))
+        for record in session_manager.get_interrupted_sessions()
+        if record.get("session_id")
+    ]
     await session_manager.recover_interrupted_sessions()
     _check_interrupted_sessions()
     asyncio.create_task(_live_broadcaster_loop())
     asyncio.create_task(session_manager.run_idle_reaper())
+
+    # v3 runtime: camera seam, notice/draft stores, post-session job and the UI hub.
+    rt = create_runtime()
+    set_runtime(rt)
+    rt.post = PostSessionJob(rt)
+    rt.hub = UiHub(rt)
+    rt.hub.start()
+    unwire_lifecycle = wire_lifecycle(rt)
+    rt.post.start()
+    check_disk(rt)
+    watchdog = asyncio.create_task(watchdog_loop(rt), name="notice-watchdog")
+    await rt.post.resume_pending(interrupted)
     local_ip = _get_local_ip()
     port = int(os.getenv("PORT", "8000"))
     logger.info(
@@ -96,6 +128,23 @@ async def lifespan(app: FastAPI):
             await session_manager.stop_recording("backend_shutdown")
     except Exception as exc:
         logger.error("Shutdown finalisation failed: %s", exc)
+    # Tear down the v3 layer in reverse order. The post job goes first so no new package
+    # run starts while the writers are closing; the camera service is closed last.
+    watchdog.cancel()
+    try:
+        await rt.post.close()
+        await rt.hub.close()
+    except Exception as exc:
+        logger.error("v3 shutdown failed: %s", exc)
+    try:
+        unwire_lifecycle()
+    except Exception:
+        pass
+    try:
+        await rt.camera_service.close()
+    except Exception as exc:
+        logger.debug("camera service close failed: %s", exc)
+    set_runtime(None)
     await audit.close()
     await _stop_mdns()
 
@@ -117,6 +166,15 @@ app.include_router(ws_router)
 app.include_router(recovery_router)
 app.include_router(export_router)
 app.include_router(cameras_router)
+app.include_router(api_router)
+app.include_router(ui_ws_router)
+# Lane L5's /api/cameras/* + /api/calibration/* router, when this checkout has it.
+_camera_router = camera_router_or_none()
+if _camera_router is not None:
+    app.include_router(_camera_router)
+install_error_handlers(app)
+# Serves the built dashboard at /; must come after every backend route.
+mount_static(app)
 
 
 @app.get("/health")
