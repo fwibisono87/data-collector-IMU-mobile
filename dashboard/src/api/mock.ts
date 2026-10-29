@@ -729,13 +729,15 @@ export class MockTransport implements Transport {
       uploads,
       consolidation: withLate
         ? {
-            state: 'current',
-            detail: 'every source is consolidated',
-            can_consolidate: false,
+            // The scenario's phone is still uploading its rescue CSV (see `uploads`),
+            // so the merge is not current yet — exactly what "Consolidate now" is for.
+            state: 'pending_phone_data',
+            detail: 'waiting for phone data (no verified rescue upload or late rows yet)',
+            can_consolidate: true,
             whole: false,
             late_pending: false,
             recovery_pending: false,
-            uploads_in_progress: false,
+            uploads_in_progress: true,
             rescue_uploads: 0,
             late_rows: 1204,
           }
