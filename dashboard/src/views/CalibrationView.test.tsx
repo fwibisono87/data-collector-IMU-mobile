@@ -69,7 +69,7 @@ describe('Calibration view (CALIBRATION.md UI)', () => {
     const overlay = (await screen.findByTestId('overlay-fake:0')) as HTMLImageElement;
     expect(overlay.src).not.toContain('edges.png');
     fireEvent.click(screen.getByTestId('edges-toggle'));
-    expect(overlay.src).toContain('/fake_0/edges.png');
+    expect(overlay.src).toContain('/fake_0.edges.png');
   });
 
   it('grid toggle shows the crosshair overlay', async () => {

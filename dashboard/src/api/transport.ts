@@ -249,10 +249,10 @@ export class HttpTransport implements Transport {
   }
   edgesUrl(stillUrl: string): string {
     // Still URLs come from the server (`Reference.thumb_urls`, ending in
-    // `<key_slug>.jpg`); CALIBRATION.md serves the edge PNG for the same slug at
-    // `<ref_id>/<key_slug>/edges.png`. Deriving it from the server-provided URL
-    // avoids re-implementing the slug hash on the client.
-    return stillUrl.replace(/\.jpg(\?.*)?$/, '') + '/edges.png';
+    // `<key_slug>.jpg`); the backend serves the edge PNG for the same slug at
+    // `<ref_id>/<key_slug>.edges.png` (master_backend/app/camera/routes.py).
+    // Deriving it from the server-provided URL avoids re-implementing the slug hash.
+    return stillUrl.replace(/\.jpg(\?.*)?$/, '.edges.png');
   }
 
   // --- WebSocket ---------------------------------------------------------------

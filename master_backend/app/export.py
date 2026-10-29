@@ -80,6 +80,13 @@ def _lock_for(locks: dict, key) -> asyncio.Lock:
 _manifest_scan_cache: dict[str, tuple[tuple[tuple[str, int, int], ...], tuple[int, list[dict]]]] = {}
 
 
+# Backend bookkeeping folders inside Data_Riset_IMU/. They can hold files named
+# <sid>_* (a pending cameras.json), and "_" sorts before lowercase letters, so without
+# this exclusion a session whose subject starts lowercase resolved to _pending_cameras
+# and its camera anchors never left it.
+_SYSTEM_DIRS = frozenset({"_pending_cameras", "_state", "_calibration"})
+
+
 def _session_folders(session_id: str) -> list[Path]:
     """Every Data_Riset_IMU/<subject>_<tag> folder (SSD + rescue root) containing files
     for this session."""
@@ -90,7 +97,7 @@ def _session_folders(session_id: str) -> list[Path]:
         if not base.is_dir():
             continue
         for d in sorted(base.iterdir()):
-            if not d.is_dir():
+            if not d.is_dir() or d.name in _SYSTEM_DIRS:
                 continue
             if not any(p.name.startswith(f"{session_id}_") for p in d.iterdir()):
                 continue

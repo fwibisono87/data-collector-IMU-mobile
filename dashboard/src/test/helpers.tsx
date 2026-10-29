@@ -221,7 +221,7 @@ export function stubTransport(over: Partial<Transport> = {}): StubTransport {
     unwatchCalibration: vi.fn(async () => undefined),
     previewUrl: vi.fn((camId: string, w: number, fps: number) => `/api/cameras/${camId}/preview.mjpg?w=${w}&fps=${fps}`),
     zipUrl: vi.fn((sid: string) => `/api/sessions/${sid}/zip`),
-    edgesUrl: vi.fn((u: string) => u.replace(/\.jpg(\?.*)?$/, '') + '/edges.png'),
+    edgesUrl: vi.fn((u: string) => u.replace(/\.jpg(\?.*)?$/, '.edges.png')),
     subscribe: vi.fn((m: (msg: ServerMessage) => void, s?: (c: boolean) => void) => {
       onMessage = m;
       onStatus = s ?? null;

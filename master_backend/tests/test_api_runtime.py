@@ -179,13 +179,18 @@ def test_camera_factory_modes(monkeypatch):
     monkeypatch.setenv("IMU_CAMERAS", "off")
     assert len(create_camera_service().list_devices()) == 0
 
-    # auto with no L5 service module in this branch → FakeCameraService(n=0)
-    monkeypatch.setenv("IMU_CAMERAS", "auto")
-    assert len(create_camera_service().list_devices()) == 0
-
-    # unknown mode falls back to auto
-    monkeypatch.setenv("IMU_CAMERAS", "banana")
-    assert len(create_camera_service().list_devices()) == 0
+    # auto (and an unknown mode, which falls back to auto) builds the real ffmpeg-backed
+    # service now that the camera lane has landed. Do not enumerate: that depends on
+    # which webcams the test machine happens to have.
+    from master_backend.app.camera.service import RealCameraService
+    for mode in ("auto", "banana"):
+        monkeypatch.setenv("IMU_CAMERAS", mode)
+        svc = create_camera_service()
+        try:
+            assert isinstance(svc, RealCameraService)
+        finally:
+            import asyncio
+            asyncio.run(svc.close())
 
     monkeypatch.delenv("IMU_CAMERAS")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "not_a_number")
@@ -193,9 +198,13 @@ def test_camera_factory_modes(monkeypatch):
     assert len(create_camera_service().list_devices()) == 2
 
 
-def test_camera_router_absent_returns_none():
-    # Lane L5 has not landed in this branch: no routes module, no crash.
-    assert runtime_mod.camera_router_or_none() is None
+def test_camera_router_is_mounted():
+    # The camera lane's /api/cameras and /api/calibration routes are present.
+    router = runtime_mod.camera_router_or_none()
+    assert router is not None
+    paths = {r.path for r in router.routes}
+    assert "/api/cameras/devices" in paths
+    assert any(p.startswith("/api/calibration/") for p in paths)
 
 
 # ---------------------------------------------------------------------------

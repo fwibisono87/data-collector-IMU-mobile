@@ -95,6 +95,9 @@ async def lifespan(app: FastAPI):
     # v3 runtime: camera seam, notice/draft stores, post-session job and the UI hub.
     rt = create_runtime()
     set_runtime(rt)
+    # The camera routes must use THIS service. Without it they lazily built a second
+    # RealCameraService that tried to open the same webcams a second time.
+    app.state.camera_service = rt.camera_service
     rt.post = PostSessionJob(rt)
     rt.hub = UiHub(rt)
     rt.hub.start()
@@ -155,6 +158,7 @@ async def lifespan(app: FastAPI):
         await rt.camera_service.close()
     except Exception as exc:
         logger.debug("camera service close failed: %s", exc)
+    app.state.camera_service = None
     set_runtime(None)
     await audit.close()
     await _stop_mdns()
