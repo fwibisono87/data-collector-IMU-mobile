@@ -431,3 +431,41 @@ def test_ws_ui_sends_only_on_change_and_heartbeats(api):
                 break
             assert time.monotonic() - started < 2.0
         assert time.monotonic() - started < 1.2
+
+
+def test_camera_start_failure_warns_but_the_imu_session_keeps_recording(api, rig, monkeypatch):
+    """§6: retry once after 1 s, raise an error notice, return the warning, record anyway."""
+    client, rt = api
+    register_phone(rig)
+    fill_draft(client)
+
+    attempts: list[str] = []
+
+    async def always_fails(session_id, folder):
+        attempts.append(session_id)
+        raise RuntimeError("v4l2 device busy")
+
+    monkeypatch.setattr(rt.camera_service, "start_recording", always_fails)
+
+    started = client.post("/api/session/start", json={})
+    assert started.status_code == 200, started.text
+    body = started.json()
+    assert [w["code"] for w in body["warnings"]] == ["camera_start_failed"]
+    assert body["warnings"][0]["subject"] == "cameras"
+    # Two attempts: the first immediately, the retry after 1 s.
+    assert attempts == [body["session_id"], body["session_id"]]
+
+    state = client.get("/api/state").json()
+    assert state["state"] == "RECORDING"
+    assert state["session"]["session_id"] == body["session_id"]
+    notices = {n["code"]: n for n in state["notices"]}
+    assert "camera_start_failed" in notices
+    assert notices["camera_start_failed"]["level"] == "error"
+    assert notices["camera_start_failed"]["session_id"] == body["session_id"]
+
+    # And the session can still be stopped and finalised: the failure cost the video only.
+    assert client.post("/api/session/stop", json={}).status_code == 200
+    detail = wait_for_package(client, body["session_id"])
+    statuses = {step["name"]: step["status"] for step in detail["finalize"]}
+    assert statuses["package"] == "done", detail
+    assert Path(detail["zip_path"]).is_file()
