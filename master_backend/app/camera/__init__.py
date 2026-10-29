@@ -36,3 +36,17 @@ __all__ = [
     "FakeCameraService",
     "VideoFileReport",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily import the real service (pulls in numpy/PIL) on first access.
+
+    ``import master_backend.app.camera`` stays cheap for the session core and
+    the contract tests, which only need the seam types above; L4's
+    ``from master_backend.app.camera import create_service`` still works.
+    """
+    if name in ("create_service", "RealCameraService"):
+        from . import service
+
+        return getattr(service, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
