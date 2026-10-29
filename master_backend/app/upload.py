@@ -21,6 +21,7 @@ The server appends chunks in order and tracks received_bytes per (device, sessio
 """
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -46,6 +47,19 @@ router = APIRouter(tags=["recovery"])
 
 RECOVERY_PATH = Path(os.getenv("RECOVERY_PATH", "./data_recovery"))
 _upload_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+# Optional listeners invoked after a rescue upload is verified complete:
+# (session_id, info). Same pattern as cameras._mark_hooks — may be sync or async;
+# a failing hook is logged and swallowed because the upload itself already succeeded.
+_upload_hooks: list = []
+
+
+def add_upload_hook(callback) -> None:
+    _upload_hooks.append(callback)
+
+
+def remove_upload_hook(callback) -> None:
+    _upload_hooks.remove(callback)
 _MAX_CHUNK_BYTES = 4 * 1024 * 1024
 
 
@@ -200,7 +214,15 @@ async def upload_csv(request: Request):
         else:
             info["state"] = "receiving"
         _save_info(info)
-        return JSONResponse(info)
+    if info.get("complete") and info.get("sha256_verified"):
+        for hook in list(_upload_hooks):
+            try:
+                result = hook(session_id, info)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:
+                logger.debug("upload hook failed: %s", exc)
+    return JSONResponse(info)
 
 
 def _int_header(request: Request, name: str, default: int) -> int:

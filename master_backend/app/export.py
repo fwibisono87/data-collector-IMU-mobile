@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import zipfile
@@ -52,6 +53,8 @@ RESCUE_PATH = Path(os.getenv("RESCUE_PATH", "./data_rescue"))
 
 _ORIGINAL_KINDS = ("main", "csv", "late", "rescue")
 _SCAN_KINDS = ("main", "csv", "late", "rescue", "merged", "consolidated")
+# `<sid>_<camId>_video_sync.webm` plus every `<...>_partN.webm` run after a dropout.
+_VIDEO_NAME_RE = re.compile(r"_video_sync(?:_part[0-9]+)?\.(?:webm|mp4)$")
 _LABEL_COL_ID = 7
 _LABEL_COL_NAME = 8
 _DEV_COL = 10
@@ -124,7 +127,10 @@ def _classify(name: str) -> str:
         return "main"
     if name.endswith("_cameras.json"):
         return "cameras"
-    if name.endswith("_video_sync.webm") or name.endswith("_video_sync.mp4"):
+    # Every MediaRecorder run after a dropout is a separate `_partN` file.  They are video
+    # too: the data bundle must never contain footage (OUTPUT_CONTRACT §10.11), and the
+    # browser ZIP picks them up from the stop result's files, not from the manifest.
+    if _VIDEO_NAME_RE.search(name):
         return "video"
     if name.endswith(".csv"):
         return "csv"
@@ -819,8 +825,10 @@ def _build_bundle(session_id: str, out: Path, files: list[dict], recovery: list[
     written: list[str] = []
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
         for f in files:
-            # Never nest a previous bundle inside the new one.
-            if f["name"].endswith(BUNDLE_SUFFIX):
+            # Never nest a previous bundle inside the new one, and never include
+            # video: the bundle is data-only (OUTPUT_CONTRACT §10.11).  Lane L5 writes
+            # the recordings into the session folder, so this filter is load-bearing.
+            if f["name"].endswith(BUNDLE_SUFFIX) or f.get("kind") == "video":
                 continue
             z.write(f["path"], arcname=f"data/{f['name']}")
             written.append(f"data/{f['name']}")
