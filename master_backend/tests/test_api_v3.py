@@ -397,3 +397,37 @@ def test_open_folder_is_501_on_an_unsupported_platform(api, rig, monkeypatch):
     assert refused.json()["error"]["code"] == "invalid"
     # And an unknown session is still a 404, not a 501.
     assert client.post("/api/sessions/1700000000999/open-folder").status_code == 404
+
+
+def test_ws_ui_sends_only_on_change_and_heartbeats(api):
+    """/ws/ui must not stream 5 identical snapshots per second.
+
+    The snapshot is rebuilt at ≤5 Hz, but only a real change (or the 5 s heartbeat) is
+    sent — otherwise a quiet idle page costs the same as a recording one.
+    """
+    client, _rt = api
+    with client.websocket_connect("/ws/ui") as ws:
+        first = ws.receive_json()
+        assert first["type"] == "snapshot"
+
+        # Nothing changed: at 5 Hz this used to be ~5 snapshots per second.
+        quiet = 0
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                message = ws.receive_json()
+            except Exception:
+                break
+            if message["type"] == "snapshot":
+                quiet += 1
+        assert quiet <= 1, quiet
+
+        # A real change still arrives promptly (well under the 1 s the spec allows).
+        started = time.monotonic()
+        client.put("/api/session/draft", json={"subject": "Changed"})
+        while True:
+            message = ws.receive_json()
+            if message["type"] == "snapshot" and message["data"]["draft"]["subject"] == "Changed":
+                break
+            assert time.monotonic() - started < 2.0
+        assert time.monotonic() - started < 1.2

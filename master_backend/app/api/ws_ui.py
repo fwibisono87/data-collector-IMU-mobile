@@ -29,10 +29,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ui"])
 
 SNAPSHOT_INTERVAL_S = 0.2     # ≤ 5 Hz, per API.md
+SNAPSHOT_HEARTBEAT_S = 5.0    # send even when nothing changed, so clock-derived UI ticks
 LIVE_INTERVAL_S = 0.1         # 10 Hz
 DRIFT_INTERVAL_S = 0.5        # 2 Hz
 DRIFT_LINGER_S = 5.0
 QUEUE_MAX = 10
+
+
+def _signature(payload: dict) -> str:
+    """Hash of a snapshot with the continuously-drifting fields masked.
+
+    ``server_time_ms`` changes on every build, ``telemetry_age_ms`` is derived from it, and
+    ``disk.free_bytes`` moves a little with every log line — hashing them would send at
+    5 Hz forever. Everything an operator can act on stays in the hash (including the disk
+    *warnings*, so crossing a threshold is instant); the heartbeat keeps the numbers fresh.
+    """
+    phones = [{**phone, "telemetry_age_ms": None} for phone in payload.get("phones") or []]
+    disk = {**(payload.get("disk") or {}), "free_bytes": 0}
+    stable = {**payload, "server_time_ms": 0, "phones": phones, "disk": disk}
+    return json.dumps(stable, sort_keys=True)
 
 
 class _Client:
@@ -134,6 +149,12 @@ class UiHub:
         if task is None or task.done():
             self._loops[name] = asyncio.create_task(factory(), name=f"ws-ui-{name}")
 
+    def _publish_snapshot(self) -> None:
+        payload = build_snapshot(self.rt).model_dump(mode="json")
+        self._last_signature = _signature(payload)
+        self._last_sent = time.monotonic()
+        self._broadcast({"type": "snapshot", "data": payload})
+
     async def _snapshot_loop(self) -> None:
         while self._clients:
             try:
@@ -143,9 +164,17 @@ class UiHub:
                 await asyncio.sleep(SNAPSHOT_INTERVAL_S)
                 continue
             payload = snapshot.model_dump(mode="json")
-            # server_time_ms / telemetry_age_ms change every build, so this is a ≤5 Hz
-            # stream while a client is connected — exactly the documented cadence.
-            self._broadcast({"type": "snapshot", "data": payload})
+            signature = _signature(payload)
+            now = time.monotonic()
+            # Rebuild at 5 Hz, send only on a real change — plus a heartbeat so a quiet
+            # session still refreshes the clock-derived fields.
+            if (
+                signature != self._last_signature
+                or now - self._last_sent >= SNAPSHOT_HEARTBEAT_S
+            ):
+                self._last_signature = signature
+                self._last_sent = now
+                self._broadcast({"type": "snapshot", "data": payload})
             await asyncio.sleep(SNAPSHOT_INTERVAL_S)
 
     async def _live_loop(self) -> None:
@@ -245,8 +274,9 @@ class UiHub:
         self._clients.add(client)
         client.writer = asyncio.create_task(self._writer(client), name="ws-ui-writer")
         try:
-            snapshot = build_snapshot(self.rt)
-            client.offer({"type": "snapshot", "data": snapshot.model_dump(mode="json")})
+            # The connect snapshot is recorded as the last sent one, so the loop does not
+            # immediately duplicate it and a quiet idle page stays quiet.
+            self._publish_snapshot()
         except Exception:
             logger.exception("initial snapshot failed")
         self._ensure_loop("snapshot", self._snapshot_loop)
