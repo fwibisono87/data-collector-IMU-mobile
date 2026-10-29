@@ -1,7 +1,7 @@
 """v3 REST + /ws/ui (API.md): the dashboard's whole contract, end to end.
 
 Each test starts the real app (lifespan incl. the v3 runtime) against the shared in-process
-rig, with the fake camera service injected by ``IMU_CAMERAS=fake``.
+rig, with the fake camera service injected by ``IMU_CAMERAS=stub``.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ SID_PLACEHOLDER = "placeholder"
 
 @pytest.fixture
 def api(rig, monkeypatch):
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "2")
     from master_backend.app.main import app
 
@@ -312,7 +312,7 @@ def test_restart_finalises_and_packages_an_interrupted_session(rig, monkeypatch)
     """
     import asyncio
 
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "1")
 
     async def crash_mid_session() -> str:
@@ -358,7 +358,7 @@ def test_shutdown_during_recording_stops_the_cameras_and_builds_the_zip(rig, mon
     start the post-session chain itself; otherwise the ledger is terminal when the next
     startup looks for interrupted sessions and nothing ever packages it.
     """
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "1")
 
     from master_backend.app.main import app

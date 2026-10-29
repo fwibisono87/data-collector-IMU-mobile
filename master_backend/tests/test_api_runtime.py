@@ -167,7 +167,7 @@ def test_draft_persistence_across_reload(store_root):
 # ---------------------------------------------------------------------------
 
 def test_camera_factory_modes(monkeypatch):
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "3")
     svc = create_camera_service()
     assert isinstance(svc, FakeCameraService)
@@ -183,7 +183,7 @@ def test_camera_factory_modes(monkeypatch):
     # service now that the camera lane has landed. Do not enumerate: that depends on
     # which webcams the test machine happens to have.
     from master_backend.app.camera.service import RealCameraService
-    for mode in ("auto", "banana"):
+    for mode in ("auto", "fake", "banana"):
         monkeypatch.setenv("IMU_CAMERAS", mode)
         svc = create_camera_service()
         try:
@@ -194,7 +194,7 @@ def test_camera_factory_modes(monkeypatch):
 
     monkeypatch.delenv("IMU_CAMERAS")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "not_a_number")
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     assert len(create_camera_service().list_devices()) == 2
 
 

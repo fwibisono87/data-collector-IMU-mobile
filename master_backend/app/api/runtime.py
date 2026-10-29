@@ -299,30 +299,36 @@ class DraftStore:
 # ---------------------------------------------------------------------------
 
 def create_camera_service() -> Any:
-    """Build the ``CameraService`` chosen by ``IMU_CAMERAS`` (auto|fake|off).
+    """Build the ``CameraService`` chosen by ``IMU_CAMERAS`` (auto|fake|stub|off).
 
-    ``auto`` mounts lane L5's real service when this branch has it; the import is
-    tried at runtime because L5 lands in parallel and may not exist here yet.  The
-    fallback is ``FakeCameraService(n=0)`` — a service with no devices, so the seam
-    stays exercised (readiness reports "no camera selected") without pretending
-    cameras exist.
+    * ``auto`` — the real ffmpeg-backed service on the host's cameras.
+    * ``fake`` — the same real service, but discovery yields ``IMU_FAKE_CAMERAS``
+      synthetic lavfi cameras, so capture, encoding, previews and calibration all run
+      for real without hardware (camera/discovery.py reads the same variable).
+    * ``stub`` — the in-memory ``FakeCameraService`` test double: no ffmpeg, writes
+      placeholder files. Unit tests of the session core use it.
+    * ``off`` — the stub with no cameras.
+
+    ``fake`` used to select the in-memory double while the camera service's own
+    discovery read it as "synthetic cameras", so a "fake" run never exercised the
+    video pipeline at all.
     """
     mode = (os.getenv("IMU_CAMERAS") or "auto").strip().lower()
-    if mode == "fake":
+    if mode == "stub":
         try:
             n = int(os.getenv("IMU_FAKE_CAMERAS", "2"))
         except ValueError:
             n = 2
         from ..camera.fake import FakeCameraService
 
-        logger.info("camera service: fake with %d camera(s)", n)
+        logger.info("camera service: in-memory stub with %d camera(s)", n)
         return FakeCameraService(n=n)
     if mode == "off":
         from ..camera.fake import FakeCameraService
 
         logger.info("camera service: off")
         return FakeCameraService(n=0)
-    if mode != "auto":
+    if mode not in ("auto", "fake"):
         logger.warning("unknown IMU_CAMERAS=%r — falling back to 'auto'", mode)
     try:
         from master_backend.app.camera.service import create_service

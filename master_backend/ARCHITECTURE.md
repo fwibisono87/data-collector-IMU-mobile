@@ -77,8 +77,8 @@ Kept on purpose, not legacy: `/health`, `/ws/telemetry`, `/ws/control`, `/upload
 ## Running with fake cameras
 
 ```bash
-IMU_CAMERAS=fake python master_backend/run.py     # two fake cameras
-IMU_CAMERAS=fake IMU_FAKE_CAMERAS=4 python master_backend/run.py
+IMU_CAMERAS=fake IMU_FAKE_CAMERAS=4 python master_backend/run.py  # synthetic cameras, real pipeline
+IMU_CAMERAS=stub python master_backend/run.py     # in-memory test double, no ffmpeg
 IMU_CAMERAS=off python master_backend/run.py      # seam active, no devices
 ```
 

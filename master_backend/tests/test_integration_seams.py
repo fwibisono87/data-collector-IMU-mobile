@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 def test_camera_routes_share_the_runtime_camera_service(monkeypatch, tmp_path):
     # Two RealCameraService instances would each try to open the same webcams.
     monkeypatch.setenv("SSD_PATH", str(tmp_path))
-    monkeypatch.setenv("IMU_CAMERAS", "fake")
+    monkeypatch.setenv("IMU_CAMERAS", "stub")
     monkeypatch.setenv("IMU_FAKE_CAMERAS", "1")
     from master_backend.app.api.runtime import get_runtime
     from master_backend.app.main import app
