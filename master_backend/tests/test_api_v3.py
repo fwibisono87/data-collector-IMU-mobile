@@ -245,7 +245,11 @@ def test_dismiss_and_reset(api, rig):
 
 # ── static dashboard ───────────────────────────────────────────────────────
 
-def test_missing_dashboard_build_serves_the_builtin_page(api):
+def test_missing_dashboard_build_serves_the_builtin_page(api, monkeypatch, tmp_path):
+    # Point at an empty directory: the repo ships a committed build, so relying on the
+    # real static/ being absent made this test depend on whether the dashboard was built.
+    from master_backend.app.api import static_site
+    monkeypatch.setattr(static_site, "STATIC_DIR", tmp_path / "no-build")
     client, _rt = api
     response = client.get("/")
     assert response.status_code == 200
