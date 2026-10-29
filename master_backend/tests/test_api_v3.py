@@ -469,3 +469,23 @@ def test_camera_start_failure_warns_but_the_imu_session_keeps_recording(api, rig
     statuses = {step["name"]: step["status"] for step in detail["finalize"]}
     assert statuses["package"] == "done", detail
     assert Path(detail["zip_path"]).is_file()
+
+
+def test_a_slow_ui_client_drops_the_oldest_message_instead_of_blocking_others():
+    """§6: one bounded queue (10) per client; a slow browser must not stall the hub."""
+    from master_backend.app.api.ws_ui import QUEUE_MAX, _Client
+
+    class SlowSocket:
+        """A socket that never drains: the queue is the only thing that grows."""
+
+    client = _Client(websocket=SlowSocket())
+    for i in range(QUEUE_MAX + 4):
+        client.offer({"type": "snapshot", "n": i})       # never raises
+
+    queued = []
+    while not client.queue.empty():
+        queued.append(json.loads(client.queue.get_nowait())["n"])
+    assert len(queued) == QUEUE_MAX
+    assert queued[-1] == QUEUE_MAX + 3                  # the newest message survives
+    assert queued[0] == 4                               # the four oldest were dropped
+    assert queued == list(range(4, QUEUE_MAX + 4))
