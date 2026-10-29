@@ -96,20 +96,39 @@ class Stats:
         self.replayed = 0
 
 
+async def _drain(ws) -> None:
+    """Read and discard everything the backend sends on the control channel.
+
+    The backend pushes a PONG heartbeat every 2 s on top of each PING reply. A client
+    that never reads lets those frames pile up until the websockets library stops
+    reading the socket, its keepalive ping goes unanswered, and the connection drops
+    after ~50 s, which made every simulator look like a flaky phone.
+    """
+    try:
+        async for _ in ws:
+            pass
+    except websockets.ConnectionClosed:
+        pass
+
+
 async def control_loop(ws, stop_event: asyncio.Event) -> None:
     """Send PING every 1s until stop_event is set or the socket dies."""
+    drain = asyncio.create_task(_drain(ws))
     ping_id = 0
-    while not stop_event.is_set():
-        cid = f"ping-{ping_id:04d}"
-        try:
-            await ws.send(build_ping(cid))
-        except websockets.ConnectionClosed:
-            return
-        ping_id += 1
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=1)
-        except asyncio.TimeoutError:
-            pass
+    try:
+        while not stop_event.is_set():
+            cid = f"ping-{ping_id:04d}"
+            try:
+                await ws.send(build_ping(cid))
+            except websockets.ConnectionClosed:
+                return
+            ping_id += 1
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+    finally:
+        drain.cancel()
 
 
 async def _stream_telemetry(ws, seq_holder: list, device_id: str, rate: float,
