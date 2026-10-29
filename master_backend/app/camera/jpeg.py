@@ -121,9 +121,13 @@ class JpegFrameSplitter:
                 # Scan entropy-coded data for a real marker.
                 exhausted = False
                 while p < n:
-                    if buf[p] != 0xFF:
-                        p += 1
-                        continue
+                    # Jump to the next 0xFF at C speed. Stepping byte by byte in Python
+                    # cost ~15M iterations/s at 5 cameras x 30 fps and held the GIL so
+                    # long that the asyncio loop serving the phones stalled for seconds.
+                    p = buf.find(0xFF, p)
+                    if p < 0:
+                        p = n
+                        break
                     ff_start = p
                     while p < n and buf[p] == 0xFF:
                         p += 1
