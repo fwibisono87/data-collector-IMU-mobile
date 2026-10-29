@@ -489,3 +489,111 @@ def test_a_slow_ui_client_drops_the_oldest_message_instead_of_blocking_others():
     assert queued[-1] == QUEUE_MAX + 3                  # the newest message survives
     assert queued[0] == 4                               # the four oldest were dropped
     assert queued == list(range(4, QUEUE_MAX + 4))
+
+
+def _recv(ws, timeout: float = 20.0) -> dict:
+    """``receive_json`` with a deadline: a broken push must fail, not hang the suite."""
+    import threading
+
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["message"] = ws.receive_json()
+        except Exception as exc:                      # noqa: BLE001 - reported by the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise AssertionError(f"/ws/ui sent nothing for {timeout:.0f}s")
+    if "error" in box:
+        raise AssertionError(f"/ws/ui closed: {box['error']!r}")
+    return box["message"]
+
+
+def test_finalize_messages_follow_the_post_session_steps(api, rig):
+    """§4/§6: every step change is pushed as a `finalize` message, cameras and package too."""
+    client, _rt = api
+    register_phone(rig)
+    fill_draft(client)
+
+    with client.websocket_connect("/ws/ui") as ws:
+        assert _recv(ws)["type"] == "snapshot"
+        session_id = client.post("/api/session/start", json={}).json()["session_id"]
+        assert client.post("/api/session/stop", json={}).status_code == 200
+
+        snapshots: list[dict] = []
+        while True:
+            message = _recv(ws, timeout=30)
+            if message["type"] != "finalize":
+                continue
+            snapshots.append({step["name"]: step["status"] for step in message["data"]["steps"]})
+            if snapshots[-1].get("package") == "done":
+                break
+            assert len(snapshots) < 40, snapshots
+
+    assert snapshots[-1]["package"] == "done"
+    # FinalizeJob's own steps come first, then the two this job adds.
+    assert list(snapshots[-1])[-2:] == ["cameras", "package"]
+    assert [s for s in snapshots[-1] if s not in ("cameras", "package")] == [
+        "close_writers", "validate", "bundle",
+    ]
+    # Only the documented statuses ever reach the dashboard.
+    assert {status for snapshot in snapshots for status in snapshot.values()} <= {
+        "pending", "running", "done", "failed", "skipped",
+    }
+    final = client.get(f"/api/sessions/{session_id}").json()
+    assert {step["name"]: step["status"] for step in final["finalize"]}["package"] == "done"
+
+
+def test_calibration_watch_streams_drift_and_stops_once_nobody_watches(api, monkeypatch):
+    """§6: drift at 2 Hz while watched, loop exits ~5 s after the last unwatch."""
+    from master_backend.app.api import ws_ui as ws_ui_module
+
+    monkeypatch.setattr(ws_ui_module, "DRIFT_INTERVAL_S", 0.05)
+    monkeypatch.setattr(ws_ui_module, "DRIFT_LINGER_S", 0.2)
+    client, rt = api
+
+    seen: list[str] = []
+
+    async def compare(ref_id):
+        seen.append(ref_id)
+        return {"ref_id": ref_id, "at_ms": 1, "cameras": []}
+
+    monkeypatch.setattr(rt.camera_service, "compare", compare, raising=False)
+
+    with client.websocket_connect("/ws/ui") as ws:
+        assert _recv(ws)["type"] == "snapshot"
+        ws.send_json({"type": "calibration.watch", "ref_id": "ref-1", "req_id": "w1"})
+
+        ack = drift = None
+        for _ in range(60):
+            message = _recv(ws, timeout=10)
+            if message["type"] == "ack" and message.get("req_id") == "w1":
+                ack = message
+            elif message["type"] == "calibration.drift":
+                drift = message
+            if ack is not None and drift is not None:
+                break
+        assert ack is not None and ack["ok"] is True, ack
+        assert drift is not None and drift["data"]["ref_id"] == "ref-1"
+        assert seen and set(seen) == {"ref-1"}
+
+        ws.send_json({"type": "calibration.unwatch", "req_id": "w2"})
+        for _ in range(60):
+            message = _recv(ws, timeout=10)
+            if message["type"] == "ack" and message.get("req_id") == "w2":
+                assert message["ok"] is True
+                break
+
+        loop = rt.hub._loops.get("drift")                     # noqa: SLF001
+        assert loop is not None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not loop.done():
+            time.sleep(0.02)
+        assert loop.done(), "the drift loop kept polling after the last watcher left"
+        calls = len(seen)
+        time.sleep(0.2)
+        assert len(seen) == calls, "compare() still being called after the loop exited"
