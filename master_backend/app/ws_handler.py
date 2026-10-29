@@ -301,6 +301,63 @@ async def control_ws(websocket: WebSocket) -> None:
         await broadcast_to_frontends(_state_snapshot())
 
 
+async def broadcast_start_to_phones(
+    *, command_id: str = "", with_metadata: bool = False
+) -> None:
+    """Send START to every phone after a successful ``start_recording``.
+
+    The dashboard path and the phone path disagree on the payload and this preserves both
+    exactly (frozen behavior): the phone-initiated START carries the subject/tag/operator
+    so the other handsets can name their rescue CSVs and embed the CSV header; the
+    dashboard-initiated one has always sent only the session id and scheduled start.
+    """
+    payload: dict = {
+        "session_id": session_manager.session_id,
+        "scheduled_start_ms": session_manager.scheduled_start_ms,
+    }
+    if with_metadata:
+        payload.update({
+            "subject": session_manager.subject_name,
+            "session_tag": session_manager.session_tag,
+            "operator": session_manager.operator,
+        })
+    await session_manager.broadcast_control(
+        Command(
+            type=CommandType.START_SESSION,
+            payload=json.dumps(payload),
+            command_id=command_id,
+        ).to_bytes()
+    )
+
+
+async def broadcast_state_update(**extra) -> None:
+    """Publish the legacy STATE_UPDATE shape to connected dashboards."""
+    await broadcast_to_frontends({"type": "STATE_UPDATE", **_state_snapshot(), **extra})
+
+
+async def apply_label(label_id: int, label_name: str) -> None:
+    """Apply a task label and checkpoint it while RECORDING (shared by both channels).
+
+    The label timeline is part of the crash-recovery contract: if the backend dies before
+    STOP, the next validator still knows which sequence gaps were inside task labels.
+    """
+    io_manager.set_label(label_id, label_name)
+    if session_manager.state == SessionState.RECORDING:
+        await session_manager._save_state()
+    await audit.log("INFO", "label_injected", {
+        "label_id": label_id,
+        "label_name": label_name,
+        "applied_at_ms": int(time.time() * 1000),
+    })
+
+
+async def reset_all_connections() -> None:
+    """Close every phone link and clear connectivity history (RESET)."""
+    await session_manager.reset_all()
+    _latest_samples.clear()   # stop /ws/live re-broadcasting stale device samples
+    await audit.log("INFO", "operator_reset", {})
+
+
 async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
     match cmd.type:
         case CommandType.PING:
@@ -328,21 +385,11 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
             await ws.send_bytes(make_ack(cmd.command_id, "ok" if ok else "fail", "" if ok else detail))
             if ok:
                 await audit.log("INFO", "session_start", {"initiated_by": device_id[:8]})
-                # Broadcast START to all other connected devices, carrying the metadata the
-                # phones need to name their local rescue CSVs (subject/tag/operator) and embed
-                # in the CSV header.
-                start_cmd = Command(
-                    type=CommandType.START_SESSION,
-                    payload=json.dumps({
-                        "session_id": session_manager.session_id,
-                        "scheduled_start_ms": session_manager.scheduled_start_ms,
-                        "subject": session_manager.subject_name,
-                        "session_tag": session_manager.session_tag,
-                        "operator": session_manager.operator,
-                    }),
-                    command_id=cmd.command_id,
-                ).to_bytes()
-                await session_manager.broadcast_control(start_cmd)
+                # Carries subject/tag/operator so the phones can name their local rescue
+                # CSVs; the dashboard-initiated START has always sent only the session id.
+                await broadcast_start_to_phones(
+                    command_id=cmd.command_id, with_metadata=True
+                )
 
         case CommandType.STOP_SESSION:
             if session_manager.state != SessionState.RECORDING:
@@ -365,18 +412,8 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
             except Exception:
                 await ws.send_bytes(make_ack(cmd.command_id, "fail", "Bad SET_LABEL payload"))
                 return
-            io_manager.set_label(label_id, label_name)
-            if session_manager.state == SessionState.RECORDING:
-                # The label timeline is part of the crash-recovery contract: if the backend
-                # dies before STOP, the next validator still knows which sequence gaps were
-                # inside task labels versus the permitted zero-label boundary.
-                await session_manager._save_state()
+            await apply_label(label_id, label_name)
             await ws.send_bytes(make_ack(cmd.command_id, "ok"))
-            await audit.log(
-                "INFO",
-                "label_injected",
-                {"label_id": label_id, "label_name": label_name, "applied_at_ms": int(time.time() * 1000)},
-            )
 
         case _:
             logger.debug("Unhandled command type %s from %s", cmd.type, device_id[:8])
@@ -445,19 +482,10 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
             }))
             if ok:
                 # Broadcast coordinated START to all mobile devices (CLAUDE.md §22.5)
-                start_cmd = Command(
-                    type=CommandType.START_SESSION,
-                    payload=json.dumps({
-                        "session_id": session_manager.session_id,
-                        "scheduled_start_ms": session_manager.scheduled_start_ms,
-                    }),
-                ).to_bytes()
-                await session_manager.broadcast_control(start_cmd)
-                await broadcast_to_frontends({
-                    "type": "STATE_UPDATE",
-                    **_state_snapshot(),
-                    "scheduled_start_ms": session_manager.scheduled_start_ms,
-                })
+                await broadcast_start_to_phones()
+                await broadcast_state_update(
+                    scheduled_start_ms=session_manager.scheduled_start_ms
+                )
 
         case "STOP_SESSION":
             # STOP now only *starts* finalization. It returns as soon as the session has
@@ -487,14 +515,7 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
         case "SET_LABEL":
             label_id = int(payload.get("label_id", 0))
             label_name = str(payload.get("label_name", str(label_id)))
-            io_manager.set_label(label_id, label_name)
-            if session_manager.state == SessionState.RECORDING:
-                await session_manager._save_state()
-            await audit.log("INFO", "label_injected", {
-                "label_id": label_id,
-                "label_name": label_name,
-                "applied_at_ms": int(time.time() * 1000),
-            })
+            await apply_label(label_id, label_name)
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
@@ -513,14 +534,12 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
                     "detail": "Cannot reset connections while a session is recording",
                 }))
                 return
-            await session_manager.reset_all()
-            _latest_samples.clear()   # stop /ws/live re-broadcasting stale device samples
+            await reset_all_connections()
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
                 "status": "ok",
             }))
-            await audit.log("INFO", "operator_reset", {})
             await broadcast_to_frontends(_state_snapshot())
 
 

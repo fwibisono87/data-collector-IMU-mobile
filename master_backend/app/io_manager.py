@@ -312,6 +312,11 @@ class IoManager:
         return self._session_id
 
     @property
+    def session_folder(self) -> Path | None:
+        """Folder the current (or just-ended) session writes into, once opened."""
+        return self._base
+
+    @property
     def session_open(self) -> bool:
         """True while writers for a session are open (i.e. close_session is still owed)."""
         return self._session_open or bool(self._writers) or bool(self._rescue_writers)
