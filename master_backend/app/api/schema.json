@@ -1,0 +1,1935 @@
+{
+  "$defs": {
+    "AckMsg": {
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorBody"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "ack",
+          "default": "ack",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id",
+        "ok"
+      ],
+      "title": "AckMsg",
+      "type": "object"
+    },
+    "CalibrationState": {
+      "properties": {
+        "active_ref_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Active Ref Id"
+        }
+      },
+      "required": [
+        "active_ref_id"
+      ],
+      "title": "CalibrationState",
+      "type": "object"
+    },
+    "Camera": {
+      "description": "One selected camera slot (cam1..cam5).",
+      "properties": {
+        "cam_id": {
+          "title": "Cam Id",
+          "type": "string"
+        },
+        "device_key": {
+          "title": "Device Key",
+          "type": "string"
+        },
+        "drift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Drift"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dropped_frames": {
+          "title": "Dropped Frames",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error"
+        },
+        "fps": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fps"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Height"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "recording": {
+          "title": "Recording",
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "opening",
+            "live",
+            "lost",
+            "error"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Width"
+        }
+      },
+      "required": [
+        "cam_id",
+        "device_key",
+        "label",
+        "state",
+        "recording",
+        "width",
+        "height",
+        "fps",
+        "dropped_frames",
+        "error",
+        "drift"
+      ],
+      "title": "Camera",
+      "type": "object"
+    },
+    "CameraDevice": {
+      "description": "A device the camera backend can open.",
+      "properties": {
+        "backend": {
+          "enum": [
+            "dshow",
+            "v4l2",
+            "fake"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "device_key": {
+          "title": "Device Key",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_key",
+        "label",
+        "backend"
+      ],
+      "title": "CameraDevice",
+      "type": "object"
+    },
+    "CameraSelectionItem": {
+      "description": "One selected device. ``cam_id`` is optional: slots are assigned in list order.",
+      "properties": {
+        "cam_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cam Id"
+        },
+        "device_key": {
+          "title": "Device Key",
+          "type": "string"
+        }
+      },
+      "required": [
+        "device_key"
+      ],
+      "title": "CameraSelectionItem",
+      "type": "object"
+    },
+    "CameraSelectionRequest": {
+      "properties": {
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/CameraSelectionItem"
+          },
+          "maxItems": 5,
+          "title": "Cameras",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cameras"
+      ],
+      "title": "CameraSelectionRequest",
+      "type": "object"
+    },
+    "CameraSelectionResponse": {
+      "properties": {
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/Camera"
+          },
+          "title": "Cameras",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cameras"
+      ],
+      "title": "CameraSelectionResponse",
+      "type": "object"
+    },
+    "ClientMessage": {
+      "discriminator": {
+        "mapping": {
+          "calibration.unwatch": "#/$defs/UnwatchMsg",
+          "calibration.watch": "#/$defs/WatchMsg",
+          "ping": "#/$defs/PingMsg"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WatchMsg"
+        },
+        {
+          "$ref": "#/$defs/UnwatchMsg"
+        },
+        {
+          "$ref": "#/$defs/PingMsg"
+        }
+      ]
+    },
+    "CompareCamera": {
+      "description": "A Drift verdict attributed to one camera.",
+      "properties": {
+        "at_ms": {
+          "title": "At Ms",
+          "type": "integer"
+        },
+        "cam_id": {
+          "title": "Cam Id",
+          "type": "string"
+        },
+        "confidence": {
+          "title": "Confidence",
+          "type": "number"
+        },
+        "device_key": {
+          "title": "Device Key",
+          "type": "string"
+        },
+        "dx_px": {
+          "title": "Dx Px",
+          "type": "number"
+        },
+        "dy_px": {
+          "title": "Dy Px",
+          "type": "number"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "shift_pct": {
+          "title": "Shift Pct",
+          "type": "number"
+        },
+        "verdict": {
+          "enum": [
+            "OK",
+            "CHECK",
+            "MOVED",
+            "NO_SIGNAL",
+            "MISSING",
+            "RESOLUTION_CHANGED"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "dx_px",
+        "dy_px",
+        "shift_pct",
+        "score",
+        "confidence",
+        "at_ms",
+        "device_key",
+        "cam_id"
+      ],
+      "title": "CompareCamera",
+      "type": "object"
+    },
+    "CompareResult": {
+      "description": "Result of ``GET /api/calibration/compare`` and the ``calibration.drift`` message.",
+      "properties": {
+        "at_ms": {
+          "title": "At Ms",
+          "type": "integer"
+        },
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/CompareCamera"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "ref_id": {
+          "title": "Ref Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_id",
+        "at_ms",
+        "cameras"
+      ],
+      "title": "CompareResult",
+      "type": "object"
+    },
+    "DeviceList": {
+      "properties": {
+        "devices": {
+          "items": {
+            "$ref": "#/$defs/CameraDevice"
+          },
+          "title": "Devices",
+          "type": "array"
+        }
+      },
+      "required": [
+        "devices"
+      ],
+      "title": "DeviceList",
+      "type": "object"
+    },
+    "DiskInfo": {
+      "properties": {
+        "free_bytes": {
+          "title": "Free Bytes",
+          "type": "integer"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "free_bytes"
+      ],
+      "title": "DiskInfo",
+      "type": "object"
+    },
+    "Draft": {
+      "description": "Server-side copy of the Setup form, so every browser shows the same values.",
+      "properties": {
+        "operator": {
+          "title": "Operator",
+          "type": "string"
+        },
+        "session_tag": {
+          "title": "Session Tag",
+          "type": "string"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "updated_at_ms": {
+          "title": "Updated At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "subject",
+        "session_tag",
+        "operator",
+        "updated_at_ms"
+      ],
+      "title": "Draft",
+      "type": "object"
+    },
+    "DraftUpdate": {
+      "description": "``PUT /api/session/draft``. ``None`` means \"keep the current value\".",
+      "properties": {
+        "operator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operator"
+        },
+        "session_tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Tag"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject"
+        }
+      },
+      "title": "DraftUpdate",
+      "type": "object"
+    },
+    "Drift": {
+      "description": "Result of the calibration comparison against the active reference.",
+      "properties": {
+        "at_ms": {
+          "title": "At Ms",
+          "type": "integer"
+        },
+        "confidence": {
+          "title": "Confidence",
+          "type": "number"
+        },
+        "dx_px": {
+          "title": "Dx Px",
+          "type": "number"
+        },
+        "dy_px": {
+          "title": "Dy Px",
+          "type": "number"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "shift_pct": {
+          "title": "Shift Pct",
+          "type": "number"
+        },
+        "verdict": {
+          "enum": [
+            "OK",
+            "CHECK",
+            "MOVED",
+            "NO_SIGNAL",
+            "MISSING",
+            "RESOLUTION_CHANGED"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "dx_px",
+        "dy_px",
+        "shift_pct",
+        "score",
+        "confidence",
+        "at_ms"
+      ],
+      "title": "Drift",
+      "type": "object"
+    },
+    "DriftMsg": {
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/CompareResult"
+        },
+        "type": {
+          "const": "calibration.drift",
+          "default": "calibration.drift",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "DriftMsg",
+      "type": "object"
+    },
+    "EmptyResponse": {
+      "description": "The documented ``{}`` body of dismiss / open-folder / activate / deactivate.",
+      "properties": {},
+      "title": "EmptyResponse",
+      "type": "object"
+    },
+    "ErrorBody": {
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Details"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "details"
+      ],
+      "title": "ErrorBody",
+      "type": "object"
+    },
+    "ErrorResponse": {
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "ErrorResponse",
+      "type": "object"
+    },
+    "FinalizeMsg": {
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/FinalizeProgress"
+        },
+        "type": {
+          "const": "finalize",
+          "default": "finalize",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "FinalizeMsg",
+      "type": "object"
+    },
+    "FinalizeProgress": {
+      "description": "Finalize progress for one session; also the payload of the ``finalize`` WS message.",
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/FinalizeStep"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "steps"
+      ],
+      "title": "FinalizeProgress",
+      "type": "object"
+    },
+    "FinalizeStep": {
+      "description": "One step of the finalize job. ``detail`` is human-readable error/extra text.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Detail"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ended At Ms"
+        },
+        "name": {
+          "enum": [
+            "close_writers",
+            "cameras",
+            "validate",
+            "bundle",
+            "package",
+            "late_window"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Started At Ms"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "done",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "started_at_ms",
+        "ended_at_ms",
+        "detail"
+      ],
+      "title": "FinalizeStep",
+      "type": "object"
+    },
+    "Issue": {
+      "description": "One actionable problem or warning. ``subject`` identifies what it is about\n(device_id, cam_id or a form field name).",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "subject": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subject"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "Issue",
+      "type": "object"
+    },
+    "LabelRequest": {
+      "properties": {
+        "label_id": {
+          "maximum": 50,
+          "minimum": 0,
+          "title": "Label Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label_id"
+      ],
+      "title": "LabelRequest",
+      "type": "object"
+    },
+    "LabelResponse": {
+      "properties": {
+        "label_id": {
+          "title": "Label Id",
+          "type": "integer"
+        },
+        "since_ms": {
+          "title": "Since Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label_id",
+        "since_ms"
+      ],
+      "title": "LabelResponse",
+      "type": "object"
+    },
+    "LateRows": {
+      "description": "Rows that arrived inside the late window for one device.",
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "rows": {
+          "title": "Rows",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device_id",
+        "role",
+        "rows"
+      ],
+      "title": "LateRows",
+      "type": "object"
+    },
+    "LiveData": {
+      "properties": {
+        "phones": {
+          "additionalProperties": {
+            "$ref": "#/$defs/LiveSample"
+          },
+          "title": "Phones",
+          "type": "object"
+        },
+        "t_ms": {
+          "title": "T Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "t_ms",
+        "phones"
+      ],
+      "title": "LiveData",
+      "type": "object"
+    },
+    "LiveMsg": {
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/LiveData"
+        },
+        "type": {
+          "const": "live",
+          "default": "live",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "LiveMsg",
+      "type": "object"
+    },
+    "LiveSample": {
+      "description": "Latest IMU sample of one phone. ``acc`` is in g, ``gyro`` in deg/s.",
+      "properties": {
+        "acc": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Acc",
+          "type": "array"
+        },
+        "gyro": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Gyro",
+          "type": "array"
+        },
+        "ts_ms": {
+          "title": "Ts Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "acc",
+        "gyro",
+        "ts_ms"
+      ],
+      "title": "LiveSample",
+      "type": "object"
+    },
+    "Notice": {
+      "description": "A server-side notice. Unresolved & undismissed notices are in the snapshot.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "info",
+            "warn",
+            "error"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "resolved": {
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Session Id"
+        }
+      },
+      "required": [
+        "id",
+        "level",
+        "code",
+        "message",
+        "session_id",
+        "created_at_ms",
+        "resolved"
+      ],
+      "title": "Notice",
+      "type": "object"
+    },
+    "PackageResponse": {
+      "properties": {
+        "zip_path": {
+          "title": "Zip Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "zip_path"
+      ],
+      "title": "PackageResponse",
+      "type": "object"
+    },
+    "Phone": {
+      "description": "One connected phone and its health.",
+      "properties": {
+        "app_version": {
+          "title": "App Version",
+          "type": "string"
+        },
+        "buffering": {
+          "title": "Buffering",
+          "type": "boolean"
+        },
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "offline_since_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Offline Since Ms"
+        },
+        "online": {
+          "title": "Online",
+          "type": "boolean"
+        },
+        "packets": {
+          "title": "Packets",
+          "type": "integer"
+        },
+        "rate_hz": {
+          "title": "Rate Hz",
+          "type": "number"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "telemetry_age_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Telemetry Age Ms"
+        },
+        "true_hz_avg": {
+          "title": "True Hz Avg",
+          "type": "number"
+        }
+      },
+      "required": [
+        "device_id",
+        "role",
+        "model",
+        "app_version",
+        "online",
+        "offline_since_ms",
+        "rate_hz",
+        "true_hz_avg",
+        "packets",
+        "telemetry_age_ms",
+        "buffering"
+      ],
+      "title": "Phone",
+      "type": "object"
+    },
+    "PingMsg": {
+      "properties": {
+        "req_id": {
+          "title": "Req Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "ping",
+          "default": "ping",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "req_id"
+      ],
+      "title": "PingMsg",
+      "type": "object"
+    },
+    "Readiness": {
+      "description": "What START needs (blockers) and what it merely records (warnings).",
+      "properties": {
+        "blockers": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "blockers",
+        "warnings"
+      ],
+      "title": "Readiness",
+      "type": "object"
+    },
+    "Reference": {
+      "description": "``reference.json`` plus the URLs the dashboard renders thumbnails from.\n\n``thumb_urls`` maps ``device_key`` to the full-resolution still URL\n(``/api/calibration/references/<ref_id>/<key_slug>.jpg``); ``cameras[].file``\nstays the on-disk filename from the frozen-ish calibration layout.",
+      "properties": {
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/ReferenceCamera"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "created_at_ms": {
+          "title": "Created At Ms",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ref_id": {
+          "title": "Ref Id",
+          "type": "string"
+        },
+        "thumb_urls": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Thumb Urls",
+          "type": "object"
+        },
+        "trigger_ms": {
+          "title": "Trigger Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ref_id",
+        "name",
+        "created_at_ms",
+        "trigger_ms",
+        "cameras"
+      ],
+      "title": "Reference",
+      "type": "object"
+    },
+    "ReferenceCamera": {
+      "description": "One still inside a calibration reference set (CALIBRATION.md).",
+      "properties": {
+        "cam_id_at_capture": {
+          "title": "Cam Id At Capture",
+          "type": "string"
+        },
+        "device_key": {
+          "title": "Device Key",
+          "type": "string"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "frame_arrival_ms": {
+          "title": "Frame Arrival Ms",
+          "type": "integer"
+        },
+        "height": {
+          "title": "Height",
+          "type": "integer"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "skew_ms": {
+          "title": "Skew Ms",
+          "type": "integer"
+        },
+        "width": {
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "device_key",
+        "label",
+        "cam_id_at_capture",
+        "file",
+        "width",
+        "height",
+        "frame_arrival_ms",
+        "skew_ms"
+      ],
+      "title": "ReferenceCamera",
+      "type": "object"
+    },
+    "ReferenceCreate": {
+      "description": "``POST /api/calibration/references``; the name is generated when absent.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        }
+      },
+      "title": "ReferenceCreate",
+      "type": "object"
+    },
+    "ReferenceList": {
+      "properties": {
+        "active_ref_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Active Ref Id"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/Reference"
+          },
+          "title": "References",
+          "type": "array"
+        }
+      },
+      "required": [
+        "references",
+        "active_ref_id"
+      ],
+      "title": "ReferenceList",
+      "type": "object"
+    },
+    "ReferenceRename": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ReferenceRename",
+      "type": "object"
+    },
+    "ServerMessage": {
+      "discriminator": {
+        "mapping": {
+          "ack": "#/$defs/AckMsg",
+          "calibration.drift": "#/$defs/DriftMsg",
+          "finalize": "#/$defs/FinalizeMsg",
+          "live": "#/$defs/LiveMsg",
+          "snapshot": "#/$defs/SnapshotMsg"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SnapshotMsg"
+        },
+        {
+          "$ref": "#/$defs/LiveMsg"
+        },
+        {
+          "$ref": "#/$defs/FinalizeMsg"
+        },
+        {
+          "$ref": "#/$defs/DriftMsg"
+        },
+        {
+          "$ref": "#/$defs/AckMsg"
+        }
+      ]
+    },
+    "SessionDetail": {
+      "description": "A SessionSummary plus everything the Done view shows.",
+      "properties": {
+        "cameras": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration S"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ended At Ms"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/SessionFile"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "finalize": {
+          "items": {
+            "$ref": "#/$defs/FinalizeStep"
+          },
+          "title": "Finalize",
+          "type": "array"
+        },
+        "folder": {
+          "title": "Folder",
+          "type": "string"
+        },
+        "integrity_report": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Integrity Report"
+        },
+        "late": {
+          "items": {
+            "$ref": "#/$defs/LateRows"
+          },
+          "title": "Late",
+          "type": "array"
+        },
+        "notices": {
+          "title": "Notices",
+          "type": "integer"
+        },
+        "operator": {
+          "title": "Operator",
+          "type": "string"
+        },
+        "outstanding_uploads": {
+          "title": "Outstanding Uploads",
+          "type": "integer"
+        },
+        "phones": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Phones",
+          "type": "array"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_tag": {
+          "title": "Session Tag",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "title": "Started At Ms",
+          "type": "integer"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "uploads": {
+          "items": {
+            "$ref": "#/$defs/UploadStatus"
+          },
+          "title": "Uploads",
+          "type": "array"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "PARTIAL",
+            "FAIL",
+            "UNKNOWN",
+            "NONE"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "zip_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Zip Bytes"
+        },
+        "zip_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Zip Path"
+        }
+      },
+      "required": [
+        "session_id",
+        "subject",
+        "session_tag",
+        "operator",
+        "started_at_ms",
+        "ended_at_ms",
+        "duration_s",
+        "phones",
+        "cameras",
+        "verdict",
+        "folder",
+        "zip_path",
+        "zip_bytes",
+        "outstanding_uploads",
+        "notices",
+        "finalize",
+        "integrity_report",
+        "files",
+        "late",
+        "uploads"
+      ],
+      "title": "SessionDetail",
+      "type": "object"
+    },
+    "SessionFile": {
+      "description": "One file in the session folder, as listed in the Done/Sessions view.",
+      "properties": {
+        "bytes": {
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "bytes",
+        "kind"
+      ],
+      "title": "SessionFile",
+      "type": "object"
+    },
+    "SessionInfo": {
+      "description": "The session that is recording or finalising.",
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/SessionLabel"
+        },
+        "operator": {
+          "title": "Operator",
+          "type": "string"
+        },
+        "scheduled_start_ms": {
+          "title": "Scheduled Start Ms",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_tag": {
+          "title": "Session Tag",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "title": "Started At Ms",
+          "type": "integer"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "subject",
+        "session_tag",
+        "operator",
+        "started_at_ms",
+        "scheduled_start_ms",
+        "label"
+      ],
+      "title": "SessionInfo",
+      "type": "object"
+    },
+    "SessionLabel": {
+      "description": "The label that is active right now.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "since_ms": {
+          "title": "Since Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "since_ms"
+      ],
+      "title": "SessionLabel",
+      "type": "object"
+    },
+    "SessionList": {
+      "properties": {
+        "next": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SessionSummary"
+          },
+          "title": "Sessions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions",
+        "next"
+      ],
+      "title": "SessionList",
+      "type": "object"
+    },
+    "SessionSummary": {
+      "description": "One row of the Sessions history (and the head of SessionDetail).",
+      "properties": {
+        "cameras": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "duration_s": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Duration S"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ended At Ms"
+        },
+        "folder": {
+          "title": "Folder",
+          "type": "string"
+        },
+        "notices": {
+          "title": "Notices",
+          "type": "integer"
+        },
+        "operator": {
+          "title": "Operator",
+          "type": "string"
+        },
+        "outstanding_uploads": {
+          "title": "Outstanding Uploads",
+          "type": "integer"
+        },
+        "phones": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Phones",
+          "type": "array"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "session_tag": {
+          "title": "Session Tag",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "title": "Started At Ms",
+          "type": "integer"
+        },
+        "subject": {
+          "title": "Subject",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "PARTIAL",
+            "FAIL",
+            "UNKNOWN",
+            "NONE"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "zip_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Zip Bytes"
+        },
+        "zip_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Zip Path"
+        }
+      },
+      "required": [
+        "session_id",
+        "subject",
+        "session_tag",
+        "operator",
+        "started_at_ms",
+        "ended_at_ms",
+        "duration_s",
+        "phones",
+        "cameras",
+        "verdict",
+        "folder",
+        "zip_path",
+        "zip_bytes",
+        "outstanding_uploads",
+        "notices"
+      ],
+      "title": "SessionSummary",
+      "type": "object"
+    },
+    "Snapshot": {
+      "description": "The whole dashboard state. Always sent whole; the dashboard never patches.",
+      "properties": {
+        "build_id": {
+          "title": "Build Id",
+          "type": "string"
+        },
+        "calibration": {
+          "$ref": "#/$defs/CalibrationState"
+        },
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/Camera"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "disk": {
+          "$ref": "#/$defs/DiskInfo"
+        },
+        "draft": {
+          "$ref": "#/$defs/Draft"
+        },
+        "finalize": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FinalizeProgress"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Session Id"
+        },
+        "notices": {
+          "items": {
+            "$ref": "#/$defs/Notice"
+          },
+          "title": "Notices",
+          "type": "array"
+        },
+        "phones": {
+          "items": {
+            "$ref": "#/$defs/Phone"
+          },
+          "title": "Phones",
+          "type": "array"
+        },
+        "readiness": {
+          "$ref": "#/$defs/Readiness"
+        },
+        "server_time_ms": {
+          "title": "Server Time Ms",
+          "type": "integer"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "IDLE",
+            "RECORDING",
+            "FINALIZING",
+            "VALIDATING",
+            "ERROR"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "build_id",
+        "server_time_ms",
+        "state",
+        "session",
+        "last_session_id",
+        "draft",
+        "phones",
+        "cameras",
+        "readiness",
+        "finalize",
+        "notices",
+        "disk",
+        "calibration"
+      ],
+      "title": "Snapshot",
+      "type": "object"
+    },
+    "SnapshotMsg": {
+      "properties": {
+        "data": {
+          "$ref": "#/$defs/Snapshot"
+        },
+        "type": {
+          "const": "snapshot",
+          "default": "snapshot",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "SnapshotMsg",
+      "type": "object"
+    },
+    "StartRequest": {
+      "description": "``POST /api/session/start`` — the body is empty today.",
+      "properties": {},
+      "title": "StartRequest",
+      "type": "object"
+    },
+    "StartResponse": {
+      "properties": {
+        "scheduled_start_ms": {
+          "title": "Scheduled Start Ms",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/Issue"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "scheduled_start_ms",
+        "warnings"
+      ],
+      "title": "StartResponse",
+      "type": "object"
+    },
+    "StopRequest": {
+      "properties": {
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "title": "StopRequest",
+      "type": "object"
+    },
+    "StopResponse": {
+      "properties": {
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "StopResponse",
+      "type": "object"
+    },
+    "UnwatchMsg": {
+      "properties": {
+        "req_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Req Id"
+        },
+        "type": {
+          "const": "calibration.unwatch",
+          "default": "calibration.unwatch",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "UnwatchMsg",
+      "type": "object"
+    },
+    "UploadStatus": {
+      "description": "Phone rescue upload progress for one device.",
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "received_bytes": {
+          "title": "Received Bytes",
+          "type": "integer"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "total_bytes": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Total Bytes"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "device_id",
+        "role",
+        "received_bytes",
+        "total_bytes",
+        "complete",
+        "verified"
+      ],
+      "title": "UploadStatus",
+      "type": "object"
+    },
+    "WatchMsg": {
+      "description": "Start receiving ``calibration.drift``. ``ref_id`` may be a real id or \"active\".",
+      "properties": {
+        "ref_id": {
+          "title": "Ref Id",
+          "type": "string"
+        },
+        "req_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Req Id"
+        },
+        "type": {
+          "const": "calibration.watch",
+          "default": "calibration.watch",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_id"
+      ],
+      "title": "WatchMsg",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from master_backend/app/api/schema.py. Do not edit by hand; run python -m master_backend.app.api.export_schema.",
+  "title": "IMU Collector dashboard API"
+}
