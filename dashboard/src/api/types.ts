@@ -70,6 +70,15 @@ export type Verdict1 = 'OK' | 'CHECK' | 'MOVED' | 'NO_SIGNAL' | 'MISSING' | 'RES
 export type AtMs2 = number;
 export type Cameras2 = CompareCamera[];
 export type RefId1 = string;
+export type CanConsolidate = boolean;
+export type Detail = string;
+export type LatePending = boolean;
+export type LateRows = number;
+export type RecoveryPending = boolean;
+export type RescueUploads = number;
+export type State1 = 'current' | 'pending_phone_data' | 'not_needed';
+export type UploadsInProgress = boolean;
+export type Whole = boolean;
 export type Devices = CameraDevice[];
 export type FreeBytes = number;
 export type Path = string;
@@ -82,9 +91,9 @@ export type SessionTag1 = string | null;
 export type Subject1 = string | null;
 export type Type4 = 'calibration.drift';
 export type SessionId = string;
-export type Detail = string | null;
+export type Detail1 = string | null;
 export type EndedAtMs = number | null;
-export type Name = 'close_writers' | 'cameras' | 'validate' | 'bundle' | 'package' | 'late_window';
+export type Name = 'close_writers' | 'cameras' | 'consolidate' | 'validate' | 'bundle' | 'package' | 'late_window';
 export type StartedAtMs = number | null;
 export type Status = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 export type Steps = FinalizeStep[];
@@ -169,7 +178,7 @@ export type SessionId2 = string;
 export type SessionTag2 = string;
 export type StartedAtMs1 = number;
 export type Subject3 = string;
-export type State1 = 'IDLE' | 'RECORDING' | 'FINALIZING' | 'VALIDATING' | 'ERROR';
+export type State2 = 'IDLE' | 'RECORDING' | 'FINALIZING' | 'VALIDATING' | 'ERROR';
 export type Type7 = 'snapshot';
 export type Cameras5 = string[];
 export type DurationS = number | null;
@@ -183,7 +192,7 @@ export type Folder = string;
 export type IntegrityReport = {
   [k: string]: unknown;
 } | null;
-export type Late = LateRows[];
+export type Late = LateRows1[];
 export type Notices1 = number;
 export type Operator3 = string;
 export type OutstandingUploads = number;
@@ -396,6 +405,29 @@ export interface CompareResult {
   [k: string]: unknown;
 }
 /**
+ * Is the session's consolidation current? (Done view's Consolidation row.)
+ *
+ * ``state`` is the row: ``not_needed`` for a whole session, ``pending_phone_data``
+ * when late rows / rescue uploads are not merged yet, ``current`` otherwise.
+ * ``can_consolidate`` is the ported ``canConsolidate`` from the old end-session modal
+ * and decides whether "Consolidate now" is offered.
+ *
+ * This interface was referenced by `IMUCollectorDashboardAPI`'s JSON-Schema
+ * via the `definition` "ConsolidationStatus".
+ */
+export interface ConsolidationStatus {
+  can_consolidate: CanConsolidate;
+  detail: Detail;
+  late_pending: LatePending;
+  late_rows: LateRows;
+  recovery_pending: RecoveryPending;
+  rescue_uploads: RescueUploads;
+  state: State1;
+  uploads_in_progress: UploadsInProgress;
+  whole: Whole;
+  [k: string]: unknown;
+}
+/**
  * This interface was referenced by `IMUCollectorDashboardAPI`'s JSON-Schema
  * via the `definition` "DeviceList".
  */
@@ -490,7 +522,7 @@ export interface FinalizeProgress {
  * via the `definition` "FinalizeStep".
  */
 export interface FinalizeStep {
-  detail: Detail;
+  detail: Detail1;
   ended_at_ms: EndedAtMs;
   name: Name;
   started_at_ms: StartedAtMs;
@@ -533,7 +565,7 @@ export interface LabelResponse {
  * This interface was referenced by `IMUCollectorDashboardAPI`'s JSON-Schema
  * via the `definition` "LateRows".
  */
-export interface LateRows {
+export interface LateRows1 {
   device_id: DeviceId;
   role: Role;
   rows: Rows;
@@ -721,7 +753,7 @@ export interface Snapshot {
   readiness: Readiness;
   server_time_ms: ServerTimeMs;
   session: SessionInfo | null;
-  state: State1;
+  state: State2;
   [k: string]: unknown;
 }
 /**
@@ -760,6 +792,7 @@ export interface SessionLabel {
  */
 export interface SessionDetail {
   cameras: Cameras5;
+  consolidation?: ConsolidationStatus | null;
   duration_s: DurationS;
   ended_at_ms: EndedAtMs1;
   files: Files;

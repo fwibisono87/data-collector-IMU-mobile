@@ -1,9 +1,9 @@
-"""Post-session job: camera stop and the server-built ZIP (L4 spec §4).
+"""Post-session job: camera stop, consolidation and the server-built ZIP (L4/L7a).
 
 Kept separate from :class:`~master_backend.app.finalize_job.FinalizeJob` so the frozen
 ledger and its three steps are untouched.  This job has its own record,
-``_state/sessions/<sid>.post.json``, with the two steps the v3 dashboard shows after
-the finalize steps: ``cameras`` and ``package``.
+``_state/sessions/<sid>.post.json``, with the three steps the v3 dashboard shows after
+the finalize steps: ``cameras``, ``consolidate`` and ``package``.
 
 Flow at STOP::
 
@@ -11,15 +11,23 @@ Flow at STOP::
       session_manager.request_stop()      -> FinalizeJob starts (unchanged)
       PostSessionJob.on_stopped(sid)      -> cameras step starts immediately,
                                              concurrently with FinalizeJob
+      consolidate                         -> waits (bounded) for phone rescue uploads,
+                                             then merges every source when the session is
+                                             not whole and the merge would change anything
       package                             -> runs once FinalizeJob has settled AND
                                              cameras is done/failed/skipped
 
 The package step is re-run (debounced by 5 s) when late telemetry or a verified
 rescue upload changes the session's data files, and manually via
-``POST /api/sessions/{sid}/package``.  On backend start, unfinished records are
-resumed; if the backend died mid-recording the cameras step is rebuilt from the
-``<sid>_cameras.json`` anchors and the ``*_video_sync*.webm`` files on disk (each file
-is probed and remuxed with ffmpeg when it has no duration, per the spec).
+``POST /api/sessions/{sid}/package``.  Every re-package runs the consolidate decision
+again, so data that arrives after the first ZIP is merged into the next one.  The
+``consolidate`` step is also exposed on its own through
+``POST /api/sessions/{sid}/consolidate`` (the Done view's "Consolidate now").
+
+On backend start, unfinished records are resumed; if the backend died mid-recording the
+cameras step is rebuilt from the ``<sid>_cameras.json`` anchors and the
+``*_video_sync*.webm`` files on disk (each file is probed and remuxed with ffmpeg when it
+has no duration, per the spec).
 
 Every step change is persisted before it is published, so a crash can never leave the
 dashboard showing progress the disk does not agree with.
@@ -29,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import logging
 import os
 import time
@@ -48,7 +57,7 @@ from .runtime import Runtime, atomic_write_json, read_json
 
 logger = logging.getLogger(__name__)
 
-STEP_NAMES = ("cameras", "package")
+STEP_NAMES = ("cameras", "consolidate", "package")
 _PENDING, _RUNNING, _DONE, _FAILED, _SKIPPED = (
     "pending", "running", "done", "failed", "skipped",
 )
@@ -58,6 +67,15 @@ _TERMINAL = (_DONE, _FAILED, _SKIPPED)
 REPACKAGE_DELAY_S = 5.0
 #: How long package may wait for FinalizeJob before failing its step.
 FINALIZE_WAIT_S = 600.0
+
+#: How long the consolidate step waits for a rescue upload already in flight, and how
+#: often it re-reads the manifest while doing so.  The old modal used the same 60 s
+#: deadline and 3 s poll (EndSessionModal.tsx, handleConsolidate).
+CONSOLIDATE_WAIT_S = 60.0
+CONSOLIDATE_POLL_S = 3.0
+#: ...and broke out early once the manifest signature stopped changing for three polls,
+#: so a session whose phone never connects does not hold the ZIP for a full minute.
+CONSOLIDATE_STABLE_POLLS = 3
 
 FFPROBE = os.getenv("FFPROBE", "ffprobe")
 FFMPEG = os.getenv("FFMPEG", "ffmpeg")
@@ -186,7 +204,12 @@ class PostSessionJob:
         return bool(done)
 
     async def package(self, session_id: str) -> Path:
-        """Build (or rebuild) the session ZIP now. Raises ``PostBusy`` if one is running."""
+        """Build (or rebuild) the session ZIP now. Raises ``PostBusy`` if one is running.
+
+        The consolidate decision runs first, every time: a re-package triggered by a
+        rescue upload that arrived after the first ZIP must merge those rows before the
+        archive is rebuilt, not just re-copy the old data files.
+        """
         if session_id in self._running:
             raise PostBusy(f"package for {session_id} is already running")
         if not session_id:
@@ -196,6 +219,21 @@ class PostSessionJob:
             return await self._package(session_id)
         finally:
             self._running.discard(session_id)
+
+    async def consolidate_and_package(self, session_id: str) -> Path:
+        """Operator-triggered ``POST /api/sessions/{sid}/consolidate``.
+
+        Refuses (``PostBusy`` → 409 ``busy``) while the post-session chain for this
+        session is still running, instead of queueing a second merge behind it.
+        """
+        if not session_id:
+            raise ValueError("session_id is required")
+        if session_id in self._running:
+            raise PostBusy(f"the post-session job for {session_id} is already running")
+        task = self._tasks.get(session_id)
+        if task is not None and not task.done():
+            raise PostBusy(f"the post-session job for {session_id} is already running")
+        return await self.package(session_id)
 
     async def resume_pending(self, interrupted: Sequence[str] = ()) -> None:
         """Resume unfinished post records plus sessions this startup recovered."""
@@ -338,12 +376,125 @@ class PostSessionJob:
                     key=f"camera_video:{session_id}:{report.path}",
                 )
 
+    async def _run_consolidate(self, session_id: str) -> None:
+        """Merge late telemetry and phone rescue uploads into the consolidated CSVs.
+
+        Runs before every package. The decision is the old modal's, ported to Python
+        (``export.consolidation_decision``): a whole session needs nothing, a current
+        consolidation needs nothing, and otherwise a verified rescue upload or late rows
+        are merged. Idempotent and cheap when skipped — the ZIP is unchanged.
+        """
+        from fastapi import HTTPException
+
+        from ..export import (
+            consolidation_decision,
+            consolidation_step_detail,
+            export_consolidate,
+        )
+
+        await self._set_step(session_id, "consolidate", _RUNNING)
+        try:
+            manifest = await export_manifest(session_id)
+            decision = consolidation_decision(manifest)
+            if not decision["whole"] and decision["can_consolidate"]:
+                # A phone may still be sending the rows the ZIP needs (or has just
+                # started). Wait the way the old modal did, then consolidate with
+                # whatever has arrived.
+                manifest = await self._wait_for_phones(session_id, manifest)
+                decision = consolidation_decision(manifest)
+            if not decision["needed"]:
+                await self._set_step(
+                    session_id, "consolidate", _SKIPPED, decision["detail"]
+                )
+                self.rt.notices.resolve(f"consolidation_failed:{session_id}")
+                return
+            try:
+                result = await export_consolidate(session_id)
+            except HTTPException as exc:
+                raise RuntimeError(str(exc.detail)) from exc
+            detail = consolidation_step_detail(result, decision)
+            sidecar_errors = result.get("sidecar_errors") or []
+            if sidecar_errors:
+                detail += f" (report warning: {sidecar_errors[0]})"
+            await self._set_step(session_id, "consolidate", _DONE, detail)
+            self.rt.notices.resolve(f"consolidation_failed:{session_id}")
+            self._resolve_rescue_notices(session_id)
+        except Exception as exc:
+            logger.exception("consolidation for %s failed", session_id)
+            self.rt.notices.raise_(
+                code="consolidation_failed",
+                level="error",
+                message=(
+                    f"Consolidating session {session_id} failed: {exc}. The ZIP was built "
+                    "from the files that exist on disk; press Consolidate now to retry."
+                ),
+                session_id=session_id,
+                key=f"consolidation_failed:{session_id}",
+            )
+            await self._set_step(session_id, "consolidate", _FAILED, str(exc))
+
+    async def _wait_for_phones(self, session_id: str, manifest: dict) -> dict:
+        """Bounded wait for phone rescue uploads still arriving (old modal semantics).
+
+        The loop keeps the archive open while a transfer is visibly in flight
+        (``uploads_in_progress``) or an arrived upload is still unmerged
+        (``recovery_pending``), and stops once the manifest signature has not moved for
+        ``CONSOLIDATE_STABLE_POLLS`` polls — otherwise every session with a rescue CSV
+        would hold the ZIP for the full deadline. The first poll runs even when nothing is
+        pending yet: a phone starts uploading the moment it sees FINALIZE, which can be
+        after the job reached this step. An upload that starts later than that still
+        triggers the automatic re-package, which consolidates again.
+        """
+        deadline = time.monotonic() + CONSOLIDATE_WAIT_S
+        previous = ""
+        unchanged = 0
+        polls = 0
+        while time.monotonic() < deadline:
+            pending = bool(
+                manifest.get("recovery_pending") or manifest.get("uploads_in_progress")
+            )
+            if not pending and polls:
+                break
+            if pending:
+                signature = _phone_signature(manifest)
+                if previous and signature == previous:
+                    unchanged += 1
+                    if unchanged >= CONSOLIDATE_STABLE_POLLS:
+                        break
+                else:
+                    unchanged = 0
+                previous = signature
+            polls += 1
+            await asyncio.sleep(min(CONSOLIDATE_POLL_S, max(deadline - time.monotonic(), 0)))
+            manifest = await export_manifest(session_id)
+        return manifest
+
+    def _resolve_rescue_notices(self, session_id: str) -> None:
+        """Clear the "rescue upload outstanding" notice once the upload is merged.
+
+        "Merged" is checked against the consolidated files on disk rather than assumed
+        from the step having run: an upload that finishes while the merge is already
+        reading its sources is *not* in those artifacts and keeps its notice.
+        """
+        from ..export import _recovery_manifest, recovery_upload_included
+
+        for info in _recovery_manifest(session_id):
+            if not info.get("verified") or not recovery_upload_included(session_id, info):
+                continue
+            self.rt.notices.resolve(
+                f"rescue_outstanding:{session_id}:{info.get('device_id', '')}"
+            )
+
     async def _package(self, session_id: str) -> Path:
         folder = self._session_folder(session_id)
         if folder is None:
             await self._set_step(session_id, "package", _FAILED,
                                  "session folder not found on disk")
             raise FileNotFoundError(f"session folder for {session_id} not found")
+        # Consolidation first: the ZIP must contain the merged files, never the
+        # pre-merge ones. A failed merge is reported on its own step and does not cost
+        # the operator the archive they can still save.
+        await self._run_consolidate(session_id)
         await self._set_step(session_id, "package", _RUNNING)
         try:
             ledger = session_manager.get_recovery_session(session_id) or {}
@@ -558,6 +709,23 @@ class PostSessionJob:
     def _session_folder(self, session_id: str) -> Path | None:
         folders = _session_folders(session_id)
         return folders[0] if folders else None
+
+
+def _phone_signature(manifest: dict) -> str:
+    """What the old modal watched while waiting for phones (handleConsolidate).
+
+    ``{late_pending, Σ csv_size, #complete}`` — bytes and completion counts, so a transfer
+    that is actually moving keeps the wait alive while a stalled one does not.
+    """
+    recovery = manifest.get("recovery") or []
+    return json.dumps(
+        {
+            "late": bool(manifest.get("late_pending")),
+            "recv_total": sum(int(r.get("csv_size", 0) or 0) for r in recovery),
+            "recv_complete": sum(1 for r in recovery if r.get("complete")),
+        },
+        sort_keys=True,
+    )
 
 
 def _finalize_settled(session_id: str) -> bool:

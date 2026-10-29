@@ -36,9 +36,10 @@ CameraBackend = Literal["dshow", "v4l2", "fake"]
 CameraState = Literal["opening", "live", "lost", "error"]
 DriftVerdict = Literal["OK", "CHECK", "MOVED", "NO_SIGNAL", "MISSING", "RESOLUTION_CHANGED"]
 FinalizeStepName = Literal[
-    "close_writers", "cameras", "validate", "bundle", "package", "late_window"
+    "close_writers", "cameras", "consolidate", "validate", "bundle", "package", "late_window"
 ]
 FinalizeStepStatus = Literal["pending", "running", "done", "failed", "skipped"]
+ConsolidationState = Literal["current", "pending_phone_data", "not_needed"]
 NoticeLevel = Literal["info", "warn", "error"]
 SessionVerdict = Literal["PASS", "PARTIAL", "FAIL", "UNKNOWN", "NONE"]
 
@@ -250,6 +251,26 @@ class UploadStatus(BaseModel):
     verified: bool
 
 
+class ConsolidationStatus(BaseModel):
+    """Is the session's consolidation current? (Done view's Consolidation row.)
+
+    ``state`` is the row: ``not_needed`` for a whole session, ``pending_phone_data``
+    when late rows / rescue uploads are not merged yet, ``current`` otherwise.
+    ``can_consolidate`` is the ported ``canConsolidate`` from the old end-session modal
+    and decides whether "Consolidate now" is offered.
+    """
+
+    state: ConsolidationState
+    detail: str
+    can_consolidate: bool
+    whole: bool
+    late_pending: bool
+    recovery_pending: bool
+    uploads_in_progress: bool
+    rescue_uploads: int
+    late_rows: int
+
+
 class SessionDetail(SessionSummary):
     """A SessionSummary plus everything the Done view shows."""
 
@@ -258,6 +279,7 @@ class SessionDetail(SessionSummary):
     files: list[SessionFile]
     late: list[LateRows]
     uploads: list[UploadStatus]
+    consolidation: ConsolidationStatus | None = None
 
 
 class ReferenceCamera(BaseModel):

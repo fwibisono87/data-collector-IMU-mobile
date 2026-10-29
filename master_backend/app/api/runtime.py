@@ -498,19 +498,25 @@ def wire_lifecycle(rt: Runtime) -> Callable[[], None]:
 
 def check_disk(rt: Runtime) -> None:
     """Raise/resolve the single ``disk_space`` notice from current free bytes."""
-    anchor = rt.state_root()
+    # The data root, not the internal ``_state`` dir the runtime lives in — the operator
+    # is told about the disk they actually record to (readiness.py, same wording).
+    from ..export import SSD_PATH
+    from .readiness import short_path
+
+    anchor = Path(SSD_PATH)
     while not anchor.is_dir() and anchor != anchor.parent:
         anchor = anchor.parent
     if not anchor.is_dir():
         return
     free = shutil.disk_usage(anchor).free
     gib = free / 1024**3
+    shown = short_path(anchor)
     if free < DISK_ERROR_BYTES:
         rt.notices.raise_(
             code="disk_space",
             level="error",
             message=(
-                f"Data disk ({anchor}) has only {gib:.1f} GB free — below the 5 GB "
+                f"Data disk ({shown}) has only {gib:.1f} GB free — below the 5 GB "
                 "floor. Recording is blocked; free space now."
             ),
             key="disk_space",
@@ -520,7 +526,7 @@ def check_disk(rt: Runtime) -> None:
             code="disk_space",
             level="warn",
             message=(
-                f"Data disk ({anchor}) has only {gib:.1f} GB free — below 20 GB. "
+                f"Data disk ({shown}) has only {gib:.1f} GB free — below 20 GB. "
                 "Consider exporting and clearing old sessions."
             ),
             key="disk_space",
@@ -530,30 +536,42 @@ def check_disk(rt: Runtime) -> None:
 
 
 def check_rescue_uploads(rt: Runtime) -> None:
-    """Warn about unverified phone rescue uploads for finished sessions; resolve on
-    completion. Only sessions this process saw finish (or resumed) are polled — an
-    upload for an ancient session is the Sessions view's business, not a notice."""
-    from ..export import _recovery_manifest
+    """Warn about phone rescue uploads for finished sessions; resolve once merged.
+
+    A verified upload is not the end of the story: until the consolidation folded it in,
+    the session ZIP still lacks those rows. The notice therefore stays up (with a message
+    that says so) until the upload is *included*, and the post-session job resolves it the
+    moment its own consolidation covers the file. Only sessions this process saw finish
+    (or resumed) are polled — an upload for an ancient session is the Sessions view's
+    business, not a notice."""
+    from ..export import _recovery_manifest, recovery_upload_included
 
     for sid in list(rt.recent_sessions):
         for info in _recovery_manifest(sid):
             device = str(info.get("device_id") or "")
             key = f"rescue_outstanding:{sid}:{device}"
-            if info.get("verified"):
+            if info.get("verified") and recovery_upload_included(sid, info):
                 rt.notices.resolve(key)
                 continue
-            if info.get("done"):
+            if info.get("done") and not info.get("verified"):
                 continue  # operator already dismissed this recovery in the legacy UI
             received = int(info.get("received_bytes", 0) or 0)
             total = int(info.get("total_bytes", 0) or 0)
             state = str(info.get("state") or ("complete" if info.get("complete") else "receiving"))
+            if info.get("verified"):
+                message = (
+                    f"Phone rescue upload for session {sid} ({device[:8]}…) is verified but "
+                    "not merged into the session ZIP yet; consolidation will include it."
+                )
+            else:
+                message = (
+                    f"Phone rescue upload for session {sid} ({device[:8]}…) is still "
+                    f"{state}: {received} of {total} bytes, not verified."
+                )
             rt.notices.raise_(
                 code="rescue_outstanding",
                 level="warn",
-                message=(
-                    f"Phone rescue upload for session {sid} ({device[:8]}…) is still "
-                    f"{state}: {received} of {total} bytes, not verified."
-                ),
+                message=message,
                 session_id=sid,
                 key=key,
             )

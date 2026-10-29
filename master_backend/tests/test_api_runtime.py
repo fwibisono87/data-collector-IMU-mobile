@@ -310,10 +310,20 @@ async def test_check_rescue_uploads_outstanding_then_resolved(tmp_path, monkeypa
         check_rescue_uploads(rt)
         assert len(rt.notices.snapshot()) == 1
 
-        # completed + verified upload resolves it
+        # Completed + verified is not enough: the rows are still missing from the ZIP, so
+        # the notice stays up and says exactly that.
         (recovery_dir / "dev-1.csv").write_bytes(b"x" * 100)
         info.update({"complete": True, "sha256_verified": True, "received_bytes": 100})
         (recovery_dir / "dev-1.info.json").write_text(json.dumps(info), encoding="utf-8")
+        check_rescue_uploads(rt)
+        snapshot = rt.notices.snapshot()
+        assert [n.code for n in snapshot] == ["rescue_outstanding"]
+        assert "not merged into the session ZIP yet" in snapshot[0].message
+
+        # Once a consolidation covers the upload's role, the notice resolves.
+        folder = rig.ssd_path / "Data_Riset_IMU" / "Subject_Tag"
+        folder.mkdir(parents=True)
+        (folder / "s1_chest_consolidated.csv").write_text("timestamp_ms\n", encoding="utf-8")
         check_rescue_uploads(rt)
         assert rt.notices.snapshot() == []
 
@@ -334,3 +344,21 @@ def test_recent_sessions_bounded(tmp_path):
     assert rt.recent_sessions[-1] == "s39"
     rt.note_session("s39")  # idempotent
     assert len(rt.recent_sessions) == 16
+
+
+def test_check_disk_notice_names_the_data_root_abbreviated(tmp_path, monkeypatch):
+    """L7a §3.2: the notice points at SSD_PATH (short form), never at the state dir."""
+    from master_backend.app import export as export_mod
+    from master_backend.app.api.readiness import short_path
+
+    ssd = tmp_path / "mnt" / "ssd" / "Data_Riset_IMU"
+    ssd.mkdir(parents=True)
+    monkeypatch.setattr(export_mod, "SSD_PATH", ssd)
+    monkeypatch.setattr(runtime_mod, "DISK_WARN_BYTES", 10**18)
+
+    rt = create_runtime(root=tmp_path / "state", camera_service=FakeCameraService(n=0))
+    check_disk(rt)
+
+    notice = rt.notices.snapshot()[0]
+    assert short_path(ssd) in notice.message
+    assert "_state" not in notice.message

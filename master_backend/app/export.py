@@ -659,6 +659,139 @@ async def export_manifest(session_id: str):
     }
 
 
+def consolidation_decision(manifest: dict) -> dict:
+    """Whether this session still needs a consolidation pass, and why not.
+
+    The old end-session modal decided this in the browser
+    (``master_frontend/src/components/EndSessionModal.tsx``, lines 616-628)::
+
+        const isWhole = m?.whole ?? false;                                     // 616
+        const hasConsolidatedData = Boolean(                                  // 618
+          m && Array.isArray(m.files) && m.files.some(f => f.kind === "consolidated"),
+        );
+        const hasPendingPhoneData = Boolean(                                  // 621
+          m?.late_pending || m?.recovery_pending || m?.uploads_in_progress,
+        );
+        const canConsolidate = Boolean(m && (!hasConsolidatedData || hasPendingPhoneData));  // 628
+
+    and only *offered* the button when ``!isWhole``. Two things are ported verbatim:
+    `hasConsolidatedData`, `hasPendingPhoneData` and `canConsolidate` are computed exactly
+    as above; a session is *current* when it has consolidated data and no phone data is
+    outstanding (the modal's own ``exportReady`` condition, lines 629-631). On top of that
+    the post-session job needs "is there anything to merge": a complete, hash-verified
+    rescue upload or late rows. Without it, pressing consolidate on a PARTIAL session that
+    only ever had its main CSVs would rewrite identical files forever.
+
+    Returns a JSON-ready dict; ``state`` is the Done view's row ("not_needed", "current",
+    "pending_phone_data") and ``needed`` is the post-session job's answer.
+    """
+    files = manifest.get("files") or []
+    if not isinstance(files, list):
+        files = []
+    has_consolidated_data = bool(manifest.get("found")) and any(
+        str(f.get("kind") or "") == "consolidated" for f in files
+    )
+    has_pending_phone_data = bool(
+        manifest.get("late_pending")
+        or manifest.get("recovery_pending")
+        or manifest.get("uploads_in_progress")
+    )
+    can_consolidate = bool(manifest.get("found")) and (
+        not has_consolidated_data or has_pending_phone_data
+    )
+    whole = bool(manifest.get("whole"))
+
+    rescue_uploads = [
+        r for r in (manifest.get("recovery") or [])
+        if r.get("complete") and r.get("sha256_verified") and r.get("csv_exists")
+    ]
+    late_devices = (manifest.get("late_summary") or {}).get("devices") or {}
+    late_rows = sum(int((d or {}).get("rows_appended", 0) or 0) for d in late_devices.values())
+    late_files = sum(
+        1 for f in files if str(f.get("kind") or "") == "late" and int(f.get("size", 0) or 0) > 0
+    )
+    late_available = bool(late_rows) or bool(late_files)
+    has_material = bool(rescue_uploads) or late_available
+
+    if whole:
+        state = "not_needed"
+        detail = "session is whole"
+    elif has_pending_phone_data:
+        state = "pending_phone_data"
+        detail = _merge_detail(len(rescue_uploads), late_rows) + " waiting to be merged"
+    elif has_consolidated_data:
+        state = "current"
+        detail = "every source is consolidated"
+    else:
+        state = "current"
+        detail = "no late rows or rescue uploads"
+    if state == "pending_phone_data" and not has_material:
+        detail = "waiting for phone data (no verified rescue upload or late rows yet)"
+
+    return {
+        "needed": bool(not whole and has_material and can_consolidate),
+        "state": state,
+        "detail": detail,
+        "whole": whole,
+        "can_consolidate": can_consolidate,
+        "has_consolidated_data": has_consolidated_data,
+        "has_pending_phone_data": has_pending_phone_data,
+        "late_pending": bool(manifest.get("late_pending")),
+        "recovery_pending": bool(manifest.get("recovery_pending")),
+        "uploads_in_progress": bool(manifest.get("uploads_in_progress")),
+        "rescue_uploads": len(rescue_uploads),
+        "late_rows": late_rows,
+    }
+
+
+def _merge_detail(rescue_uploads: int, late_rows: int) -> str:
+    """``"1 rescue upload"`` / ``"1,204 late rows"`` — what a consolidation folded in."""
+    parts: list[str] = []
+    if rescue_uploads:
+        parts.append(f"{rescue_uploads:,} rescue upload{'s' if rescue_uploads != 1 else ''}")
+    if late_rows:
+        parts.append(f"{late_rows:,} late row{'s' if late_rows != 1 else ''}")
+    return ", ".join(parts)
+
+
+def consolidation_step_detail(result: dict, decision: dict) -> str:
+    """The ``consolidate`` step's success text, e.g. ``merged 1 rescue upload, 1,204 late rows``.
+
+    ``result`` is ``export_consolidate``'s return value, so the row counts come from what
+    was actually merged (main + late + rescue), not from the pre-merge estimate.
+    """
+    sources = result.get("sources") or {}
+    merged = _merge_detail(
+        int(decision.get("rescue_uploads", 0) or 0),
+        int(sources.get("late", decision.get("late_rows", 0)) or 0),
+    )
+    if not merged:
+        merged = f"{int(result.get('rows', 0) or 0):,} rows"
+    return f"merged {merged}"
+
+
+def recovery_upload_included(session_id: str, info: dict) -> bool:
+    """Whether a verified rescue CSV is already folded into the consolidation.
+
+    Same coverage rule the manifest applies per source — the role's own per-role file
+    first, the session-wide file's mtime as the fallback — but without scanning rows,
+    because the rescue-upload notice watchdog asks this for every watched session every
+    few seconds.
+    """
+    csv = Path(str(info.get("csv_path") or ""))
+    if not csv.is_file():
+        return False
+    files = _session_files(session_id)
+    consolidated = [Path(f["path"]) for f in files if f["kind"] == "consolidated"]
+    if not consolidated:
+        return False
+    per_role = _per_role_consolidated(files, session_id)
+    if per_role:
+        covered = per_role.get(_slug(_recovery_role(info)), [])
+        return any(_mtime(p) >= _mtime(csv) for p in covered)
+    return max(_mtime(p) for p in consolidated) >= _mtime(csv)
+
+
 @router.get("/export/{session_id}/file")
 async def export_file(session_id: str, name: str = Query(...)):
     """Stream one session artifact. `name` is a basename owned by the session."""

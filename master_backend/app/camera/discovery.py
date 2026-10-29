@@ -10,8 +10,10 @@ r"""Camera device discovery.
   (``@device_pnp_\\?\usb#vid_…``) is the stable ``device_key``; two identical webcams
   share their friendly name, so the friendly name is only the ``label``.
 * **Linux (v4l2)** — ``/dev/v4l/by-id/*-video-index0`` symlinks when present (the
-  by-id path is the device key), falling back to ``/dev/video*`` nodes that answer
-  ``ffmpeg -f v4l2 -list_formats all`` with a capture format list.
+  by-id path is the device key; the *label* is the kernel card name read from
+  ``/sys/class/video4linux/<videoN>/name``, e.g. "Integrated Camera", with `` (2)``,
+  `` (3)`` appended when two cameras share a name), falling back to ``/dev/video*``
+  nodes that answer ``ffmpeg -f v4l2 -list_formats all`` with a capture format list.
 * **Fake** — ``IMU_CAMERAS=fake`` with ``IMU_FAKE_CAMERAS=n`` gives ``fake:0`` …
   ``fake:n-1``; the capture worker turns those into ``lavfi testsrc2`` processes.
 
@@ -46,6 +48,12 @@ _DSHOW_ALTERNATIVE = re.compile(r'^\s*Alternative name\s+"(?P<name>.*)"\s*$')
 
 _cache_lock = threading.Lock()
 _cache: tuple[float, tuple, list[CameraDevice]] | None = None
+
+#: Kernel view of the v4l2 nodes: ``<name>/name`` is the card's human name.
+#: Module-level so a test can point it at a fixture tree.
+_SYSFS_V4L = Path("/sys/class/video4linux")
+_BY_ID = Path("/dev/v4l/by-id")
+_DEV_ROOT = Path("/dev")
 
 
 def invalidate_cache() -> None:
@@ -192,7 +200,7 @@ def v4l2_devices() -> list[CameraDevice]:
     devices: list[CameraDevice] = []
     seen_nodes: set[str] = set()
 
-    by_id = Path("/dev/v4l/by-id")
+    by_id = _BY_ID
     if by_id.is_dir():
         try:
             links = sorted(by_id.glob("*-video-index0"))
@@ -209,26 +217,60 @@ def v4l2_devices() -> list[CameraDevice]:
                 seen_nodes.add(node)
                 devices.append(CameraDevice(
                     device_key=str(link),
-                    label=_label_from_by_id(link.name),
+                    # The operator sees the hardware's own name ("Integrated Camera"),
+                    # never the by-id string; the by-id path stays the stable key.
+                    label=_card_name(node) or _label_from_by_id(link.name),
                     backend="v4l2",
                 ))
 
-    for node_path in sorted(Path("/dev").glob("video*")):
+    for node_path in sorted(_DEV_ROOT.glob("video*")):
         node = str(node_path)
         if node in seen_nodes or not node_path.is_char_device():
             continue
         if _v4l2_can_capture(node):
             seen_nodes.add(node)
             devices.append(CameraDevice(
-                device_key=node, label=f"Video {node_path.name.removeprefix('video')}",
+                device_key=node,
+                label=_card_name(node) or f"Video {node_path.name.removeprefix('video')}",
                 backend="v4l2",
             ))
+    return _unique_labels(devices)
+
+
+def _card_name(node: str) -> str:
+    """``Integrated Camera`` for ``/dev/video0`` — the kernel's sysfs card name."""
+    try:
+        return (_SYSFS_V4L / Path(node).name / "name").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _unique_labels(devices: list[CameraDevice]) -> list[CameraDevice]:
+    """Number cameras that share a name — ``(2)``, ``(3)`` in ``device_key`` order.
+
+    Two identical USB webcams report the same card name; without the suffix the operator
+    cannot tell the checklist rows apart (their keys are still distinct). The first keeps
+    the plain name so a single-camera setup reads exactly as before.
+    """
+    totals: dict[str, int] = {}
+    for device in devices:
+        totals[device.label] = totals.get(device.label, 0) + 1
+    if all(count == 1 for count in totals.values()):
+        return devices
+    numbered: dict[str, int] = {}
+    for device in sorted(devices, key=lambda d: d.device_key):
+        plain = device.label
+        if totals[plain] == 1:
+            continue
+        numbered[plain] = numbered.get(plain, 0) + 1
+        if numbered[plain] > 1:
+            device.label = f"{plain} ({numbered[plain]})"
     return devices
 
 
 def _label_from_by_id(name: str) -> str:
     """``usb-Webcam_01-video-index0`` → ``Webcam 01`` (best effort, readable)."""
-    label = re.sub(r"^-video-index\d+$", "", name)
+    label = re.sub(r"-video-index\d+$", "", name)
     for prefix in ("usb-", "pci-"):
         if label.startswith(prefix):
             label = label[len(prefix):]

@@ -117,10 +117,10 @@ async def test_stop_runs_cameras_then_packages_videos_and_data(rig):
     # The CSV the session actually recorded is in the deliverable.
     assert f"data/{session_id}_chest_sensor_data.csv" in names
 
-    # The progress view is FinalizeJob's steps followed by cameras and package.
+    # The progress view is FinalizeJob's steps followed by cameras, consolidate and package.
     progress = session_progress(job, session_id)
-    assert [s["name"] for s in progress["steps"]][-2:] == ["cameras", "package"]
-    finalize_names = [s["name"] for s in progress["steps"][:-2]]
+    assert [s["name"] for s in progress["steps"]][-3:] == ["cameras", "consolidate", "package"]
+    finalize_names = [s["name"] for s in progress["steps"][:-3]]
     assert finalize_names == ["close_writers", "validate", "bundle"]
 
 

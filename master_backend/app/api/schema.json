@@ -357,6 +357,65 @@
       "title": "CompareResult",
       "type": "object"
     },
+    "ConsolidationStatus": {
+      "description": "Is the session's consolidation current? (Done view's Consolidation row.)\n\n``state`` is the row: ``not_needed`` for a whole session, ``pending_phone_data``\nwhen late rows / rescue uploads are not merged yet, ``current`` otherwise.\n``can_consolidate`` is the ported ``canConsolidate`` from the old end-session modal\nand decides whether \"Consolidate now\" is offered.",
+      "properties": {
+        "can_consolidate": {
+          "title": "Can Consolidate",
+          "type": "boolean"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "late_pending": {
+          "title": "Late Pending",
+          "type": "boolean"
+        },
+        "late_rows": {
+          "title": "Late Rows",
+          "type": "integer"
+        },
+        "recovery_pending": {
+          "title": "Recovery Pending",
+          "type": "boolean"
+        },
+        "rescue_uploads": {
+          "title": "Rescue Uploads",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "current",
+            "pending_phone_data",
+            "not_needed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "uploads_in_progress": {
+          "title": "Uploads In Progress",
+          "type": "boolean"
+        },
+        "whole": {
+          "title": "Whole",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "detail",
+        "can_consolidate",
+        "whole",
+        "late_pending",
+        "recovery_pending",
+        "uploads_in_progress",
+        "rescue_uploads",
+        "late_rows"
+      ],
+      "title": "ConsolidationStatus",
+      "type": "object"
+    },
     "DeviceList": {
       "properties": {
         "devices": {
@@ -651,6 +710,7 @@
           "enum": [
             "close_writers",
             "cameras",
+            "consolidate",
             "validate",
             "bundle",
             "package",
@@ -1235,6 +1295,17 @@
           },
           "title": "Cameras",
           "type": "array"
+        },
+        "consolidation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConsolidationStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "duration_s": {
           "anyOf": [

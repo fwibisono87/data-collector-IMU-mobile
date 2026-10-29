@@ -18,12 +18,13 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
 from .. import export as export_module
-from ..session_manager import session_manager
+from ..session_manager import SessionState, session_manager
 from ..session_zip import session_zip_name
-from .errors import busy, invalid, not_found, not_supported
+from .errors import bad_state, busy, invalid, not_found, not_supported
 from .post_session import PostBusy, session_progress
 from .runtime import Runtime, get_runtime
 from .schema import (
+    ConsolidationStatus,
     LateRows,
     PackageResponse,
     SessionDetail,
@@ -196,6 +197,30 @@ def _uploads(session_id: str) -> list[UploadStatus]:
     return out
 
 
+async def _consolidation_status(session_id: str) -> ConsolidationStatus | None:
+    """The Done view's Consolidation row, from the same manifest the ZIP is built from.
+
+    A manifest failure must not cost the operator the rest of the Done view; the row
+    simply stays hidden (``None``).
+    """
+    try:
+        manifest = await export_module.export_manifest(session_id)
+        decision = export_module.consolidation_decision(manifest)
+    except Exception:
+        return None
+    return ConsolidationStatus(
+        state=decision["state"],
+        detail=decision["detail"],
+        can_consolidate=decision["can_consolidate"],
+        whole=decision["whole"],
+        late_pending=decision["late_pending"],
+        recovery_pending=decision["recovery_pending"],
+        uploads_in_progress=decision["uploads_in_progress"],
+        rescue_uploads=decision["rescue_uploads"],
+        late_rows=decision["late_rows"],
+    )
+
+
 @router.get("/sessions/{session_id}", response_model=SessionDetail)
 async def session_detail(session_id: str):
     rt = get_runtime()
@@ -205,8 +230,8 @@ async def session_detail(session_id: str):
         raise not_found(f"session {session_id} was not found")
     summary = _summary(rt, session_id, folder)
     ledger = _ledger(session_id)
-    # FinalizeJob's steps (live or from the ledger) followed by cameras/package, so the
-    # Done view can show the whole chain that produced the ZIP.
+    # FinalizeJob's steps (live or from the ledger) followed by cameras/consolidate/
+    # package, so the Done view can show the whole chain that produced the ZIP.
     progress = session_progress(rt.post, session_id)
     steps = progress["steps"] if progress else []
     files = [
@@ -220,7 +245,32 @@ async def session_detail(session_id: str):
         files=files,
         late=_late_rows(session_id, folder, ledger),
         uploads=_uploads(session_id),
+        consolidation=await _consolidation_status(session_id),
     )
+
+
+@router.post("/sessions/{session_id}/consolidate", response_model=PackageResponse)
+async def consolidate_session(session_id: str):
+    """Run the consolidate + package chain now (the Done view's "Consolidate now").
+
+    The automatic path already does this at STOP and on every re-package; this endpoint
+    exists so the operator can pull a phone rescue upload into the ZIP without waiting
+    for the debounce, and so a failed merge can be retried on demand.
+    """
+    rt = get_runtime()
+    if rt.post is None:
+        raise busy("the post-session job is not running")
+    if session_manager.state == SessionState.RECORDING and session_manager.session_id == session_id:
+        raise bad_state(
+            f"Session {session_id} is still recording; consolidation runs after STOP."
+        )
+    try:
+        path = await rt.post.consolidate_and_package(session_id)
+    except PostBusy as exc:
+        raise busy(str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise not_found(str(exc)) from exc
+    return PackageResponse(zip_path=str(path))
 
 
 @router.post("/sessions/{session_id}/package", response_model=PackageResponse)

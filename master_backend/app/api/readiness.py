@@ -11,6 +11,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .. import export as export_module
 from ..session_manager import SessionState, session_manager
 from .runtime import DISK_ERROR_BYTES, DISK_WARN_BYTES, Runtime
 from .schema import Issue, Readiness
@@ -24,11 +25,29 @@ _probe_cache: dict[str, tuple[float, bool]] = {}
 
 
 def _disk_anchor(rt: Runtime) -> Path:
-    """The closest existing directory to the state root (the state dir may be new)."""
-    anchor = rt.state_root()
+    """Where the session data lives: ``SSD_PATH``, never the internal ``_state`` dir.
+
+    The state root lives *inside* the data root (``<SSD_PATH>/Data_Riset_IMU/_state``),
+    so naming it in a readiness message told the operator to check a folder they are not
+    supposed to touch. ``rt`` stays in the signature because tests and callers pass it and
+    the probe below is about writability, not about which path to print.
+    """
+    anchor = Path(export_module.SSD_PATH)
     while not anchor.is_dir() and anchor != anchor.parent:
         anchor = anchor.parent
     return anchor
+
+
+def short_path(path: Path) -> str:
+    """``…/Riset/Data_Riset_IMU`` — the last two components of a long path.
+
+    Readiness messages are one line in a narrow panel; the full path stays in the
+    Issue's ``subject`` (and in the snapshot's ``disk.path``), so nothing is lost.
+    """
+    parts = [p for p in Path(path).parts if p not in ("/", "\\")]
+    if len(parts) <= 2:
+        return str(path)
+    return "…/" + "/".join(parts[-2:])
 
 
 def _writable(anchor: Path) -> bool:
@@ -77,11 +96,14 @@ def _disk_issues(anchor: Path, free: int) -> tuple[list[Issue], list[Issue]]:
     blockers: list[Issue] = []
     warnings: list[Issue] = []
     gib = free / 1024**3
+    # The message names the data root in its short form; the Issue's subject keeps the
+    # full path so nothing diagnostic is lost.
+    shown = short_path(anchor)
     if not _writable(anchor):
         blockers.append(Issue(
             code="disk_not_writable",
             message=(
-                f"Cannot write to the data disk ({anchor}). Connect the SSD or fix its "
+                f"Cannot write to the data disk ({shown}). Connect the SSD or fix its "
                 "permissions, then start again."
             ),
             subject=str(anchor),
@@ -90,7 +112,7 @@ def _disk_issues(anchor: Path, free: int) -> tuple[list[Issue], list[Issue]]:
         blockers.append(Issue(
             code="disk_full",
             message=(
-                f"Only {gib:.1f} GB free on {anchor} — below the 5 GB minimum. Move or "
+                f"Only {gib:.1f} GB free on {shown} — below the 5 GB minimum. Move or "
                 "export old sessions before starting."
             ),
             subject=str(anchor),
@@ -99,7 +121,7 @@ def _disk_issues(anchor: Path, free: int) -> tuple[list[Issue], list[Issue]]:
         warnings.append(Issue(
             code="disk_low",
             message=(
-                f"Only {gib:.1f} GB free on {anchor} — below 20 GB. Consider exporting "
+                f"Only {gib:.1f} GB free on {shown} — below 20 GB. Consider exporting "
                 "and clearing old sessions."
             ),
             subject=str(anchor),

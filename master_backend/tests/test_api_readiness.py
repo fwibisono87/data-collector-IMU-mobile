@@ -180,3 +180,30 @@ def test_snapshot_marks_an_offline_phone_as_buffering_while_recording(rig):
     assert snapshot.phones[0].buffering is True
     rig.manager.state = SessionState.IDLE
     assert build_snapshot(rt).phones[0].buffering is False
+
+# ── L7a §3.2: disk messages name the data root, abbreviated ────────────────
+
+def test_short_path_keeps_the_last_two_components():
+    from pathlib import Path
+
+    from master_backend.app.api.readiness import short_path
+
+    assert short_path(Path("/mnt/ssd/Data_Riset_IMU")) == "…/ssd/Data_Riset_IMU"
+    assert short_path(Path("/data")) == "/data"
+
+
+def test_disk_messages_name_the_data_root_not_the_state_dir(rig, disk, monkeypatch):
+    from master_backend.app import export as export_mod
+    from master_backend.app.api.readiness import short_path
+
+    (rig.ssd_path / "Data_Riset_IMU" / "_state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(export_mod, "SSD_PATH", rig.ssd_path)
+    rt, _ = make_rt(rig)
+    phone(rig)
+    disk.update(free=4 * GB)
+
+    issue = next(i for i in compute_readiness(rt).blockers if i.code == "disk_full")
+    assert short_path(rig.ssd_path) in issue.message
+    assert "_state" not in issue.message
+    # The full path is not lost: it is the issue's subject (and the snapshot's disk.path).
+    assert issue.subject == str(rig.ssd_path)

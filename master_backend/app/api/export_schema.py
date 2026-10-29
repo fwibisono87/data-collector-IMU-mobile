@@ -44,6 +44,7 @@ RESPONSE_MODELS: tuple[str, ...] = (
     "CameraSelectionResponse",
     "CompareCamera",
     "CompareResult",
+    "ConsolidationStatus",
     "DeviceList",
     "DiskInfo",
     "Drift",

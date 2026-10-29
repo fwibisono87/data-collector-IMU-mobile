@@ -206,6 +206,28 @@ EXAMPLES: dict[str, dict] = {
         "late": [{"device_id": "dev-waist", "role": "waist", "rows": 1_204}],
         "uploads": [{"device_id": "dev-waist", "role": "waist", "received_bytes": 4_096,
                      "total_bytes": 8_192, "complete": False, "verified": False}],
+        "consolidation": {
+            "state": "pending_phone_data",
+            "detail": "1 rescue upload, 1,204 late rows waiting to be merged",
+            "can_consolidate": True,
+            "whole": False,
+            "late_pending": True,
+            "recovery_pending": True,
+            "uploads_in_progress": False,
+            "rescue_uploads": 1,
+            "late_rows": 1_204,
+        },
+    },
+    "ConsolidationStatus": {
+        "state": "current",
+        "detail": "current — every source is consolidated",
+        "can_consolidate": False,
+        "whole": False,
+        "late_pending": False,
+        "recovery_pending": False,
+        "uploads_in_progress": False,
+        "rescue_uploads": 1,
+        "late_rows": 1_204,
     },
     "ReferenceCamera": REFERENCE_CAMERA,
     "Reference": REFERENCE,
@@ -420,7 +442,8 @@ def test_schema_document_covers_every_model_and_all_refs_resolve():
 def test_schema_export_exposes_every_documented_enum():
     defs = json.loads(export_schema.SCHEMA_PATH.read_text(encoding="utf-8"))["$defs"]
     assert defs["FinalizeStep"]["properties"]["name"]["enum"] == [
-        "close_writers", "cameras", "validate", "bundle", "package", "late_window"
+        "close_writers", "cameras", "consolidate", "validate", "bundle", "package",
+        "late_window"
     ]
     assert defs["FinalizeStep"]["properties"]["status"]["enum"] == [
         "pending", "running", "done", "failed", "skipped"

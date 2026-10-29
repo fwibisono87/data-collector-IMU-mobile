@@ -539,9 +539,9 @@ def test_finalize_messages_follow_the_post_session_steps(api, rig):
             assert len(snapshots) < 40, snapshots
 
     assert snapshots[-1]["package"] == "done"
-    # FinalizeJob's own steps come first, then the two this job adds.
-    assert list(snapshots[-1])[-2:] == ["cameras", "package"]
-    assert [s for s in snapshots[-1] if s not in ("cameras", "package")] == [
+    # FinalizeJob's own steps come first, then the three this job adds.
+    assert list(snapshots[-1])[-3:] == ["cameras", "consolidate", "package"]
+    assert [s for s in snapshots[-1] if s not in ("cameras", "consolidate", "package")] == [
         "close_writers", "validate", "bundle",
     ]
     # Only the documented statuses ever reach the dashboard.
@@ -613,3 +613,99 @@ def test_static_catch_all_does_not_shadow_backend_routes():
                      or r.path.endswith("{path:path}"))
     shadowed = [r.path for r in routes[catch_all + 1:] if "GET" in r.methods]
     assert shadowed == [], f"registered after the SPA catch-all, so unreachable: {shadowed}"
+
+
+# ── L7a: POST /api/sessions/{sid}/consolidate ──────────────────────────────
+
+def _rescue_upload(client, session_id: str, *, first_seq: int = 40, rows: int = 25):
+    """Upload one complete, hash-verified rescue CSV the way a phone would."""
+    import hashlib
+
+    from master_backend.app.csv_schema import CSV_HEADER_V2
+
+    lines = []
+    for i in range(rows):
+        seq = first_seq + i
+        ts = 1_700_000_000_000 + seq * 10
+        lines.append(
+            f"{ts},0.5,0.5,0.5,1.0,1.0,1.0,0,0,{seq},dev-chest,{ts},{ts - 2},0"
+        )
+    body = (
+        "# session_id=" + session_id + ",role=chest,device_id=dev-chest,"
+        "subject=Sub ject,session_tag=Tag A,operator=Op,"
+        "start_epoch_ms=1700000000000,source=local_node,schema_version=2\n"
+        + CSV_HEADER_V2 + "\n" + "\n".join(lines) + "\n"
+    ).encode()
+    response = client.post(
+        "/upload/csv",
+        params={"device_id": "dev-chest", "session_id": session_id, "role": "chest",
+                "subject": "Sub ject", "session_tag": "Tag A", "operator": "Op"},
+        content=body,
+        headers={"x-offset": "0", "x-total": str(len(body)), "x-complete": "1",
+                 "x-sha256": hashlib.sha256(body).hexdigest()},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["sha256_verified"] is True
+    return response.json()
+
+
+def test_consolidate_now_merges_a_late_rescue_upload_into_the_zip(api, rig):
+    """The Done view's button: a verified upload after the first ZIP is pulled in on demand."""
+    client, rt = api
+    register_phone(rig)
+    fill_draft(client)
+    started = client.post("/api/session/start", json={})
+    assert started.status_code == 200, started.text
+    session_id = started.json()["session_id"]
+    assert client.post("/api/session/stop", json={"reason": "operator_stop"}).status_code == 200
+    first = wait_for_package(client, session_id)
+    assert "data/recovery/dev-chest.csv" not in zipfile.ZipFile(first["zip_path"]).namelist()
+
+    _rescue_upload(client, session_id)
+    # The upload hook scheduled a debounced re-package; the operator's button does not
+    # queue behind it, it runs the chain now.
+    response = client.post(f"/api/sessions/{session_id}/consolidate")
+    assert response.status_code == 200, response.text
+    zip_path = Path(response.json()["zip_path"])
+    assert zip_path == Path(first["zip_path"])
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+    assert f"data/{session_id}_consolidated.csv" in names
+    assert f"data/{session_id}_consolidation.json" in names
+    assert f"data/{session_id}_consolidated_validation.json" in names
+    assert "data/recovery/dev-chest.csv" in names
+
+    detail = client.get(f"/api/sessions/{session_id}").json()
+    statuses = {step["name"]: step["status"] for step in detail["finalize"]}
+    assert statuses["consolidate"] == "done", statuses
+    # The row the Done view renders now says the merge covers everything on disk.
+    assert detail["consolidation"]["state"] == "current", detail["consolidation"]
+
+
+def test_consolidate_now_is_busy_while_the_post_job_runs(api, rig):
+    client, rt = api
+    session_id = "1700000000777"
+    rt.post._running.add(session_id)                     # noqa: SLF001 - a run in flight
+    try:
+        response = client.post(f"/api/sessions/{session_id}/consolidate")
+    finally:
+        rt.post._running.discard(session_id)             # noqa: SLF001
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "busy"
+
+
+def test_consolidate_now_is_bad_state_while_recording(api, rig):
+    client, rt = api
+    register_phone(rig)
+    fill_draft(client)
+    started = client.post("/api/session/start", json={})
+    assert started.status_code == 200, started.text
+    session_id = started.json()["session_id"]
+
+    response = client.post(f"/api/sessions/{session_id}/consolidate")
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "bad_state"
+
+    assert client.post("/api/session/stop", json={}).status_code == 200
+    wait_for_package(client, session_id)
