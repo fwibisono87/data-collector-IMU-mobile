@@ -54,6 +54,7 @@ def make_rig(tmp_path: Path, monkeypatch):
         dedup_store, export, io_manager as io_mod, session_ledger,
         session_manager as sm_mod, upload,
     )
+    from master_backend.app.api import runtime as runtime_mod
     from master_backend.app.audit_logger import audit
 
     io = io_mod.io_manager
@@ -64,6 +65,7 @@ def make_rig(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(upload, "RECOVERY_PATH", recovery)
     monkeypatch.setattr(cameras_mod, "SSD_PATH", ssd)
     monkeypatch.setattr(cameras_mod, "PENDING_CAMERAS", ssd / "Data_Riset_IMU" / "_pending_cameras")
+    monkeypatch.setattr(runtime_mod, "SSD_PATH", ssd)
     monkeypatch.setattr(io, "_ssd_path", ssd)
     monkeypatch.setattr(io, "_rescue_path", rescue)
 
@@ -94,6 +96,7 @@ def make_rig(tmp_path: Path, monkeypatch):
     # Per-session caches and locks survive across tests in the real process; clear them so
     # a second run of the same scenario cannot inherit the first run's decisions.
     cameras_mod._camera_locks.clear()
+    cameras_mod._mark_hooks.clear()
     export._manifest_scan_cache.clear()
     export._consolidate_locks.clear()
     export._bundle_locks.clear()

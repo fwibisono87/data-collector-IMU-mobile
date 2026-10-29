@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import asyncio
+import inspect
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -34,6 +35,20 @@ PENDING_CAMERAS = SSD_PATH / "Data_Riset_IMU" / "_pending_cameras"
 
 _VALID_EVENTS = ("started", "flash", "stopped", "track_ended", "write_error")
 _camera_locks: dict[str, asyncio.Lock] = {}
+
+# Optional listeners invoked after an anchor is persisted: (session_id, event, record).
+# The v3 notice layer (app/api/runtime.py) uses these to surface track_ended/write_error
+# the moment a camera reports them, instead of only at stop. May be sync or async; a
+# failing hook is logged and swallowed — anchors are the contract, hooks are reporting.
+_mark_hooks: list = []
+
+
+def add_mark_hook(callback) -> None:
+    _mark_hooks.append(callback)
+
+
+def remove_mark_hook(callback) -> None:
+    _mark_hooks.remove(callback)
 
 
 def _slug(s: str) -> str:
@@ -136,6 +151,14 @@ async def cameras_mark(session_id: str, body: dict):
 
         record[f"{event}_at_ms"] = ts_ms
         _write_cameras(path, data)
+
+    for hook in list(_mark_hooks):
+        try:
+            result = hook(session_id, event, record)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("camera mark hook failed: %s", exc)
 
     note = "camera_mark_pending_folder" if not _session_folders(session_id) else "camera_mark"
     await audit.log("INFO", note, {

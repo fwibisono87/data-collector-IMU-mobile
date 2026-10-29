@@ -1012,6 +1012,10 @@ class SessionManager:
             late_summary = await io_manager.finalize_late()
             if late_summary:
                 await broadcast_to_frontends({"type": "LATE_DELIVERY", **late_summary})
+                # Same event to the lifecycle observers: the v3 notice layer raises the
+                # "late delivery received" info notice from it (additive; the legacy
+                # broadcast above is unchanged).
+                await self._notify({"type": "LATE_DELIVERY", **late_summary})
 
             # Keep the rate counters live outside RECORDING. Phones stream telemetry as soon
             # as they connect, and preflight blocks START until it sees a healthy true_hz —
