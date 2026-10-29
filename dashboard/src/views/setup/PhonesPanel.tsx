@@ -122,15 +122,20 @@ function PhoneCard({ phone, versionMismatch }: { phone: Phone; versionMismatch: 
       data-testid={`phone-card-${phone.role}`}
     >
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-2xl font-black tracking-tight" style={{ color: roleHex(phone.role) }}>
+        <span
+          className="min-w-0 truncate text-2xl font-black tracking-tight"
+          style={{ color: roleHex(phone.role) }}
+          title={phone.role}
+        >
           {phone.role}
         </span>
+        {/* The badge never shrinks or wraps: at 1024 px the role ellipsises instead. */}
         {phone.online ? (
-          <span className="rounded bg-green-500/15 px-2 py-0.5 text-xs font-black text-green-300">
+          <span className="shrink-0 whitespace-nowrap rounded bg-green-500/15 px-2 py-0.5 text-xs font-black text-green-300">
             ONLINE
           </span>
         ) : (
-          <span className="rounded bg-red-500/15 px-2 py-0.5 text-xs font-black tabular-nums text-red-300">
+          <span className="shrink-0 whitespace-nowrap rounded bg-red-500/15 px-2 py-0.5 text-xs font-black tabular-nums text-red-300">
             OFFLINE{offlineFor ? ` ${offlineFor}` : ''}
           </span>
         )}

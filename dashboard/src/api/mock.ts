@@ -64,6 +64,7 @@ export const SCENARIOS: Array<{ id: ScenarioId; label: string }> = [
 const STEP_NAMES: FinalizeStep['name'][] = [
   'close_writers',
   'cameras',
+  'consolidate',
   'validate',
   'bundle',
   'package',
@@ -613,6 +614,7 @@ export class MockTransport implements Transport {
         s.status = 'done';
         s.ended_at_ms = Date.now();
         if (s.name === 'package') s.detail = 'session ZIP written';
+        if (s.name === 'consolidate') s.detail = 'every source is consolidated';
         this.emit({ type: 'finalize', data: clone(this.snapshot.finalize as FinalizeProgress) });
         this.update();
         if (i === steps.length - 1) this.finishSession(sid);
@@ -725,6 +727,29 @@ export class MockTransport implements Transport {
       files,
       late,
       uploads,
+      consolidation: withLate
+        ? {
+            state: 'current',
+            detail: 'every source is consolidated',
+            can_consolidate: false,
+            whole: false,
+            late_pending: false,
+            recovery_pending: false,
+            uploads_in_progress: false,
+            rescue_uploads: 0,
+            late_rows: 1204,
+          }
+        : {
+            state: 'not_needed',
+            detail: 'session is whole',
+            can_consolidate: false,
+            whole: true,
+            late_pending: false,
+            recovery_pending: false,
+            uploads_in_progress: false,
+            rescue_uploads: 0,
+            late_rows: 0,
+          },
     };
     this.sessions.set(sid, detail);
   }
@@ -911,6 +936,7 @@ export class MockTransport implements Transport {
             files: [],
             late: [],
             uploads: [],
+            consolidation: null,
           };
         }
         throw new ApiError(404, 'not_found', `Session ${sid} not found`);
@@ -925,6 +951,36 @@ export class MockTransport implements Transport {
         throw new ApiError(409, 'busy', 'Packaging is already running');
       }
       const d = this.sessions.get(sid);
+      return { zip_path: d?.zip_path ?? `${sid}.zip` };
+    });
+  }
+
+  consolidate(sid: string): Promise<PackageResponse> {
+    return this.delay(() => {
+      if (this.snapshot.state === 'FINALIZING' && this.snapshot.finalize?.session_id === sid) {
+        throw new ApiError(409, 'busy', 'The post-session job is already running');
+      }
+      if (this.snapshot.state === 'RECORDING' && this.snapshot.session?.session_id === sid) {
+        throw new ApiError(409, 'bad_state', 'The session is still recording');
+      }
+      const d = this.sessions.get(sid);
+      if (d?.consolidation) {
+        // The backend's step merges every verified source, so the row turns current.
+        d.consolidation = {
+          ...d.consolidation,
+          state: 'current',
+          detail: 'every source is consolidated',
+          can_consolidate: false,
+          late_pending: false,
+          recovery_pending: false,
+          uploads_in_progress: false,
+        };
+        const step = d.finalize.find((s) => s.name === 'consolidate');
+        if (step) {
+          step.status = 'done';
+          step.detail = 'every source is consolidated';
+        }
+      }
       return { zip_path: d?.zip_path ?? `${sid}.zip` };
     });
   }

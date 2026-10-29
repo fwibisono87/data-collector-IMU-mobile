@@ -35,6 +35,8 @@ export interface Transport {
   setLabel(labelId: number): Promise<LabelResponse>;
   listSessions(limit?: number, before?: string | null): Promise<SessionList>;
   getSession(sid: string): Promise<SessionDetail>;
+  /** Merge late/phone data into the ZIP now (409 busy / bad_state from the backend). */
+  consolidate(sid: string): Promise<PackageResponse>;
   repackage(sid: string): Promise<PackageResponse>;
   openFolder(sid: string): Promise<void>;
   dismissNotice(id: string): Promise<void>;
@@ -191,6 +193,12 @@ export class HttpTransport implements Transport {
   }
   repackage(sid: string): Promise<PackageResponse> {
     return this.request<PackageResponse>('POST', `/api/sessions/${encodeURIComponent(sid)}/package`);
+  }
+  consolidate(sid: string): Promise<PackageResponse> {
+    return this.request<PackageResponse>(
+      'POST',
+      `/api/sessions/${encodeURIComponent(sid)}/consolidate`,
+    );
   }
   async openFolder(sid: string): Promise<void> {
     await this.request<unknown>('POST', `/api/sessions/${encodeURIComponent(sid)}/open-folder`);

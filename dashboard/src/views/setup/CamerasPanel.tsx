@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { errorMessage } from '../../api/errors';
 import type { Camera, CameraDevice, Reference } from '../../api/types';
@@ -9,6 +9,8 @@ import { EMPTY_CAMERAS } from '../../lib/empty';
 import { useTransport, useSnapshot } from '../../state/store';
 
 const MAX_CAMERAS = 5; // PUT /api/cameras/selection refuses more (API.md)
+//: Hot-plugged cameras must show up without a page reload (L7a §3.4).
+const DEVICE_POLL_MS = 5000;
 
 /**
  * Cameras panel (SPEC §5.1): device checklist, live preview tiles from the
@@ -24,22 +26,60 @@ export function CamerasPanel() {
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [refDialog, setRefDialog] = useState<Reference | null>(null);
 
+  // `announce` is the difference between a silent poll and a user-visible action:
+  // a failed poll keeps the last list (and any current error) instead of flashing
+  // "camera enumeration failed" every five seconds.
+  const fetchDevices = useCallback(
+    (announce: boolean) =>
+      transport
+        .listCameraDevices()
+        .then((d) => {
+          setDevices(d.devices);
+          if (announce) setError(null);
+        })
+        .catch((e) => {
+          if (announce) setError(errorMessage(e));
+        })
+        .finally(() => {
+          if (announce) setRefreshing(false);
+        }),
+    [transport],
+  );
+
+  // Re-enumerate while Setup is visible so a hot-plugged camera appears without a
+  // reload; pause while the tab is hidden and catch up the moment it returns.
   useEffect(() => {
-    let alive = true;
-    transport
-      .listCameraDevices()
-      .then((d) => {
-        if (alive) setDevices(d.devices);
-      })
-      .catch((e) => {
-        if (alive) setError(errorMessage(e));
-      });
-    return () => {
-      alive = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
     };
-  }, [transport]);
+    const start = () => {
+      if (timer !== null) return;
+      void fetchDevices(false);
+      timer = setInterval(() => void fetchDevices(false), DEVICE_POLL_MS);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stop();
+      else start();
+    };
+    if (document.visibilityState !== 'hidden') start();
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [fetchDevices]);
+
+  const refresh = () => {
+    setRefreshing(true);
+    void fetchDevices(true);
+  };
 
   // Selected keys (from the snapshot) merged over the device list so a camera
   // stays visible even if the last re-enumeration missed its device.
@@ -98,7 +138,16 @@ export function CamerasPanel() {
             ({cameras.filter((c) => c.state === 'live').length}/{cameras.length} live)
           </span>
         </h2>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            data-testid="refresh-cameras"
+            disabled={refreshing}
+            className="rounded border border-zinc-600 px-2 py-1 text-xs font-bold hover:bg-zinc-800 disabled:opacity-40"
+            onClick={refresh}
+          >
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
           <button
             type="button"
             disabled={busy || cameras.length === 0}

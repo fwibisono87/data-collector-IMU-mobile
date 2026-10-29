@@ -15,6 +15,49 @@ function magnitude(acc: ArrayLike<number>): number {
   return Math.sqrt(x * x + y * y + z * z);
 }
 
+export function chartOptions(
+  width: number,
+  height: number,
+  ids: string[],
+  roles: Map<string, string>,
+): uPlot.Options {
+  return {
+    width: Math.max(width, 100),
+    height: Math.max(height, 80),
+    padding: [4, 4, 0, 0],
+    scales: { x: { time: true } },
+    // The role legend is rendered by React (swatches only); uPlot's own legend
+    // spent a row on "Time: --" and repeated every series name (L7a §3.5).
+    legend: { show: false },
+    axes: [
+      {
+        stroke: '#a1a1aa',
+        grid: { stroke: '#27272a' },
+        ticks: { stroke: '#3f3f46' },
+        font: '10px sans-serif',
+      },
+      {
+        stroke: '#a1a1aa',
+        grid: { stroke: '#27272a' },
+        ticks: { stroke: '#3f3f46' },
+        font: '10px sans-serif',
+        // Room for two decimals ("10.25"): the default axis width clipped the
+        // last digit on g magnitudes ≥ 1 (L7a §3.5).
+        size: 48,
+        values: (_u: uPlot, splits: number[]) => splits.map((v) => v.toFixed(2)),
+      },
+    ],
+    series: [
+      {},
+      ...ids.map((id) => ({
+        label: roles.get(id) ?? id,
+        stroke: roleHex(roles.get(id) ?? ''),
+        width: 1.5,
+      })),
+    ],
+  };
+}
+
 /**
  * Live acc-magnitude chart (uPlot), last 10 s, one series per phone.
  *
@@ -48,35 +91,12 @@ export function LiveChart() {
     let plot: uPlot | null = null;
     try {
       plot = new uPlot(
-        {
-          width: Math.max(host.clientWidth, 100),
-          height: Math.max(host.clientHeight, 80),
-          padding: [4, 4, 0, 0],
-          scales: { x: { time: true } },
-          axes: [
-            {
-              stroke: '#a1a1aa',
-              grid: { stroke: '#27272a' },
-              ticks: { stroke: '#3f3f46' },
-              font: '10px sans-serif',
-            },
-            {
-              stroke: '#a1a1aa',
-              grid: { stroke: '#27272a' },
-              ticks: { stroke: '#3f3f46' },
-              font: '10px sans-serif',
-              size: 34,
-            },
-          ],
-          series: [
-            {},
-            ...ids.map((id) => ({
-              label: rolesRef.current.get(id) ?? id,
-              stroke: roleHex(rolesRef.current.get(id) ?? ''),
-              width: 1.5,
-            })),
-          ],
-        },
+        chartOptions(
+          host.clientWidth,
+          host.clientHeight,
+          ids,
+          rolesRef.current,
+        ),
         { length: 0 } as unknown as uPlot.AlignedData,
         host,
       );
@@ -123,12 +143,24 @@ export function LiveChart() {
     };
   }, [app, seriesKey]);
 
-  return unavailable ? (
-    <div className="flex h-full items-center justify-center text-xs text-zinc-600">
-      chart unavailable
+  return (
+    <div className="flex h-full min-h-24 w-full flex-col" data-testid="live-chart">
+      <div className="mb-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5" data-testid="live-chart-legend">
+        {phones.map((p) => (
+          <span key={p.device_id} className="inline-flex items-center gap-1 text-[10px] font-bold text-zinc-400">
+            <span className="h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: roleHex(p.role) }} />
+            {p.role}
+          </span>
+        ))}
+      </div>
+      {unavailable ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-zinc-600">
+          chart unavailable
+        </div>
+      ) : (
+        <div ref={hostRef} className="min-h-0 flex-1" />
+      )}
     </div>
-  ) : (
-    <div ref={hostRef} className="h-full min-h-24 w-full" data-testid="live-chart" />
   );
 }
 

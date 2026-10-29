@@ -5,6 +5,7 @@ import { vi } from 'vitest';
 import type { Transport } from '../api/transport';
 import type {
   Camera,
+  ConsolidationStatus,
   FinalizeStep,
   Phone,
   Reference,
@@ -133,6 +134,21 @@ export function makeSessionDetail(over: Partial<SessionDetail> = {}): SessionDet
   };
 }
 
+export function makeConsolidation(over: Partial<ConsolidationStatus> = {}): ConsolidationStatus {
+  return {
+    state: 'pending_phone_data',
+    detail: '1 rescue upload waiting to be merged',
+    can_consolidate: true,
+    whole: false,
+    late_pending: false,
+    recovery_pending: true,
+    uploads_in_progress: false,
+    rescue_uploads: 1,
+    late_rows: 0,
+    ...over,
+  };
+}
+
 export function makeReference(over: Partial<Reference> = {}): Reference {
   const now = Date.now();
   return {
@@ -202,6 +218,7 @@ export function stubTransport(over: Partial<Transport> = {}): StubTransport {
       next: null,
     })),
     getSession: vi.fn(async () => detail),
+    consolidate: vi.fn(async () => ({ zip_path: detail.zip_path ?? 's.zip' })),
     repackage: vi.fn(async () => ({ zip_path: detail.zip_path ?? 's.zip' })),
     openFolder: vi.fn(async () => undefined),
     dismissNotice: vi.fn(async () => undefined),

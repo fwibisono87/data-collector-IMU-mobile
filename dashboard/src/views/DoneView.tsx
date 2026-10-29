@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { errorMessage, isApiError } from '../api/errors';
-import type { FinalizeStep, Notice, SessionDetail } from '../api/types';
+import type { ConsolidationStatus, FinalizeStep, Notice, SessionDetail } from '../api/types';
 import { PanelBoundary } from '../components/PanelBoundary';
 import { EMPTY_ARR } from '../lib/empty';
 import { fmtBytes, fmtClock, fmtNumber, fmtSeconds } from '../lib/format';
@@ -46,6 +46,7 @@ export function DoneView({ sid, onNewSession }: { sid: string; onNewSession?: ()
   const [openFolderMsg, setOpenFolderMsg] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [consolidating, setConsolidating] = useState(false);
 
   // Live finalize progress from the snapshot when it is about THIS session.
   const liveFinalize = useSnapshot((s) =>
@@ -100,6 +101,16 @@ export function DoneView({ sid, onNewSession }: { sid: string; onNewSession?: ()
 
   const dismiss = (id: string) => {
     transport.dismissNotice(id).catch((e) => setActionError(errorMessage(e)));
+  };
+
+  const consolidateNow = () => {
+    setConsolidating(true);
+    setActionError(null);
+    transport
+      .consolidate(sid)
+      .then(() => load())
+      .catch((e) => setActionError(errorMessage(e)))
+      .finally(() => setConsolidating(false));
   };
 
   return (
@@ -159,6 +170,15 @@ export function DoneView({ sid, onNewSession }: { sid: string; onNewSession?: ()
               </li>
             ))}
           </ol>
+        </PanelBoundary>
+
+        <PanelBoundary name="Consolidation" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+          <ConsolidationRow
+            consolidation={detail?.consolidation ?? null}
+            step={steps.find((s) => s.name === 'consolidate') ?? null}
+            busy={consolidating}
+            onConsolidate={consolidateNow}
+          />
         </PanelBoundary>
 
         <PanelBoundary name="Integrity" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
@@ -239,6 +259,83 @@ export function DoneView({ sid, onNewSession }: { sid: string; onNewSession?: ()
           )}
         </PanelBoundary>
       </div>
+    </div>
+  );
+}
+
+const CONSOLIDATION_LABEL: Record<ConsolidationStatus['state'], { text: string; className: string }> = {
+  current: {
+    text: 'Current',
+    className: 'bg-green-500/15 text-green-300 border-green-500/50',
+  },
+  pending_phone_data: {
+    text: 'Pending phone data',
+    className: 'bg-amber-500/15 text-amber-300 border-amber-500/50',
+  },
+  not_needed: {
+    text: 'Not needed',
+    className: 'bg-zinc-500/15 text-zinc-300 border-zinc-500/50',
+  },
+};
+
+/**
+ * The Done view's Consolidation row (L7a §2). It answers the one question the
+ * step list cannot: does the ZIP on disk already contain every late row and
+ * phone rescue upload? "Consolidate now" is the backend's own POST; it is
+ * offered exactly when the backend says the merge is not current.
+ */
+function ConsolidationRow({
+  consolidation,
+  step,
+  busy,
+  onConsolidate,
+}: {
+  consolidation: ConsolidationStatus | null;
+  step: FinalizeStep | null;
+  busy: boolean;
+  onConsolidate: () => void;
+}) {
+  if (!consolidation) {
+    return (
+      <>
+        <h2 className="mb-2 text-sm font-black uppercase tracking-wider text-zinc-400">Consolidation</h2>
+        <p className="text-sm text-zinc-500">Consolidation status is not available for this session yet.</p>
+      </>
+    );
+  }
+  const running = busy || step?.status === 'running';
+  const label = CONSOLIDATION_LABEL[consolidation.state];
+  const disabled = running || !consolidation.can_consolidate;
+  return (
+    <div data-testid="consolidation-row">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-black uppercase tracking-wider text-zinc-400">Consolidation</h2>
+        <span
+          className={`rounded border px-2 py-0.5 text-xs font-black ${label?.className ?? CONSOLIDATION_LABEL.not_needed.className}`}
+          data-testid="consolidation-state"
+        >
+          {label?.text ?? consolidation.state}
+        </span>
+        <button
+          type="button"
+          data-testid="consolidate-now"
+          disabled={disabled}
+          title={
+            running
+              ? 'A consolidation or package run is already in progress'
+              : consolidation.can_consolidate
+                ? 'Merge late rows and phone rescue uploads into the session ZIP now'
+                : 'Nothing is waiting to be merged'
+          }
+          className="ml-auto rounded border border-cyan-500/60 px-3 py-1 text-xs font-black text-cyan-300 hover:bg-cyan-500/10 disabled:cursor-not-allowed disabled:border-zinc-700 disabled:text-zinc-500 disabled:hover:bg-transparent"
+          onClick={onConsolidate}
+        >
+          {running ? 'Consolidating…' : 'Consolidate now'}
+        </button>
+      </div>
+      <p className="mt-1 text-sm text-zinc-400" data-testid="consolidation-detail">
+        {consolidation.detail}
+      </p>
     </div>
   );
 }
