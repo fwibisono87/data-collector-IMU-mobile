@@ -309,3 +309,10 @@ $clean/
 # One-off local soak schedules contain this workstation's device serials; keep the
 # reusable tools/soak_plan.example.json tracked, but leave per-run plans local.
 tools/soak_plan.loop*.json
+
+# New dashboard (lane L6): local artifacts only — the production build in
+# master_backend/app/static/ IS committed (the field laptop must not need Node).
+dashboard/node_modules/
+dashboard/coverage/
+dashboard/.vite/
+dashboard/*.local
