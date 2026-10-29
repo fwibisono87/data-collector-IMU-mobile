@@ -1,4 +1,4 @@
-# ops/ip.ps1 — show the addresses to use WITHOUT touching the running backend.
+# ops/ip.ps1 - show the addresses to use WITHOUT touching the running backend.
 #
 # Read-only: run it in a second terminal any time. Two things are printed because two
 # kinds of client connect to this laptop now:
@@ -46,7 +46,7 @@ $listening = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Si
 if ($listening) {
     Write-Host "Port $port : LISTENING (backend is up, PID $($listening[0].OwningProcess))" -ForegroundColor Green
 } else {
-    Write-Host "Port $port : NOT listening — start the backend first (.\start_all.ps1)" -ForegroundColor Red
+    Write-Host "Port $port : NOT listening - start the backend first (.\start_all.ps1)" -ForegroundColor Red
 }
 
 # Cameras: without ffmpeg there is no preview and no video, and the dashboard only shows
@@ -63,7 +63,7 @@ if (-not $ffmpeg) {
 if ($ffmpeg) {
     Write-Host "ffmpeg     : $ffmpeg" -ForegroundColor Green
 } else {
-    Write-Host "ffmpeg     : NOT FOUND — cameras will not work (see start_all.ps1 for the download hint)" -ForegroundColor Red
+    Write-Host "ffmpeg     : NOT FOUND - cameras will not work (see start_all.ps1 for the download hint)" -ForegroundColor Red
 }
 
 if ($preferred) {
@@ -75,13 +75,13 @@ if ($preferred) {
     Write-Host ""
     try {
         $h = Invoke-RestMethod "http://${preferred}:$port/health" -TimeoutSec 3
-        $summary = "Health OK  — build {0}  state {1}  phones {2}  port {3}" -f $h.build_id, $h.session_state, $h.online_devices, $h.port
+        $summary = "Health OK  - build {0}  state {1}  phones {2}  port {3}" -f $h.build_id, $h.session_state, $h.online_devices, $h.port
         Write-Host $summary -ForegroundColor Green
     } catch {
-        Write-Host "Health probe failed — check the Windows Firewall inbound rule for" -ForegroundColor Red
+        Write-Host "Health probe failed - check the Windows Firewall inbound rule for" -ForegroundColor Red
         Write-Host "python.exe on the Wi-Fi (Private) network: TCP $port and UDP 5353 (mDNS)." -ForegroundColor Red
     }
 } else {
     Write-Host ""
-    Write-Host "No LAN address found — is the Wi-Fi connected?" -ForegroundColor Red
+    Write-Host "No LAN address found - is the Wi-Fi connected?" -ForegroundColor Red
 }

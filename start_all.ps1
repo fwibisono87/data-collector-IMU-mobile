@@ -1,25 +1,25 @@
-# start_all.ps1 — operator one-click start on the field laptop (Windows).
+# start_all.ps1 - operator one-click start on the field laptop (Windows).
 #
 # The rebuilt system is ONE process tree: master_backend\run.py serves the phone
 # WebSockets, the camera service (one ffmpeg per camera, children in a Job Object) and
-# the dashboard itself as static files — all on a single port. There is no Node at
+# the dashboard itself as static files - all on a single port. There is no Node at
 # runtime any more and no port 3000: the dashboard is http://<laptop-ip>:8000/.
-# Fewer moving parts is the whole point of the rebuild (SPEC §4.1, §1.1), so this
+# Fewer moving parts is the whole point of the rebuild (SPEC 4.1 and 1.1), so this
 # script starts Python and nothing else.
 #
 # What it guarantees, in order:
 #   1. master_backend\.env is complete, and its values (PORT included) are exported to
-#      the backend process — run.py reads PORT before dotenv runs, so a PORT that only
+#      the backend process - run.py reads PORT before dotenv runs, so a PORT that only
 #      lives in .env would otherwise disagree between the listener and the app.
 #   2. a previous backend and its ffmpeg children are gone (a webcam can be opened by
 #      one process at a time; a stuck ffmpeg breaks the next recording).
 #   3. ffmpeg + ffprobe exist (vendor\ffmpeg, PATH, or IMU_FFMPEG/IMU_FFPROBE).
 #   4. master_backend\.venv exists, runs, and has the requirements installed (-NoInstall
-#      skips this — that is what start.ps1 does every day).
+#      skips this - that is what start.ps1 does every day).
 #   5. the backend answers /health, then the dashboard is opened and the LAN IP + phone
 #      instructions are printed.
 #
-# NOTE: do not set $ErrorActionPreference='Stop' globally — native commands writing to
+# NOTE: do not set $ErrorActionPreference='Stop' globally - native commands writing to
 # stderr (a failed `import fastapi` probe, an ffmpeg banner) would abort the script.
 #
 # Usage: double-click start.bat, or .\start_all.ps1
@@ -199,7 +199,7 @@ Write-Host "ffmpeg     : $ffmpeg" -ForegroundColor Cyan
 
 if (-not (Test-Path -LiteralPath $staticIndex)) {
     Write-Host "WARNING: no dashboard build at master_backend\app\static\ - http://localhost:$port/ will 404." -ForegroundColor Yellow
-    Write-Host "         Build it once (needs Node):  make dashboard   (npm ci && npm run build)" -ForegroundColor Yellow
+    Write-Host "         Build it once (needs Node):  make dashboard   (npm ci, then npm run build)" -ForegroundColor Yellow
 }
 
 # ---------------------------------------------------------------- python ------------
@@ -224,8 +224,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 function Install-BackendDeps {
-    param([string]$Python, [string[]]$PythonArgs, [string]$Requirements)
-    & $Python @PythonArgs -m pip install --disable-pip-version-check -r $Requirements
+    # Uses the caller's $runPyArgs on purpose: it is either @() or @('-3'), and splatting
+    # an inherited script-scope array avoids binding an empty array to a [string[]] param.
+    param([string]$Python, [string]$Requirements)
+    & $Python @runPyArgs -m pip install --disable-pip-version-check -r $Requirements
 }
 
 $runPy = $sysPython
@@ -275,7 +277,7 @@ if (-not $NoInstall) {
         Write-Host "Backend    : dependencies already installed." -ForegroundColor Cyan
     } else {
         Write-Host "Backend    : installing dependencies from requirements.txt ..." -ForegroundColor Cyan
-        Install-BackendDeps -Python $runPy -PythonArgs $runPyArgs -Requirements $requirements
+        Install-BackendDeps -Python $runPy -Requirements $requirements
         $depsOk = ($LASTEXITCODE -eq 0)
     }
     if (-not $depsOk) {
@@ -284,7 +286,7 @@ if (-not $NoInstall) {
         & $sysPython @sysPythonArgs -m venv $venvDir
         $runPy = $venvPy
         $runPyArgs = @()
-        Install-BackendDeps -Python $runPy -PythonArgs $runPyArgs -Requirements $requirements
+        Install-BackendDeps -Python $runPy -Requirements $requirements
         if ($LASTEXITCODE -ne 0) {
             Write-Host "FAIL: pip install failed twice. Check the network/proxy, then re-run start_all.ps1." -ForegroundColor Red
             exit 1
@@ -354,6 +356,6 @@ try {
 }
 
 Write-Host "Backend running in this window. Ctrl+C or close it to stop (or .\ops\stop.ps1 elsewhere)." -ForegroundColor Green
-Wait-Process -Id $backend.Id
+if (-not $backend.HasExited) { Wait-Process -Id $backend.Id }
 Write-Host ""
 Write-Host "Backend exited (code $($backend.ExitCode))." -ForegroundColor Yellow
