@@ -25,6 +25,16 @@ CSV_HEADER = CSV_HEADER_V2      # what writers emit from now on
 V1_WIDTH = 11
 V2_WIDTH = 14
 
+# ── Idle-telemetry marker (rebuild SPEC §6.3) ────────────────────────────────
+#
+# Phones stream telemetry whenever they are connected so the true-rate preflight gate
+# has data before START. Those idle packets carry sequence_number >= IDLE_SEQ_BASE;
+# session packets restart at 0,1,2,… at START. The backend counts idle packets for
+# rate/liveness but must never write them to a session CSV, a late CSV or the dedup
+# store — they are not research data. Defined here, once, because both the ingest
+# filter (ws_handler) and its tests need the same constant.
+IDLE_SEQ_BASE = 2**40
+
 COL_TIMESTAMP_MS = 0
 COL_ACC_X = 1
 COL_ACC_Y = 2

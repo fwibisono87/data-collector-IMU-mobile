@@ -18,6 +18,7 @@ from master_backend.proto.commands import (
     make_ack, make_clock_sync_response, make_error_alert, make_pong,
 )
 from .audit_logger import audit
+from .csv_schema import IDLE_SEQ_BASE
 from .dedup_store import dedup
 from .io_manager import io_manager
 from .session_manager import IllegalTransition, SessionState, session_manager
@@ -102,60 +103,7 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 )
                 continue
 
-            if session_manager.state != SessionState.RECORDING:
-                # Rate accounting must run in EVERY state, not just RECORDING. Phones stream
-                # telemetry from the moment they connect (attachSensorStream is persistent),
-                # and preflight gates START on true_hz — so counting only while RECORDING left
-                # the gate reading 0 Hz before every session and blocked recording outright.
-                # start_recording() resets these counters, so idle traffic never contaminates
-                # a session's totals. Deliberately outside the dedup path below: that one is
-                # gated on the session id and exists to keep duplicate rows off disk.
-                session_manager.increment_packets(device_id)
-                session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
-                # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
-                # flushing the buffered tail of the session that just ended. Dropping it
-                # here (and letting the phone then erase its own copy) was a total-loss
-                # path (plan D3).
-                late_sid = io_manager.late_session_id
-                if late_sid:
-                    dev = session_manager.get_device(device_id)
-                    role = dev.device_role if dev else "unknown"
-                    if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
-                        dedup.add(device_id, late_sid, pkt.sequence_number)
-                        try:
-                            await io_manager.write_late(pkt, role)
-                        except OSError as exc:
-                            await audit.log("ERROR", "late_write_failed", {
-                                "device_id": device_id, "error": str(exc),
-                            })
-                continue
-
-            if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
-                continue
-
-            dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
-            # A device that joined or rejoined after START has no writer yet; without this
-            # every one of its packets is discarded while the dashboard counts them (plan D2).
-            if not io_manager.has_writer(device_id):
-                dev = session_manager.get_device(device_id)
-                if dev is not None:
-                    await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
-            session_manager.increment_packets(device_id)
-            session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
-            session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
-            try:
-                await io_manager.write_packet(pkt)
-            except OSError as exc:
-                logger.error("write_packet failed for %s: %s", device_id[:8], exc)
-                await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
-                # Do not re-raise — an I/O error must not drop the WebSocket.
-                # The mobile will activate its blackbox buffer on next reconnect.
-            # Cache latest sample for /ws/live dashboard chart.
-            _latest_samples[device_id] = {
-                "acc": [round(pkt.acc_x, 4), round(pkt.acc_y, 4), round(pkt.acc_z, 4)],
-                "gyro": [round(pkt.gyro_x, 4), round(pkt.gyro_y, 4), round(pkt.gyro_z, 4)],
-                "ts": pkt.timestamp_ms,
-            }
+            await _ingest_packet(pkt)
 
     except WebSocketDisconnect:
         pass
@@ -169,6 +117,76 @@ async def telemetry_ws(websocket: WebSocket) -> None:
         if device_id:
             session_manager.note_telemetry_disconnect(device_id)
         await audit.log("INFO", "ws_disconnect", {"channel": "telemetry", "device_id": device_id})
+
+
+async def _ingest_packet(pkt: SensorPacket) -> None:
+    """One parsed telemetry packet: accounting in every state, writes only for session data.
+
+    Extracted from telemetry_ws so the ingest rules can be driven directly by tests.
+    Packets with ``sequence_number >= IDLE_SEQ_BASE`` are the phone's idle stream
+    (SPEC §6.3): they keep the rate/liveness accounting alive — that is the whole point
+    of streaming before START — but never touch the dedup store, a session CSV, a late
+    CSV or the first-packet marker, because they are not session data.
+    """
+    device_id = pkt.device_id
+    idle = pkt.sequence_number >= IDLE_SEQ_BASE
+
+    if session_manager.state != SessionState.RECORDING:
+        # Rate accounting must run in EVERY state, not just RECORDING. Phones stream
+        # telemetry from the moment they connect (attachSensorStream is persistent),
+        # and preflight gates START on true_hz — so counting only while RECORDING left
+        # the gate reading 0 Hz before every session and blocked recording outright.
+        # start_recording() resets these counters, so idle traffic never contaminates
+        # a session's totals. Deliberately outside the dedup path below: that one is
+        # gated on the session id and exists to keep duplicate rows off disk.
+        session_manager.increment_packets(device_id)
+        session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
+        # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
+        # flushing the buffered tail of the session that just ended. Dropping it
+        # here (and letting the phone then erase its own copy) was a total-loss
+        # path (plan D3).
+        late_sid = io_manager.late_session_id
+        if late_sid and not idle:
+            dev = session_manager.get_device(device_id)
+            role = dev.device_role if dev else "unknown"
+            if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
+                dedup.add(device_id, late_sid, pkt.sequence_number)
+                try:
+                    await io_manager.write_late(pkt, role)
+                except OSError as exc:
+                    await audit.log("ERROR", "late_write_failed", {
+                        "device_id": device_id, "error": str(exc),
+                    })
+        return
+
+    if not idle:
+        if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
+            return
+
+        dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
+        # A device that joined or rejoined after START has no writer yet; without this
+        # every one of its packets is discarded while the dashboard counts them (plan D2).
+        if not io_manager.has_writer(device_id):
+            dev = session_manager.get_device(device_id)
+            if dev is not None:
+                await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
+    session_manager.increment_packets(device_id)
+    session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
+    if not idle:
+        session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
+        try:
+            await io_manager.write_packet(pkt)
+        except OSError as exc:
+            logger.error("write_packet failed for %s: %s", device_id[:8], exc)
+            await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
+            # Do not re-raise — an I/O error must not drop the WebSocket.
+            # The mobile will activate its blackbox buffer on next reconnect.
+    # Cache latest sample for /ws/live dashboard chart.
+    _latest_samples[device_id] = {
+        "acc": [round(pkt.acc_x, 4), round(pkt.acc_y, 4), round(pkt.acc_z, 4)],
+        "gyro": [round(pkt.gyro_x, 4), round(pkt.gyro_y, 4), round(pkt.gyro_z, 4)],
+        "ts": pkt.timestamp_ms,
+    }
 
 
 # ── Control channel ───────────────────────────────────────────────────────────
