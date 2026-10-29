@@ -1,0 +1,1872 @@
+{
+  "binary_sizes": {
+    "missed_cameras.txt": 5,
+    "videos/<SID>_cam1_video_sync.webm": 8,
+    "videos/<SID>_cam2_video_sync.webm": 8,
+    "videos/<SID>_cam2_video_sync_part2.webm": 8
+  },
+  "csv": {
+    "data/<SID>_chest_consolidated.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,11111111-1111-4111-8111-111111111111,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,11111111-1111-4111-8111-111111111111,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,11111111-1111-4111-8111-111111111111,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,11111111-1111-4111-8111-111111111111,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,11111111-1111-4111-8111-111111111111,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006460,0.090138,0.090138,0.090138,-47.464043,-47.464043,-47.464043,0,0,616,11111111-1111-4111-8111-111111111111,1700000006460,1700000006458,0",
+        "1700000006470,-0.009739,-0.009739,-0.009739,-44.742247,-44.742247,-44.742247,0,0,617,11111111-1111-4111-8111-111111111111,1700000006470,1700000006468,0",
+        "1700000006480,-0.109519,-0.109519,-0.109519,-41.108895,-41.108895,-41.108895,0,0,618,11111111-1111-4111-8111-111111111111,1700000006480,1700000006478,0",
+        "1700000006490,-0.208205,-0.208205,-0.208205,-36.638012,-36.638012,-36.638012,0,0,619,11111111-1111-4111-8111-111111111111,,,0",
+        "1700000006500,-0.304811,-0.304811,-0.304811,-31.420685,-31.420685,-31.420685,0,0,620,11111111-1111-4111-8111-111111111111,1700000006500,1700000006498,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,source=consolidate"
+      ],
+      "row_count": 601
+    },
+    "data/<SID>_chest_sensor_data.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,11111111-1111-4111-8111-111111111111,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,11111111-1111-4111-8111-111111111111,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,11111111-1111-4111-8111-111111111111,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,11111111-1111-4111-8111-111111111111,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,11111111-1111-4111-8111-111111111111,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006450,0.189115,0.189115,0.189115,-49.218832,-49.218832,-49.218832,0,0,615,11111111-1111-4111-8111-111111111111,1700000006450,1700000006448,0",
+        "1700000006460,0.090138,0.090138,0.090138,-47.464043,-47.464043,-47.464043,0,0,616,11111111-1111-4111-8111-111111111111,1700000006460,1700000006458,0",
+        "1700000006470,-0.009739,-0.009739,-0.009739,-44.742247,-44.742247,-44.742247,0,0,617,11111111-1111-4111-8111-111111111111,1700000006470,1700000006468,0",
+        "1700000006480,-0.109519,-0.109519,-0.109519,-41.108895,-41.108895,-41.108895,0,0,618,11111111-1111-4111-8111-111111111111,1700000006480,1700000006478,0",
+        "1700000006490,-0.208205,-0.208205,-0.208205,-36.638012,-36.638012,-36.638012,0,0,619,11111111-1111-4111-8111-111111111111,,,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,schema_version=2,subject=SUBJ_01,operator=OP"
+      ],
+      "row_count": 600
+    },
+    "data/<SID>_chest_sensor_data_late.csv": {
+      "first_rows": [
+        "1700000006500,-0.304811,-0.304811,-0.304811,-31.420685,-31.420685,-31.420685,0,0,620,11111111-1111-4111-8111-111111111111,1700000006500,1700000006498,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006500,-0.304811,-0.304811,-0.304811,-31.420685,-31.420685,-31.420685,0,0,620,11111111-1111-4111-8111-111111111111,1700000006500,1700000006498,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,schema_version=2,subject=SUBJ_01,operator=OP,late_delivery=1"
+      ],
+      "row_count": 1
+    },
+    "data/<SID>_consolidated.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,11111111-1111-4111-8111-111111111111,1700000000500,1700000000498,0",
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,33333333-3333-4333-8333-333333333333,1700000000500,1700000000498,0",
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,22222222-2222-4222-8222-222222222222,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,11111111-1111-4111-8111-111111111111,1700000000510,1700000000508,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,33333333-3333-4333-8333-333333333333,1700000000510,1700000000508,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006650,-0.971589,-0.971589,-0.971589,49.711632,49.711632,49.711632,0,0,615,22222222-2222-4222-8222-222222222222,1700000006650,1700000006648,0",
+        "1700000006660,-0.943107,-0.943107,-0.943107,49.968664,49.968664,49.968664,0,0,616,22222222-2222-4222-8222-222222222222,1700000006660,1700000006658,0",
+        "1700000006670,-0.905201,-0.905201,-0.905201,49.207661,49.207661,49.207661,0,0,617,22222222-2222-4222-8222-222222222222,1700000006670,1700000006668,0",
+        "1700000006680,-0.858252,-0.858252,-0.858252,47.444126,47.444126,47.444126,0,0,618,22222222-2222-4222-8222-222222222222,1700000006680,1700000006678,0",
+        "1700000006690,-0.802726,-0.802726,-0.802726,44.713989,44.713989,44.713989,0,0,619,22222222-2222-4222-8222-222222222222,1700000006690,1700000006688,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,source=consolidate"
+      ],
+      "row_count": 1821
+    },
+    "data/<SID>_thigh_right_consolidated.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,33333333-3333-4333-8333-333333333333,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,33333333-3333-4333-8333-333333333333,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,33333333-3333-4333-8333-333333333333,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,33333333-3333-4333-8333-333333333333,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,33333333-3333-4333-8333-333333333333,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006450,0.189115,0.189115,0.189115,-49.218832,-49.218832,-49.218832,0,0,595,33333333-3333-4333-8333-333333333333,1700000006450,1700000006448,0",
+        "1700000006460,0.090138,0.090138,0.090138,-47.464043,-47.464043,-47.464043,0,0,596,33333333-3333-4333-8333-333333333333,1700000006460,1700000006458,0",
+        "1700000006470,-0.009739,-0.009739,-0.009739,-44.742247,-44.742247,-44.742247,0,0,597,33333333-3333-4333-8333-333333333333,1700000006470,1700000006468,0",
+        "1700000006480,-0.109519,-0.109519,-0.109519,-41.108895,-41.108895,-41.108895,0,0,598,33333333-3333-4333-8333-333333333333,1700000006480,1700000006478,0",
+        "1700000006490,-0.208205,-0.208205,-0.208205,-36.638012,-36.638012,-36.638012,0,0,599,33333333-3333-4333-8333-333333333333,,,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,source=consolidate"
+      ],
+      "row_count": 600
+    },
+    "data/<SID>_thigh_right_sensor_data.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,33333333-3333-4333-8333-333333333333,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,33333333-3333-4333-8333-333333333333,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,33333333-3333-4333-8333-333333333333,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,33333333-3333-4333-8333-333333333333,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,33333333-3333-4333-8333-333333333333,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006450,0.189115,0.189115,0.189115,-49.218832,-49.218832,-49.218832,0,0,595,33333333-3333-4333-8333-333333333333,1700000006450,1700000006448,0",
+        "1700000006460,0.090138,0.090138,0.090138,-47.464043,-47.464043,-47.464043,0,0,596,33333333-3333-4333-8333-333333333333,1700000006460,1700000006458,0",
+        "1700000006470,-0.009739,-0.009739,-0.009739,-44.742247,-44.742247,-44.742247,0,0,597,33333333-3333-4333-8333-333333333333,1700000006470,1700000006468,0",
+        "1700000006480,-0.109519,-0.109519,-0.109519,-41.108895,-41.108895,-41.108895,0,0,598,33333333-3333-4333-8333-333333333333,1700000006480,1700000006478,0",
+        "1700000006490,-0.208205,-0.208205,-0.208205,-36.638012,-36.638012,-36.638012,0,0,599,33333333-3333-4333-8333-333333333333,,,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,schema_version=2,subject=SUBJ_01,operator=OP"
+      ],
+      "row_count": 600
+    },
+    "data/<SID>_waist_consolidated.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,22222222-2222-4222-8222-222222222222,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,22222222-2222-4222-8222-222222222222,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,22222222-2222-4222-8222-222222222222,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,22222222-2222-4222-8222-222222222222,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,22222222-2222-4222-8222-222222222222,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006650,-0.971589,-0.971589,-0.971589,49.711632,49.711632,49.711632,0,0,615,22222222-2222-4222-8222-222222222222,1700000006650,1700000006648,0",
+        "1700000006660,-0.943107,-0.943107,-0.943107,49.968664,49.968664,49.968664,0,0,616,22222222-2222-4222-8222-222222222222,1700000006660,1700000006658,0",
+        "1700000006670,-0.905201,-0.905201,-0.905201,49.207661,49.207661,49.207661,0,0,617,22222222-2222-4222-8222-222222222222,1700000006670,1700000006668,0",
+        "1700000006680,-0.858252,-0.858252,-0.858252,47.444126,47.444126,47.444126,0,0,618,22222222-2222-4222-8222-222222222222,1700000006680,1700000006678,0",
+        "1700000006690,-0.802726,-0.802726,-0.802726,44.713989,44.713989,44.713989,0,0,619,22222222-2222-4222-8222-222222222222,1700000006690,1700000006688,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,source=consolidate"
+      ],
+      "row_count": 620
+    },
+    "data/<SID>_waist_sensor_data.csv": {
+      "first_rows": [
+        "1700000000500,0.000000,0.000000,0.000000,50.000000,50.000000,50.000000,0,0,0,22222222-2222-4222-8222-222222222222,1700000000500,1700000000498,0",
+        "1700000000510,0.099833,0.099833,0.099833,49.490663,49.490663,49.490663,0,0,1,22222222-2222-4222-8222-222222222222,1700000000510,1700000000508,0",
+        "1700000000520,0.198669,0.198669,0.198669,47.973029,47.973029,47.973029,0,0,2,22222222-2222-4222-8222-222222222222,1700000000520,1700000000518,0",
+        "1700000000530,0.295520,0.295520,0.295520,45.478018,45.478018,45.478018,0,0,3,22222222-2222-4222-8222-222222222222,1700000000530,1700000000528,0",
+        "1700000000540,0.389418,0.389418,0.389418,42.056461,42.056461,42.056461,0,0,4,22222222-2222-4222-8222-222222222222,1700000000540,1700000000538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006450,0.189115,0.189115,0.189115,-49.218832,-49.218832,-49.218832,0,0,595,22222222-2222-4222-8222-222222222222,1700000006450,1700000006448,0",
+        "1700000006460,0.090138,0.090138,0.090138,-47.464043,-47.464043,-47.464043,0,0,596,22222222-2222-4222-8222-222222222222,1700000006460,1700000006458,0",
+        "1700000006470,-0.009739,-0.009739,-0.009739,-44.742247,-44.742247,-44.742247,0,0,597,22222222-2222-4222-8222-222222222222,1700000006470,1700000006468,0",
+        "1700000006480,-0.109519,-0.109519,-0.109519,-41.108895,-41.108895,-41.108895,0,0,598,22222222-2222-4222-8222-222222222222,1700000006480,1700000006478,0",
+        "1700000006490,-0.208205,-0.208205,-0.208205,-36.638012,-36.638012,-36.638012,0,0,599,22222222-2222-4222-8222-222222222222,,,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,schema_version=2,subject=SUBJ_01,operator=OP"
+      ],
+      "row_count": 600
+    },
+    "data/recovery/22222222-2222-4222-8222-222222222222.csv": {
+      "first_rows": [
+        "1700000006500,-0.304811,-0.304811,-0.304811,-31.420685,-31.420685,-31.420685,0,0,600,22222222-2222-4222-8222-222222222222,1700000006500,1700000006498,0",
+        "1700000006510,-0.398370,-0.398370,-0.398370,-25.563209,-25.563209,-25.563209,0,0,601,22222222-2222-4222-8222-222222222222,1700000006510,1700000006508,0",
+        "1700000006520,-0.487950,-0.487950,-0.487950,-19.184922,-19.184922,-19.184922,0,0,602,22222222-2222-4222-8222-222222222222,1700000006520,1700000006518,0",
+        "1700000006530,-0.572654,-0.572654,-0.572654,-12.415772,-12.415772,-12.415772,0,0,603,22222222-2222-4222-8222-222222222222,1700000006530,1700000006528,0",
+        "1700000006540,-0.651636,-0.651636,-0.651636,-5.393669,-5.393669,-5.393669,0,0,604,22222222-2222-4222-8222-222222222222,1700000006540,1700000006538,0"
+      ],
+      "header": "timestamp_ms,acc_x_g,acc_y_g,acc_z_g,gyro_x_degs,gyro_y_degs,gyro_z_degs,label_id,label_name,sequence_number,device_id,acc_ts_ms,gyro_ts_ms,sample_kind",
+      "last_rows": [
+        "1700000006650,-0.971589,-0.971589,-0.971589,49.711632,49.711632,49.711632,0,0,615,22222222-2222-4222-8222-222222222222,1700000006650,1700000006648,0",
+        "1700000006660,-0.943107,-0.943107,-0.943107,49.968664,49.968664,49.968664,0,0,616,22222222-2222-4222-8222-222222222222,1700000006660,1700000006658,0",
+        "1700000006670,-0.905201,-0.905201,-0.905201,49.207661,49.207661,49.207661,0,0,617,22222222-2222-4222-8222-222222222222,1700000006670,1700000006668,0",
+        "1700000006680,-0.858252,-0.858252,-0.858252,47.444126,47.444126,47.444126,0,0,618,22222222-2222-4222-8222-222222222222,1700000006680,1700000006678,0",
+        "1700000006690,-0.802726,-0.802726,-0.802726,44.713989,44.713989,44.713989,0,0,619,22222222-2222-4222-8222-222222222222,1700000006690,1700000006688,0"
+      ],
+      "metadata_lines": [
+        "# session_id=<SID>,role=waist,device_id=22222222-2222-4222-8222-222222222222,subject=SUBJ_01,session_tag=TAG_A,operator=OP,start_epoch_ms=1700000000500,source=local_node,schema_version=2"
+      ],
+      "row_count": 20
+    }
+  },
+  "entries": [
+    "videos/<SID>_cam1_video_sync.webm",
+    "videos/<SID>_cam2_video_sync.webm",
+    "videos/<SID>_cam2_video_sync_part2.webm",
+    "data/<SID>_chest_consolidated.csv",
+    "data/<SID>_chest_sensor_data.csv",
+    "data/<SID>_chest_sensor_data_late.csv",
+    "data/<SID>_chest_timing.json",
+    "data/<SID>_connectivity.json",
+    "data/<SID>_consolidated.csv",
+    "data/<SID>_consolidated_validation.json",
+    "data/<SID>_consolidation.json",
+    "data/<SID>_integrity_report.json",
+    "data/<SID>_late_delivery.json",
+    "data/<SID>_thigh_right_consolidated.csv",
+    "data/<SID>_thigh_right_sensor_data.csv",
+    "data/<SID>_thigh_right_timing.json",
+    "data/<SID>_waist_consolidated.csv",
+    "data/<SID>_waist_sensor_data.csv",
+    "data/<SID>_waist_timing.json",
+    "data/recovery/22222222-2222-4222-8222-222222222222.csv",
+    "data/manifest.json",
+    "cameras.json",
+    "missed_cameras.txt",
+    "video_report.json"
+  ],
+  "json": {
+    "cameras.json": {
+      "camera_events": [
+        {
+          "atMs": 1700000007000,
+          "camId": "cam1",
+          "key": "fake:0",
+          "sessionId": "<SID>",
+          "type": "started"
+        },
+        {
+          "atMs": 1700000007000,
+          "camId": "cam2",
+          "key": "fake:1",
+          "sessionId": "<SID>",
+          "type": "started"
+        },
+        {
+          "atMs": 1700000013500,
+          "camId": "cam1",
+          "key": "fake:0",
+          "sessionId": "<SID>",
+          "type": "stopped"
+        },
+        {
+          "atMs": 1700000007000,
+          "camId": "cam2",
+          "detail": "simulated camera dropout",
+          "key": "fake:1",
+          "sessionId": "<SID>",
+          "type": "track_ended"
+        },
+        {
+          "atMs": 1700000013500,
+          "camId": "cam2",
+          "key": "fake:1",
+          "sessionId": "<SID>",
+          "type": "stopped"
+        }
+      ],
+      "cameras": [
+        {
+          "browser_label": "Fake Camera 0",
+          "cam_id": "cam1",
+          "device_id": "fake:0",
+          "file": "videos/<SID>_cam1_video_sync.webm",
+          "files": [
+            "videos/<SID>_cam1_video_sync.webm"
+          ],
+          "flash_at_ms": 1700000007000,
+          "mime": "video/webm;codecs=vp9",
+          "session_id": "<SID>",
+          "started_at_ms": 1700000007000,
+          "stopped_at_ms": 1700000013500
+        },
+        {
+          "browser_label": "Fake Camera 1",
+          "cam_id": "cam2",
+          "device_id": "fake:1",
+          "file": "videos/<SID>_cam2_video_sync.webm",
+          "files": [
+            "videos/<SID>_cam2_video_sync.webm",
+            "videos/<SID>_cam2_video_sync_part2.webm"
+          ],
+          "flash_at_ms": 1700000007000,
+          "mime": "video/webm;codecs=vp9",
+          "session_id": "<SID>",
+          "started_at_ms": 1700000007000,
+          "stopped_at_ms": 1700000013500
+        }
+      ],
+      "session_id": "<SID>"
+    },
+    "data/<SID>_chest_timing.json": {
+      "csv": "<SID>_chest_consolidated.csv",
+      "device_id": "11111111-1111-4111-8111-111111111111",
+      "first_ts_ms": 1700000000500,
+      "held_pct": 0.9983361064891847,
+      "last_ts_ms": 1700000006500,
+      "note": "Irregularly sampled: timestamp_ms is the authoritative time axis. Do NOT reconstruct time from a fixed rate — rows/row_hz is an average, not a grid, and row counts differ between devices over the same wall-clock window.",
+      "role": "chest",
+      "row_hz": 100.16666666666667,
+      "rows": 601,
+      "session_id": "<SID>",
+      "span_s": 6.0,
+      "true_hz": 99.16666666666667
+    },
+    "data/<SID>_connectivity.json": {
+      "devices": [
+        {
+          "device_id": "11111111-1111-4111-8111-111111111111",
+          "intervals": [],
+          "role": "chest",
+          "telemetry_gaps": [],
+          "total_offline_ms": 0,
+          "total_telemetry_gap_ms": 0
+        },
+        {
+          "device_id": "22222222-2222-4222-8222-222222222222",
+          "intervals": [],
+          "role": "waist",
+          "telemetry_gaps": [],
+          "total_offline_ms": 0,
+          "total_telemetry_gap_ms": 0
+        },
+        {
+          "device_id": "33333333-3333-4333-8333-333333333333",
+          "intervals": [],
+          "role": "thigh_right",
+          "telemetry_gaps": [],
+          "total_offline_ms": 0,
+          "total_telemetry_gap_ms": 0
+        }
+      ],
+      "session_id": "<SID>"
+    },
+    "data/<SID>_consolidated_validation.json": {
+      "roles": [
+        {
+          "path": "<volatile>",
+          "reasons": [
+            "sequence gap 3.22% exceeds fail threshold"
+          ],
+          "role": "chest",
+          "rows": 601,
+          "sequence": {
+            "duplicates": 0,
+            "gaps": [
+              {
+                "duration_ms": 10,
+                "end_ms": 1700000003500,
+                "missing": 20,
+                "next_sequence": 320,
+                "previous_sequence": 299,
+                "start_ms": 1700000003490
+              }
+            ],
+            "largest_gap": 20,
+            "max": 620,
+            "min": 0,
+            "missing": 20,
+            "missing_pct": 3.2206119162640903,
+            "present": 601
+          },
+          "status": "FAIL"
+        },
+        {
+          "path": "<volatile>",
+          "reasons": [],
+          "role": "thigh_right",
+          "rows": 600,
+          "sequence": {
+            "duplicates": 0,
+            "gaps": [],
+            "largest_gap": 0,
+            "max": 599,
+            "min": 0,
+            "missing": 0,
+            "missing_pct": 0.0,
+            "present": 600
+          },
+          "status": "PASS"
+        },
+        {
+          "path": "<volatile>",
+          "reasons": [],
+          "role": "waist",
+          "rows": 620,
+          "sequence": {
+            "duplicates": 0,
+            "gaps": [],
+            "largest_gap": 0,
+            "max": 619,
+            "min": 0,
+            "missing": 0,
+            "missing_pct": 0.0,
+            "present": 620
+          },
+          "status": "PASS"
+        }
+      ],
+      "session_id": "<SID>",
+      "status": "FAIL",
+      "thresholds": {
+        "seq_gap_fail_pct": 1.0,
+        "seq_gap_partial_pct": 0.1
+      },
+      "validated_at_ms": 1700000007000,
+      "validation_scope": "consolidated_per_role"
+    },
+    "data/<SID>_consolidation.json": {
+      "consolidated_at_ms": 1700000007000,
+      "duplicates_dropped": 0,
+      "path": "<volatile>",
+      "per_role": {
+        "chest": {
+          "duplicates_dropped": 0,
+          "path": "<volatile>",
+          "rows": 601,
+          "source_files": [
+            {
+              "label": "main",
+              "path": "<volatile>",
+              "rows": 600
+            },
+            {
+              "label": "late",
+              "path": "<volatile>",
+              "rows": 1
+            }
+          ],
+          "sources": {
+            "late": 1,
+            "main": 600
+          }
+        },
+        "thigh_right": {
+          "duplicates_dropped": 0,
+          "path": "<volatile>",
+          "rows": 600,
+          "source_files": [
+            {
+              "label": "main",
+              "path": "<volatile>",
+              "rows": 600
+            }
+          ],
+          "sources": {
+            "main": 600
+          }
+        },
+        "waist": {
+          "duplicates_dropped": 0,
+          "path": "<volatile>",
+          "rows": 620,
+          "source_files": [
+            {
+              "label": "main",
+              "path": "<volatile>",
+              "rows": 600
+            },
+            {
+              "label": "recovery",
+              "path": "<volatile>",
+              "rows": 20
+            }
+          ],
+          "sources": {
+            "main": 600,
+            "recovery": 20
+          }
+        }
+      },
+      "per_role_files": [
+        "<volatile>",
+        "<volatile>",
+        "<volatile>"
+      ],
+      "rows": 1821,
+      "session_id": "<SID>",
+      "source_files": [
+        {
+          "label": "main",
+          "path": "<volatile>",
+          "rows": 600
+        },
+        {
+          "label": "late",
+          "path": "<volatile>",
+          "rows": 1
+        },
+        {
+          "label": "main",
+          "path": "<volatile>",
+          "rows": 600
+        },
+        {
+          "label": "main",
+          "path": "<volatile>",
+          "rows": 600
+        },
+        {
+          "label": "recovery",
+          "path": "<volatile>",
+          "rows": 20
+        }
+      ],
+      "sources": {
+        "late": 1,
+        "main": 1800,
+        "recovery": 20
+      },
+      "validation": {
+        "roles": [
+          {
+            "path": "<volatile>",
+            "reasons": [
+              "sequence gap 3.22% exceeds fail threshold"
+            ],
+            "role": "chest",
+            "rows": 601,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [
+                {
+                  "duration_ms": 10,
+                  "end_ms": 1700000003500,
+                  "missing": 20,
+                  "next_sequence": 320,
+                  "previous_sequence": 299,
+                  "start_ms": 1700000003490
+                }
+              ],
+              "largest_gap": 20,
+              "max": 620,
+              "min": 0,
+              "missing": 20,
+              "missing_pct": 3.2206119162640903,
+              "present": 601
+            },
+            "status": "FAIL"
+          },
+          {
+            "path": "<volatile>",
+            "reasons": [],
+            "role": "thigh_right",
+            "rows": 600,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 599,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0.0,
+              "present": 600
+            },
+            "status": "PASS"
+          },
+          {
+            "path": "<volatile>",
+            "reasons": [],
+            "role": "waist",
+            "rows": 620,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 619,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0.0,
+              "present": 620
+            },
+            "status": "PASS"
+          }
+        ],
+        "session_id": "<SID>",
+        "status": "FAIL",
+        "thresholds": {
+          "seq_gap_fail_pct": 1.0,
+          "seq_gap_partial_pct": 0.1
+        },
+        "validated_at_ms": 1700000007000,
+        "validation_scope": "consolidated_per_role"
+      }
+    },
+    "data/<SID>_integrity_report.json": {
+      "analysis_ready": false,
+      "analysis_ready_reasons": [
+        "chest: sampling-rate acceptance failed",
+        "chest: 10 ms gap overlaps non-zero label"
+      ],
+      "cross_device_checks": {
+        "all_devices_completed": true,
+        "device_count": 3,
+        "expected_device_count": 3,
+        "max_start_drift_ms": 0,
+        "missing_devices_intervals": [],
+        "role_uniqueness": "pass",
+        "scheduled_start_ms": 1700000000500,
+        "start_drift_ok": true,
+        "start_drift_threshold_ms": 100,
+        "telemetry_gaps": []
+      },
+      "devices": [
+        {
+          "analysis_ready": false,
+          "coverage": {
+            "accepted_gap_ms": 2000,
+            "expected_start_ms": 1700000000500,
+            "first_timestamp_ms": 1700000000500,
+            "last_timestamp_ms": 1700000006500,
+            "leading_gap_ms": 0,
+            "session_end_ms": 1700000006500,
+            "trailing_gap_ms": 0
+          },
+          "csv_path": "<volatile>",
+          "csv_sha256": "7f7721eb33d3b6d019f8669c944a01a752f2d7fc02ef441bd679bf34c45d170d",
+          "csv_write_failures": 0,
+          "device_id": "11111111-1111-4111-8111-111111111111",
+          "first_packet_ts": 1700000000500,
+          "invalid_rows": 0,
+          "label_aware_sequence_gaps": [
+            {
+              "duration_ms": 10,
+              "end_label_id": 3,
+              "end_ms": 1700000003500,
+              "missing": 20,
+              "next_sequence": 320,
+              "nonzero_label_overlap": true,
+              "nonzero_transition": false,
+              "previous_sequence": 299,
+              "start_label_id": 3,
+              "start_ms": 1700000003490,
+              "waived": false,
+              "zero_transition_ms": null
+            }
+          ],
+          "offline_interval_count": 0,
+          "offline_intervals": [],
+          "offline_total_ms": 0,
+          "packets_dropped_no_writer": 0,
+          "packets_received": 600,
+          "reasons": [
+            "sequence gap 3.22% exceeds fail threshold",
+            "1 gap(s) overlap non-zero labels"
+          ],
+          "role": "chest",
+          "row_count": 601,
+          "rows_lost_after_failover": 0,
+          "rows_reordered": 0,
+          "sampling": {
+            "dt_ms": {
+              "max": 10,
+              "mean": 10,
+              "median": 10.0,
+              "min": 10,
+              "non_positive": 0,
+              "p95": 10
+            },
+            "first_timestamp_ms": 1700000000500,
+            "held_row_pct": 0.9983361064891847,
+            "last_timestamp_ms": 1700000006500,
+            "nominal_hz": 100.16666666666667,
+            "reference_hz": 100.16666666666667,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [
+                {
+                  "duration_ms": 10,
+                  "end_ms": 1700000003500,
+                  "missing": 20,
+                  "next_sequence": 320,
+                  "previous_sequence": 299,
+                  "start_ms": 1700000003490
+                }
+              ],
+              "largest_gap": 20,
+              "max": 620,
+              "min": 0,
+              "missing": 20,
+              "missing_pct": 3.2206119162640903,
+              "present": 601
+            },
+            "true_sensor_hz": 99.16666666666667
+          },
+          "status": "FAIL",
+          "telemetry_gap_count": 0,
+          "telemetry_gap_total_ms": 0,
+          "telemetry_gaps": []
+        },
+        {
+          "analysis_ready": true,
+          "coverage": {
+            "accepted_gap_ms": 2000,
+            "expected_start_ms": 1700000000500,
+            "first_timestamp_ms": 1700000000500,
+            "last_timestamp_ms": 1700000006690,
+            "leading_gap_ms": 0,
+            "session_end_ms": 1700000006500,
+            "trailing_gap_ms": 0
+          },
+          "csv_path": "<volatile>",
+          "csv_sha256": "0822ff058143a532092006d48fb26bdde3da786ccacd4ddc7764b7e6d38bf151",
+          "csv_write_failures": 0,
+          "device_id": "22222222-2222-4222-8222-222222222222",
+          "first_packet_ts": 1700000000500,
+          "invalid_rows": 0,
+          "label_aware_sequence_gaps": [],
+          "offline_interval_count": 0,
+          "offline_intervals": [],
+          "offline_total_ms": 0,
+          "packets_dropped_no_writer": 0,
+          "packets_received": 600,
+          "reasons": [],
+          "role": "waist",
+          "row_count": 620,
+          "rows_lost_after_failover": 0,
+          "rows_reordered": 0,
+          "sampling": {
+            "dt_ms": {
+              "max": 10,
+              "mean": 10,
+              "median": 10,
+              "min": 10,
+              "non_positive": 0,
+              "p95": 10
+            },
+            "first_timestamp_ms": 1700000000500,
+            "held_row_pct": 0.967741935483871,
+            "last_timestamp_ms": 1700000006690,
+            "nominal_hz": 100.16155088852987,
+            "reference_hz": 100.16155088852987,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 619,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0.0,
+              "present": 620
+            },
+            "true_sensor_hz": 99.19224555735056
+          },
+          "status": "PASS",
+          "telemetry_gap_count": 0,
+          "telemetry_gap_total_ms": 0,
+          "telemetry_gaps": []
+        },
+        {
+          "analysis_ready": true,
+          "coverage": {
+            "accepted_gap_ms": 2000,
+            "expected_start_ms": 1700000000500,
+            "first_timestamp_ms": 1700000000500,
+            "last_timestamp_ms": 1700000006490,
+            "leading_gap_ms": 0,
+            "session_end_ms": 1700000006500,
+            "trailing_gap_ms": 10
+          },
+          "csv_path": "<volatile>",
+          "csv_sha256": "82851ebef4063cb032b6008d167c7a8613e68ddc6336e8bcf0bf7203378d5d65",
+          "csv_write_failures": 0,
+          "device_id": "33333333-3333-4333-8333-333333333333",
+          "first_packet_ts": 1700000000500,
+          "invalid_rows": 0,
+          "label_aware_sequence_gaps": [],
+          "offline_interval_count": 0,
+          "offline_intervals": [],
+          "offline_total_ms": 0,
+          "packets_dropped_no_writer": 0,
+          "packets_received": 600,
+          "reasons": [],
+          "role": "thigh_right",
+          "row_count": 600,
+          "rows_lost_after_failover": 0,
+          "rows_reordered": 0,
+          "sampling": {
+            "dt_ms": {
+              "max": 10,
+              "mean": 10,
+              "median": 10,
+              "min": 10,
+              "non_positive": 0,
+              "p95": 10
+            },
+            "first_timestamp_ms": 1700000000500,
+            "held_row_pct": 1.0,
+            "last_timestamp_ms": 1700000006490,
+            "nominal_hz": 100.1669449081803,
+            "reference_hz": 100.1669449081803,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 599,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0.0,
+              "present": 600
+            },
+            "true_sensor_hz": 99.1652754590985
+          },
+          "status": "PASS",
+          "telemetry_gap_count": 0,
+          "telemetry_gap_total_ms": 0,
+          "telemetry_gaps": []
+        }
+      ],
+      "label_timeline": [
+        {
+          "label_id": 0,
+          "label_name": "0",
+          "timestamp_ms": 1700000000000
+        },
+        {
+          "label_id": 3,
+          "label_name": "walk",
+          "timestamp_ms": 1700000002500
+        },
+        {
+          "label_id": 7,
+          "label_name": "run",
+          "timestamp_ms": 1700000004500
+        },
+        {
+          "label_id": 0,
+          "label_name": "0",
+          "timestamp_ms": 1700000005700
+        }
+      ],
+      "session_end_ms": 1700000006500,
+      "session_id": "<SID>",
+      "session_start_ms": 1700000000000,
+      "status": "FAIL",
+      "validated_at_ms": 1700000007000,
+      "validation_scope": "consolidated_sources"
+    },
+    "data/<SID>_late_delivery.json": {
+      "devices": {
+        "11111111-1111-4111-8111-111111111111": {
+          "path": "<volatile>",
+          "reordered": 0,
+          "rows": 1,
+          "rows_appended": 1,
+          "sha256": "add114c70195a97bb0ff5f836075009a265efc0ab4ed12bc8418a4e83a91decb"
+        }
+      },
+      "session_id": "<SID>"
+    },
+    "data/<SID>_thigh_right_timing.json": {
+      "csv": "<SID>_thigh_right_consolidated.csv",
+      "device_id": "33333333-3333-4333-8333-333333333333",
+      "first_ts_ms": 1700000000500,
+      "held_pct": 1.0,
+      "last_ts_ms": 1700000006490,
+      "note": "Irregularly sampled: timestamp_ms is the authoritative time axis. Do NOT reconstruct time from a fixed rate — rows/row_hz is an average, not a grid, and row counts differ between devices over the same wall-clock window.",
+      "role": "thigh_right",
+      "row_hz": 100.1669449081803,
+      "rows": 600,
+      "session_id": "<SID>",
+      "span_s": 5.99,
+      "true_hz": 99.1652754590985
+    },
+    "data/<SID>_waist_timing.json": {
+      "csv": "<SID>_waist_consolidated.csv",
+      "device_id": "22222222-2222-4222-8222-222222222222",
+      "first_ts_ms": 1700000000500,
+      "held_pct": 0.967741935483871,
+      "last_ts_ms": 1700000006690,
+      "note": "Irregularly sampled: timestamp_ms is the authoritative time axis. Do NOT reconstruct time from a fixed rate — rows/row_hz is an average, not a grid, and row counts differ between devices over the same wall-clock window.",
+      "role": "waist",
+      "row_hz": 100.16155088852987,
+      "rows": 620,
+      "session_id": "<SID>",
+      "span_s": 6.19,
+      "true_hz": 99.19224555735056
+    },
+    "data/manifest.json": {
+      "analysis_ready_imu": false,
+      "connectivity": {
+        "devices": [
+          {
+            "device_id": "11111111-1111-4111-8111-111111111111",
+            "intervals": [],
+            "role": "chest",
+            "telemetry_gaps": [],
+            "total_offline_ms": 0,
+            "total_telemetry_gap_ms": 0
+          },
+          {
+            "device_id": "22222222-2222-4222-8222-222222222222",
+            "intervals": [],
+            "role": "waist",
+            "telemetry_gaps": [],
+            "total_offline_ms": 0,
+            "total_telemetry_gap_ms": 0
+          },
+          {
+            "device_id": "33333333-3333-4333-8333-333333333333",
+            "intervals": [],
+            "role": "thigh_right",
+            "telemetry_gaps": [],
+            "total_offline_ms": 0,
+            "total_telemetry_gap_ms": 0
+          }
+        ],
+        "session_id": "<SID>"
+      },
+      "consolidated": true,
+      "data_rows": 1821,
+      "exportable": true,
+      "files": [
+        {
+          "folder": "<volatile>",
+          "kind": "other",
+          "name": "<SID>_bundle.zip",
+          "path": "<volatile>",
+          "size": "<volatile>"
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "video",
+          "name": "<SID>_cam1_video_sync.webm",
+          "path": "<volatile>",
+          "size": 8
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "video",
+          "name": "<SID>_cam2_video_sync.webm",
+          "path": "<volatile>",
+          "size": 8
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "other",
+          "name": "<SID>_cam2_video_sync_part2.webm",
+          "path": "<volatile>",
+          "size": 8
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "cameras",
+          "name": "<SID>_cameras.json",
+          "path": "<volatile>",
+          "size": 721
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidated",
+          "name": "<SID>_chest_consolidated.csv",
+          "path": "<volatile>",
+          "size": 89889
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "main",
+          "name": "<SID>_chest_sensor_data.csv",
+          "path": "<volatile>",
+          "size": 89763
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "late",
+          "name": "<SID>_chest_sensor_data_late.csv",
+          "path": "<volatile>",
+          "size": 392
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "timing",
+          "name": "<SID>_chest_timing.json",
+          "path": "<volatile>",
+          "size": 589
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "connectivity",
+          "name": "<SID>_connectivity.json",
+          "path": "<volatile>",
+          "size": 687
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidated",
+          "name": "<SID>_consolidated.csv",
+          "path": "<volatile>",
+          "size": 271953
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidated_validation",
+          "name": "<SID>_consolidated_validation.json",
+          "path": "<volatile>",
+          "size": 1953
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidation",
+          "name": "<SID>_consolidation.json",
+          "path": "<volatile>",
+          "size": 6095
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "integrity",
+          "name": "<SID>_integrity_report.json",
+          "path": "<volatile>",
+          "size": 7582
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "late_summary",
+          "name": "<SID>_late_delivery.json",
+          "path": "<volatile>",
+          "size": 412
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "other",
+          "name": "<SID>_sampling.json",
+          "path": "<volatile>",
+          "size": 3582
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidated",
+          "name": "<SID>_thigh_right_consolidated.csv",
+          "path": "<volatile>",
+          "size": 89737
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "main",
+          "name": "<SID>_thigh_right_sensor_data.csv",
+          "path": "<volatile>",
+          "size": 89763
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "timing",
+          "name": "<SID>_thigh_right_timing.json",
+          "path": "<volatile>",
+          "size": 585
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "consolidated",
+          "name": "<SID>_waist_consolidated.csv",
+          "path": "<volatile>",
+          "size": 92723
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "main",
+          "name": "<SID>_waist_sensor_data.csv",
+          "path": "<volatile>",
+          "size": 89763
+        },
+        {
+          "folder": "<volatile>",
+          "kind": "timing",
+          "name": "<SID>_waist_timing.json",
+          "path": "<volatile>",
+          "size": 589
+        }
+      ],
+      "found": true,
+      "integrity": {
+        "analysis_ready": false,
+        "analysis_ready_reasons": [
+          "chest: sampling-rate acceptance failed",
+          "chest: 10 ms gap overlaps non-zero label"
+        ],
+        "cross_device_checks": {
+          "all_devices_completed": true,
+          "device_count": 3,
+          "expected_device_count": 3,
+          "max_start_drift_ms": 0,
+          "missing_devices_intervals": [],
+          "role_uniqueness": "pass",
+          "scheduled_start_ms": 1700000000500,
+          "start_drift_ok": true,
+          "start_drift_threshold_ms": 100,
+          "telemetry_gaps": []
+        },
+        "devices": [
+          {
+            "analysis_ready": false,
+            "coverage": {
+              "accepted_gap_ms": 2000,
+              "expected_start_ms": 1700000000500,
+              "first_timestamp_ms": 1700000000500,
+              "last_timestamp_ms": 1700000006500,
+              "leading_gap_ms": 0,
+              "session_end_ms": 1700000006500,
+              "trailing_gap_ms": 0
+            },
+            "csv_path": "<volatile>",
+            "csv_sha256": "7f7721eb33d3b6d019f8669c944a01a752f2d7fc02ef441bd679bf34c45d170d",
+            "csv_write_failures": 0,
+            "device_id": "11111111-1111-4111-8111-111111111111",
+            "first_packet_ts": 1700000000500,
+            "invalid_rows": 0,
+            "label_aware_sequence_gaps": [
+              {
+                "duration_ms": 10,
+                "end_label_id": 3,
+                "end_ms": 1700000003500,
+                "missing": 20,
+                "next_sequence": 320,
+                "nonzero_label_overlap": true,
+                "nonzero_transition": false,
+                "previous_sequence": 299,
+                "start_label_id": 3,
+                "start_ms": 1700000003490,
+                "waived": false,
+                "zero_transition_ms": null
+              }
+            ],
+            "offline_interval_count": 0,
+            "offline_intervals": [],
+            "offline_total_ms": 0,
+            "packets_dropped_no_writer": 0,
+            "packets_received": 600,
+            "reasons": [
+              "sequence gap 3.22% exceeds fail threshold",
+              "1 gap(s) overlap non-zero labels"
+            ],
+            "role": "chest",
+            "row_count": 601,
+            "rows_lost_after_failover": 0,
+            "rows_reordered": 0,
+            "sampling": {
+              "dt_ms": {
+                "max": 10,
+                "mean": 10,
+                "median": 10,
+                "min": 10,
+                "non_positive": 0,
+                "p95": 10
+              },
+              "first_timestamp_ms": 1700000000500,
+              "held_row_pct": 0.9983361064891847,
+              "last_timestamp_ms": 1700000006500,
+              "nominal_hz": 100.16666666666667,
+              "reference_hz": 100.16666666666667,
+              "sequence": {
+                "duplicates": 0,
+                "gaps": [
+                  {
+                    "duration_ms": 10,
+                    "end_ms": 1700000003500,
+                    "missing": 20,
+                    "next_sequence": 320,
+                    "previous_sequence": 299,
+                    "start_ms": 1700000003490
+                  }
+                ],
+                "largest_gap": 20,
+                "max": 620,
+                "min": 0,
+                "missing": 20,
+                "missing_pct": 3.2206119162640903,
+                "present": 601
+              },
+              "true_sensor_hz": 99.16666666666667
+            },
+            "status": "FAIL",
+            "telemetry_gap_count": 0,
+            "telemetry_gap_total_ms": 0,
+            "telemetry_gaps": []
+          },
+          {
+            "analysis_ready": true,
+            "coverage": {
+              "accepted_gap_ms": 2000,
+              "expected_start_ms": 1700000000500,
+              "first_timestamp_ms": 1700000000500,
+              "last_timestamp_ms": 1700000006690,
+              "leading_gap_ms": 0,
+              "session_end_ms": 1700000006500,
+              "trailing_gap_ms": 0
+            },
+            "csv_path": "<volatile>",
+            "csv_sha256": "0822ff058143a532092006d48fb26bdde3da786ccacd4ddc7764b7e6d38bf151",
+            "csv_write_failures": 0,
+            "device_id": "22222222-2222-4222-8222-222222222222",
+            "first_packet_ts": 1700000000500,
+            "invalid_rows": 0,
+            "label_aware_sequence_gaps": [],
+            "offline_interval_count": 0,
+            "offline_intervals": [],
+            "offline_total_ms": 0,
+            "packets_dropped_no_writer": 0,
+            "packets_received": 600,
+            "reasons": [],
+            "role": "waist",
+            "row_count": 620,
+            "rows_lost_after_failover": 0,
+            "rows_reordered": 0,
+            "sampling": {
+              "dt_ms": {
+                "max": 10,
+                "mean": 10,
+                "median": 10,
+                "min": 10,
+                "non_positive": 0,
+                "p95": 10
+              },
+              "first_timestamp_ms": 1700000000500,
+              "held_row_pct": 0.967741935483871,
+              "last_timestamp_ms": 1700000006690,
+              "nominal_hz": 100.16155088852987,
+              "reference_hz": 100.16155088852987,
+              "sequence": {
+                "duplicates": 0,
+                "gaps": [],
+                "largest_gap": 0,
+                "max": 619,
+                "min": 0,
+                "missing": 0,
+                "missing_pct": 0,
+                "present": 620
+              },
+              "true_sensor_hz": 99.19224555735056
+            },
+            "status": "PASS",
+            "telemetry_gap_count": 0,
+            "telemetry_gap_total_ms": 0,
+            "telemetry_gaps": []
+          },
+          {
+            "analysis_ready": true,
+            "coverage": {
+              "accepted_gap_ms": 2000,
+              "expected_start_ms": 1700000000500,
+              "first_timestamp_ms": 1700000000500,
+              "last_timestamp_ms": 1700000006490,
+              "leading_gap_ms": 0,
+              "session_end_ms": 1700000006500,
+              "trailing_gap_ms": 10
+            },
+            "csv_path": "<volatile>",
+            "csv_sha256": "82851ebef4063cb032b6008d167c7a8613e68ddc6336e8bcf0bf7203378d5d65",
+            "csv_write_failures": 0,
+            "device_id": "33333333-3333-4333-8333-333333333333",
+            "first_packet_ts": 1700000000500,
+            "invalid_rows": 0,
+            "label_aware_sequence_gaps": [],
+            "offline_interval_count": 0,
+            "offline_intervals": [],
+            "offline_total_ms": 0,
+            "packets_dropped_no_writer": 0,
+            "packets_received": 600,
+            "reasons": [],
+            "role": "thigh_right",
+            "row_count": 600,
+            "rows_lost_after_failover": 0,
+            "rows_reordered": 0,
+            "sampling": {
+              "dt_ms": {
+                "max": 10,
+                "mean": 10,
+                "median": 10,
+                "min": 10,
+                "non_positive": 0,
+                "p95": 10
+              },
+              "first_timestamp_ms": 1700000000500,
+              "held_row_pct": 1,
+              "last_timestamp_ms": 1700000006490,
+              "nominal_hz": 100.1669449081803,
+              "reference_hz": 100.1669449081803,
+              "sequence": {
+                "duplicates": 0,
+                "gaps": [],
+                "largest_gap": 0,
+                "max": 599,
+                "min": 0,
+                "missing": 0,
+                "missing_pct": 0,
+                "present": 600
+              },
+              "true_sensor_hz": 99.1652754590985
+            },
+            "status": "PASS",
+            "telemetry_gap_count": 0,
+            "telemetry_gap_total_ms": 0,
+            "telemetry_gaps": []
+          }
+        ],
+        "label_timeline": [
+          {
+            "label_id": 0,
+            "label_name": "0",
+            "timestamp_ms": 1700000000000
+          },
+          {
+            "label_id": 3,
+            "label_name": "walk",
+            "timestamp_ms": 1700000002500
+          },
+          {
+            "label_id": 7,
+            "label_name": "run",
+            "timestamp_ms": 1700000004500
+          },
+          {
+            "label_id": 0,
+            "label_name": "0",
+            "timestamp_ms": 1700000005700
+          }
+        ],
+        "session_end_ms": 1700000006500,
+        "session_id": "<SID>",
+        "session_start_ms": 1700000000000,
+        "status": "FAIL",
+        "validated_at_ms": 1700000007000,
+        "validation_scope": "consolidated_sources"
+      },
+      "labels_used": [
+        {
+          "label_id": 0,
+          "label_name": "0",
+          "row_count": 861
+        },
+        {
+          "label_id": 3,
+          "label_name": "walk",
+          "row_count": 600
+        },
+        {
+          "label_id": 7,
+          "label_name": "run",
+          "row_count": 360
+        }
+      ],
+      "late_pending": false,
+      "late_summary": {
+        "devices": {
+          "11111111-1111-4111-8111-111111111111": {
+            "path": "<volatile>",
+            "reordered": 0,
+            "rows": 1,
+            "rows_appended": 1,
+            "sha256": "add114c70195a97bb0ff5f836075009a265efc0ab4ed12bc8418a4e83a91decb"
+          }
+        },
+        "session_id": "<SID>"
+      },
+      "ledger": {
+        "devices": [
+          {
+            "app_version": "2.3.0",
+            "device_id": "11111111-1111-4111-8111-111111111111",
+            "first_packet_ts": 1700000000500,
+            "model": "Pixel 7",
+            "offline_intervals": [],
+            "packets": 600,
+            "role": "chest",
+            "substate": "FINALIZED"
+          },
+          {
+            "app_version": "2.3.0",
+            "device_id": "22222222-2222-4222-8222-222222222222",
+            "first_packet_ts": 1700000000500,
+            "model": "Pixel 7",
+            "offline_intervals": [],
+            "packets": 600,
+            "role": "waist",
+            "substate": "FINALIZED"
+          },
+          {
+            "app_version": "2.3.0",
+            "device_id": "33333333-3333-4333-8333-333333333333",
+            "first_packet_ts": 1700000000500,
+            "model": "Pixel 7",
+            "offline_intervals": [],
+            "packets": 600,
+            "role": "thigh_right",
+            "substate": "FINALIZED"
+          }
+        ],
+        "file_results": {
+          "11111111-1111-4111-8111-111111111111": {
+            "path": "<volatile>",
+            "reordered": 0,
+            "rows": 601,
+            "sha256": "7f7721eb33d3b6d019f8669c944a01a752f2d7fc02ef441bd679bf34c45d170d"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "path": "<volatile>",
+            "reordered": 0,
+            "rows": 620,
+            "sha256": "0822ff058143a532092006d48fb26bdde3da786ccacd4ddc7764b7e6d38bf151"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "path": "<volatile>",
+            "reordered": 0,
+            "rows": 600,
+            "sha256": "82851ebef4063cb032b6008d167c7a8613e68ddc6336e8bcf0bf7203378d5d65"
+          }
+        },
+        "finalize": {
+          "failed": [],
+          "finished_ms": 0,
+          "session_id": "<SID>",
+          "started_ms": 1700000006500,
+          "steps": [
+            {
+              "detail": "",
+              "ended_ms": 1700000006500,
+              "started_ms": 1700000006500,
+              "state": "done",
+              "step": "close_writers"
+            },
+            {
+              "detail": "",
+              "ended_ms": 1700000006500,
+              "started_ms": 1700000006500,
+              "state": "done",
+              "step": "validate"
+            },
+            {
+              "detail": "",
+              "ended_ms": 1700000006500,
+              "started_ms": 1700000006500,
+              "state": "done",
+              "step": "bundle"
+            }
+          ]
+        },
+        "finalized_at_ms": 1700000006500,
+        "integrity_report": {
+          "analysis_ready": false,
+          "analysis_ready_reasons": [
+            "chest: sampling-rate acceptance failed",
+            "chest: 10 ms gap overlaps non-zero label"
+          ],
+          "cross_device_checks": {
+            "all_devices_completed": true,
+            "device_count": 3,
+            "expected_device_count": 3,
+            "max_start_drift_ms": 0,
+            "missing_devices_intervals": [],
+            "role_uniqueness": "pass",
+            "scheduled_start_ms": 1700000000500,
+            "start_drift_ok": true,
+            "start_drift_threshold_ms": 100,
+            "telemetry_gaps": []
+          },
+          "devices": [
+            {
+              "analysis_ready": false,
+              "coverage": {
+                "accepted_gap_ms": 2000,
+                "expected_start_ms": 1700000000500,
+                "first_timestamp_ms": 1700000000500,
+                "last_timestamp_ms": 1700000006500,
+                "leading_gap_ms": 0,
+                "session_end_ms": 1700000006500,
+                "trailing_gap_ms": 0
+              },
+              "csv_path": "<volatile>",
+              "csv_sha256": "7f7721eb33d3b6d019f8669c944a01a752f2d7fc02ef441bd679bf34c45d170d",
+              "csv_write_failures": 0,
+              "device_id": "11111111-1111-4111-8111-111111111111",
+              "first_packet_ts": 1700000000500,
+              "invalid_rows": 0,
+              "label_aware_sequence_gaps": [
+                {
+                  "duration_ms": 10,
+                  "end_label_id": 3,
+                  "end_ms": 1700000003500,
+                  "missing": 20,
+                  "next_sequence": 320,
+                  "nonzero_label_overlap": true,
+                  "nonzero_transition": false,
+                  "previous_sequence": 299,
+                  "start_label_id": 3,
+                  "start_ms": 1700000003490,
+                  "waived": false,
+                  "zero_transition_ms": null
+                }
+              ],
+              "offline_interval_count": 0,
+              "offline_intervals": [],
+              "offline_total_ms": 0,
+              "packets_dropped_no_writer": 0,
+              "packets_received": 600,
+              "reasons": [
+                "sequence gap 3.22% exceeds fail threshold",
+                "1 gap(s) overlap non-zero labels"
+              ],
+              "role": "chest",
+              "row_count": 601,
+              "rows_lost_after_failover": 0,
+              "rows_reordered": 0,
+              "sampling": {
+                "dt_ms": {
+                  "max": 10,
+                  "mean": 10,
+                  "median": 10,
+                  "min": 10,
+                  "non_positive": 0,
+                  "p95": 10
+                },
+                "first_timestamp_ms": 1700000000500,
+                "held_row_pct": 0.9983361064891847,
+                "last_timestamp_ms": 1700000006500,
+                "nominal_hz": 100.16666666666667,
+                "reference_hz": 100.16666666666667,
+                "sequence": {
+                  "duplicates": 0,
+                  "gaps": [
+                    {
+                      "duration_ms": 10,
+                      "end_ms": 1700000003500,
+                      "missing": 20,
+                      "next_sequence": 320,
+                      "previous_sequence": 299,
+                      "start_ms": 1700000003490
+                    }
+                  ],
+                  "largest_gap": 20,
+                  "max": 620,
+                  "min": 0,
+                  "missing": 20,
+                  "missing_pct": 3.2206119162640903,
+                  "present": 601
+                },
+                "true_sensor_hz": 99.16666666666667
+              },
+              "status": "FAIL",
+              "telemetry_gap_count": 0,
+              "telemetry_gap_total_ms": 0,
+              "telemetry_gaps": []
+            },
+            {
+              "analysis_ready": true,
+              "coverage": {
+                "accepted_gap_ms": 2000,
+                "expected_start_ms": 1700000000500,
+                "first_timestamp_ms": 1700000000500,
+                "last_timestamp_ms": 1700000006690,
+                "leading_gap_ms": 0,
+                "session_end_ms": 1700000006500,
+                "trailing_gap_ms": 0
+              },
+              "csv_path": "<volatile>",
+              "csv_sha256": "0822ff058143a532092006d48fb26bdde3da786ccacd4ddc7764b7e6d38bf151",
+              "csv_write_failures": 0,
+              "device_id": "22222222-2222-4222-8222-222222222222",
+              "first_packet_ts": 1700000000500,
+              "invalid_rows": 0,
+              "label_aware_sequence_gaps": [],
+              "offline_interval_count": 0,
+              "offline_intervals": [],
+              "offline_total_ms": 0,
+              "packets_dropped_no_writer": 0,
+              "packets_received": 600,
+              "reasons": [],
+              "role": "waist",
+              "row_count": 620,
+              "rows_lost_after_failover": 0,
+              "rows_reordered": 0,
+              "sampling": {
+                "dt_ms": {
+                  "max": 10,
+                  "mean": 10,
+                  "median": 10,
+                  "min": 10,
+                  "non_positive": 0,
+                  "p95": 10
+                },
+                "first_timestamp_ms": 1700000000500,
+                "held_row_pct": 0.967741935483871,
+                "last_timestamp_ms": 1700000006690,
+                "nominal_hz": 100.16155088852987,
+                "reference_hz": 100.16155088852987,
+                "sequence": {
+                  "duplicates": 0,
+                  "gaps": [],
+                  "largest_gap": 0,
+                  "max": 619,
+                  "min": 0,
+                  "missing": 0,
+                  "missing_pct": 0,
+                  "present": 620
+                },
+                "true_sensor_hz": 99.19224555735056
+              },
+              "status": "PASS",
+              "telemetry_gap_count": 0,
+              "telemetry_gap_total_ms": 0,
+              "telemetry_gaps": []
+            },
+            {
+              "analysis_ready": true,
+              "coverage": {
+                "accepted_gap_ms": 2000,
+                "expected_start_ms": 1700000000500,
+                "first_timestamp_ms": 1700000000500,
+                "last_timestamp_ms": 1700000006490,
+                "leading_gap_ms": 0,
+                "session_end_ms": 1700000006500,
+                "trailing_gap_ms": 10
+              },
+              "csv_path": "<volatile>",
+              "csv_sha256": "82851ebef4063cb032b6008d167c7a8613e68ddc6336e8bcf0bf7203378d5d65",
+              "csv_write_failures": 0,
+              "device_id": "33333333-3333-4333-8333-333333333333",
+              "first_packet_ts": 1700000000500,
+              "invalid_rows": 0,
+              "label_aware_sequence_gaps": [],
+              "offline_interval_count": 0,
+              "offline_intervals": [],
+              "offline_total_ms": 0,
+              "packets_dropped_no_writer": 0,
+              "packets_received": 600,
+              "reasons": [],
+              "role": "thigh_right",
+              "row_count": 600,
+              "rows_lost_after_failover": 0,
+              "rows_reordered": 0,
+              "sampling": {
+                "dt_ms": {
+                  "max": 10,
+                  "mean": 10,
+                  "median": 10,
+                  "min": 10,
+                  "non_positive": 0,
+                  "p95": 10
+                },
+                "first_timestamp_ms": 1700000000500,
+                "held_row_pct": 1,
+                "last_timestamp_ms": 1700000006490,
+                "nominal_hz": 100.1669449081803,
+                "reference_hz": 100.1669449081803,
+                "sequence": {
+                  "duplicates": 0,
+                  "gaps": [],
+                  "largest_gap": 0,
+                  "max": 599,
+                  "min": 0,
+                  "missing": 0,
+                  "missing_pct": 0,
+                  "present": 600
+                },
+                "true_sensor_hz": 99.1652754590985
+              },
+              "status": "PASS",
+              "telemetry_gap_count": 0,
+              "telemetry_gap_total_ms": 0,
+              "telemetry_gaps": []
+            }
+          ],
+          "label_timeline": [
+            {
+              "label_id": 0,
+              "label_name": "0",
+              "timestamp_ms": 1700000000000
+            },
+            {
+              "label_id": 3,
+              "label_name": "walk",
+              "timestamp_ms": 1700000002500
+            },
+            {
+              "label_id": 7,
+              "label_name": "run",
+              "timestamp_ms": 1700000004500
+            },
+            {
+              "label_id": 0,
+              "label_name": "0",
+              "timestamp_ms": 1700000005700
+            }
+          ],
+          "session_end_ms": 1700000006500,
+          "session_id": "<SID>",
+          "session_start_ms": 1700000000000,
+          "status": "FAIL",
+          "validated_at_ms": 1700000007000,
+          "validation_scope": "consolidated_sources"
+        },
+        "label_timeline": [
+          {
+            "label_id": 0,
+            "label_name": "0",
+            "timestamp_ms": 1700000000000
+          },
+          {
+            "label_id": 3,
+            "label_name": "walk",
+            "timestamp_ms": 1700000002500
+          },
+          {
+            "label_id": 7,
+            "label_name": "run",
+            "timestamp_ms": 1700000004500
+          },
+          {
+            "label_id": 0,
+            "label_name": "0",
+            "timestamp_ms": 1700000005700
+          }
+        ],
+        "operator": "OP",
+        "preflight_failed": [],
+        "recording_started_ms": 1700000000000,
+        "revalidated_after_consolidation_ms": 1700000007000,
+        "scheduled_start_ms": 1700000000500,
+        "session_id": "<SID>",
+        "session_tag": "TAG_A",
+        "startup_in_progress": false,
+        "state": "IDLE",
+        "stop_reason": "operator_stop",
+        "subject_name": "SUBJ_01",
+        "terminal": true,
+        "updated_at_ms": 1700000006500
+      },
+      "lifecycle_state": "IDLE",
+      "operator": "OP",
+      "per_roles": [
+        "chest",
+        "thigh_right",
+        "waist"
+      ],
+      "reasons": [
+        "final consolidated validation is 'FAIL'",
+        "integrity report is 'FAIL'"
+      ],
+      "recovery": [
+        {
+          "complete": true,
+          "csv_exists": true,
+          "csv_path": "<volatile>",
+          "csv_size": 3333,
+          "device_id": "22222222-2222-4222-8222-222222222222",
+          "done": false,
+          "operator": "OP",
+          "received_bytes": 3333,
+          "role": "waist",
+          "session_id": "<SID>",
+          "session_tag": "TAG_A",
+          "sha256": "f8d039b1b625ec6648e66eb6421131c0f798185130bcc2b8cec0689ee6cbe955",
+          "sha256_verified": true,
+          "start_epoch_ms": 1700000007000,
+          "state": "verified",
+          "subject": "SUBJ_01",
+          "total_bytes": 3333,
+          "updated_at_ms": 1700000007000,
+          "verified": true
+        }
+      ],
+      "recovery_pending": false,
+      "session_id": "<SID>",
+      "session_tag": "TAG_A",
+      "status": "FAIL",
+      "subject": "SUBJ_01",
+      "terminal": true,
+      "transfers_in_progress": [],
+      "uploads_in_progress": false,
+      "validation": {
+        "roles": [
+          {
+            "path": "<volatile>",
+            "reasons": [
+              "sequence gap 3.22% exceeds fail threshold"
+            ],
+            "role": "chest",
+            "rows": 601,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [
+                {
+                  "duration_ms": 10,
+                  "end_ms": 1700000003500,
+                  "missing": 20,
+                  "next_sequence": 320,
+                  "previous_sequence": 299,
+                  "start_ms": 1700000003490
+                }
+              ],
+              "largest_gap": 20,
+              "max": 620,
+              "min": 0,
+              "missing": 20,
+              "missing_pct": 3.2206119162640903,
+              "present": 601
+            },
+            "status": "FAIL"
+          },
+          {
+            "path": "<volatile>",
+            "reasons": [],
+            "role": "thigh_right",
+            "rows": 600,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 599,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0,
+              "present": 600
+            },
+            "status": "PASS"
+          },
+          {
+            "path": "<volatile>",
+            "reasons": [],
+            "role": "waist",
+            "rows": 620,
+            "sequence": {
+              "duplicates": 0,
+              "gaps": [],
+              "largest_gap": 0,
+              "max": 619,
+              "min": 0,
+              "missing": 0,
+              "missing_pct": 0,
+              "present": 620
+            },
+            "status": "PASS"
+          }
+        ],
+        "session_id": "<SID>",
+        "status": "FAIL",
+        "thresholds": {
+          "seq_gap_fail_pct": 1,
+          "seq_gap_partial_pct": 0.1
+        },
+        "validated_at_ms": 1700000007000,
+        "validation_scope": "consolidated_per_role"
+      },
+      "whole": false
+    },
+    "video_report.json": {
+      "healthy": true,
+      "session_id": "<SID>",
+      "videos": [
+        {
+          "bytesWritten": 8,
+          "camId": "cam1",
+          "durationMs": 6500,
+          "ebmlHeaders": 1,
+          "ok": true,
+          "path": "videos/<SID>_cam1_video_sync.webm"
+        },
+        {
+          "bytesWritten": 8,
+          "camId": "cam2",
+          "durationMs": 6500,
+          "ebmlHeaders": 1,
+          "ok": true,
+          "path": "videos/<SID>_cam2_video_sync.webm"
+        },
+        {
+          "bytesWritten": 8,
+          "camId": "cam2",
+          "durationMs": 6500,
+          "ebmlHeaders": 1,
+          "ok": true,
+          "path": "videos/<SID>_cam2_video_sync_part2.webm"
+        }
+      ]
+    }
+  }
+}
