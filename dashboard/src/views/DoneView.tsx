@@ -172,14 +172,18 @@ export function DoneView({ sid, onNewSession }: { sid: string; onNewSession?: ()
           </ol>
         </PanelBoundary>
 
-        <PanelBoundary name="Consolidation" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
-          <ConsolidationRow
-            consolidation={detail?.consolidation ?? null}
-            step={steps.find((s) => s.name === 'consolidate') ?? null}
-            busy={consolidating}
-            onConsolidate={consolidateNow}
-          />
-        </PanelBoundary>
+        {/* Before the record loads there is nothing to say; flashing "not available" on
+            every Done open would read as a fault. */}
+        {detail && (
+          <PanelBoundary name="Consolidation" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+            <ConsolidationRow
+              consolidation={detail.consolidation ?? null}
+              step={steps.find((s) => s.name === 'consolidate') ?? null}
+              busy={consolidating}
+              onConsolidate={consolidateNow}
+            />
+          </PanelBoundary>
+        )}
 
         <PanelBoundary name="Integrity" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
           <IntegritySection detail={detail} verdict={verdict} />
