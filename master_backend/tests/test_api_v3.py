@@ -601,3 +601,15 @@ def test_calibration_watch_streams_drift_and_stops_once_nobody_watches(api, monk
         calls = len(seen)
         time.sleep(0.2)
         assert len(seen) == calls, "compare() still being called after the loop exited"
+
+
+def test_static_catch_all_does_not_shadow_backend_routes():
+    """Every GET route defined on the app must win over the dashboard's SPA catch-all."""
+    from fastapi.routing import APIRoute
+    from master_backend.app.main import app
+
+    routes = [r for r in app.router.routes if isinstance(r, APIRoute)]
+    catch_all = next(i for i, r in enumerate(routes) if "{full_path:path}" in r.path
+                     or r.path.endswith("{path:path}"))
+    shadowed = [r.path for r in routes[catch_all + 1:] if "GET" in r.methods]
+    assert shadowed == [], f"registered after the SPA catch-all, so unreachable: {shadowed}"

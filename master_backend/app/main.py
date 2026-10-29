@@ -184,8 +184,6 @@ _camera_router = camera_router_or_none()
 if _camera_router is not None:
     app.include_router(_camera_router)
 install_error_handlers(app)
-# Serves the built dashboard at /; must come after every backend route.
-mount_static(app)
 
 
 @app.get("/health")
@@ -313,3 +311,9 @@ def _get_local_ip() -> str:
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+
+
+# Serves the built dashboard at /. Its catch-all GET must be registered LAST: FastAPI
+# matches routes in registration order, so mounting it earlier swallowed /health,
+# /session and /session/recovery (all defined above) with a 404.
+mount_static(app)
