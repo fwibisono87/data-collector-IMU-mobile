@@ -175,14 +175,18 @@ Switches automatically when the backend state is RECORDING (in every open browse
 ### 5.3 Done
 Shown when a session reaches FINALIZING and after; survives reload because it is driven by the
 backend's per-session record.
-- Finalize steps with live status (close & checksum CSVs, stop cameras & finalise video, validate,
-  late-window, write session ZIP), each with duration and error text if failed.
+- Finalize steps with live status (close & checksum CSVs, stop cameras & finalise video,
+  consolidate late/phone data, validate, late-window, write session ZIP), each with duration and
+  error text if failed.
 - Integrity verdict (PASS / PARTIAL / FAIL) with per-phone reasons, as today's report.
 - Where the data is: the session folder path and the ZIP path on the laptop, with **Open folder**
   (backend runs `explorer` on Windows) and an optional **Download ZIP** link. Downloading is
   never required; the ZIP is already on disk.
 - Late phone data and rescue uploads appear here as inline status rows ("chest: 1,204 late rows
   merged") and update live; no popups.
+- Consolidation status (current / pending phone data / not needed) with **Consolidate now**, which
+  pulls late rows and queued phone rescue uploads into the ZIP without waiting for the next
+  automatic pass; it is disabled while a run is in progress or while the consolidation is current.
 - **New session** returns to Setup.
 
 ### 5.4 Sessions (history)
@@ -196,11 +200,17 @@ server; a notice never depends on browser storage.
 ### 6.1 Session lifecycle
 `IDLE → RECORDING → FINALIZING → VALIDATING → IDLE` (plus ERROR), as today. START, STOP and
 LABEL are plain commands (`/api/session/*`) with typed results; the phone-side behaviour is
-unchanged. Finalize (existing `FinalizeJob`, resumable) gains two steps:
+unchanged. Finalize (existing `FinalizeJob`, resumable) gains three steps:
 1. `cameras` — stop every camera recording, finalise each WebM (clean ffmpeg exit writes
    Duration+Cues; if a process died, remux with `ffmpeg -c copy` as `tools/fix_webm.sh` does),
    probe each file (ffprobe: duration, frames, EBML header count) and write `cameras.json`.
-2. `package` — write `<SSD_PATH>/Data_Riset_IMU/<subject>_<tag>/<subject>_<tag>_<sid>.zip` with
+2. `consolidate` — decide from the manifest whether the session is whole or already consolidated
+   (the old end-session modal's `canConsolidate` / `hasPendingPhoneData` rules, ported to
+   `export.consolidation_decision`); if not, wait up to 60 s (polling every 3 s, breaking early
+   when a transfer stops moving) for phone rescue uploads, then merge late rows and verified
+   uploads into the consolidated CSVs with the existing `export_consolidate`. Skipped with
+   detail "session is whole" when nothing is owed.
+3. `package` — write `<SSD_PATH>/Data_Riset_IMU/<subject>_<tag>/<subject>_<tag>_<sid>.zip` with
    exactly the layout in OUTPUT_CONTRACT.md, streaming from disk (never in memory), including
    `video_report.json` with the same fields as today's `FinalizeResult` (`ok, bytesWritten,
    durationMs, ebmlHeaders, error?` plus `path, camId`) and `healthy`. Re-run automatically when

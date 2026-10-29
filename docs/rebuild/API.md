@@ -38,7 +38,7 @@ Camera         { cam_id: str, device_key: str, label: str,
 Drift          { verdict: "OK"|"CHECK"|"MOVED"|"NO_SIGNAL"|"MISSING"|"RESOLUTION_CHANGED",
                  dx_px: float, dy_px: float, shift_pct: float, score: float,
                  confidence: float, at_ms: int }
-FinalizeStep   { name: "close_writers"|"cameras"|"validate"|"bundle"|"package"|"late_window",
+FinalizeStep   { name: "close_writers"|"cameras"|"consolidate"|"validate"|"bundle"|"package"|"late_window",
                  status: "pending"|"running"|"done"|"failed"|"skipped",
                  started_at_ms: int|null, ended_at_ms: int|null, detail: str|null }
 Notice         { id: str, level: "info"|"warn"|"error", code: str, message: str,
@@ -64,7 +64,13 @@ SessionDetail  SessionSummary + { finalize: [FinalizeStep], integrity_report: ob
                  files: [{ name: str, bytes: int, kind: str }],
                  late: [{ device_id: str, role: str, rows: int }],
                  uploads: [{ device_id: str, role: str, received_bytes: int,
-                             total_bytes: int|null, complete: bool, verified: bool }] }
+                             total_bytes: int|null, complete: bool, verified: bool }],
+                 consolidation: ConsolidationStatus|null }
+ConsolidationStatus
+               { state: "current"|"pending_phone_data"|"not_needed", detail: str,
+                 can_consolidate: bool, whole: bool, late_pending: bool,
+                 recovery_pending: bool, uploads_in_progress: bool,
+                 rescue_uploads: int, late_rows: int }
 ```
 The legacy `/ws/frontend` STATE_UPDATE fields are NOT carried over; nothing in the new dashboard
 may depend on them.
@@ -79,6 +85,7 @@ may depend on them.
 | `POST /api/session/label` | `{label_id: 0..50}` → `{label_id, since_ms}` | 409 `bad_state` unless RECORDING. |
 | `GET /api/sessions?limit=50&before=<sid>` | → `{sessions: [SessionSummary], next: str|null}` | Scans disk + ledger; cached, invalidated on change. |
 | `GET /api/sessions/{sid}` | → `SessionDetail` | |
+| `POST /api/sessions/{sid}/consolidate` | → `{zip_path}` | Merge late rows + verified phone rescue uploads into the ZIP now (the Done view's "Consolidate now"); every package runs the same decision first. 409 `busy` while the post-session job runs, 409 `bad_state` while the session is still RECORDING. |
 | `POST /api/sessions/{sid}/package` | → `{zip_path}` | Re-run the package step (normally automatic). 409 `busy` if running. |
 | `GET /api/sessions/{sid}/zip` | → file stream | `Content-Disposition: attachment; filename="<subject>_<tag>_<sid>.zip"`; supports Range. |
 | `POST /api/sessions/{sid}/open-folder` | → `{}` | Windows `explorer /select,<zip>`; Linux `xdg-open`; 501 elsewhere. |
