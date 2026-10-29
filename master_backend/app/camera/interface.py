@@ -40,8 +40,11 @@ class CameraError(RuntimeError):
 class CameraEvent(BaseModel):
     """One item of the ``camera_events`` array in the session's ``cameras.json``.
 
-    Identical in shape to today's browser-built item (OUTPUT_CONTRACT.md §9):
-    ``key`` is the stable device key, ``camId`` the slot at the time.
+    Identical in shape to today's browser-built item (OUTPUT_CONTRACT.md §9 and
+    ``master_frontend/src/lib/video_backup.ts`` ``recordCameraEvent``): ``key`` is the
+    unique record id ``f"{sessionId}__{camId}__{atMs}__{<random id>}"`` (NOT the device
+    key), ``camId`` the slot at the time, and ``detail`` is omitted from the JSON when it
+    is empty or None.
     """
 
     key: str
