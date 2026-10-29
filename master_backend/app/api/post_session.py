@@ -773,7 +773,7 @@ def finalize_steps(session_id: str) -> list[dict]:
 
 
 def session_progress(post: "PostSessionJob | None", session_id: str) -> dict | None:
-    """``FinalizeProgress`` payload: finalize steps followed by cameras and package."""
+    """``FinalizeProgress`` payload: finalize steps followed by cameras/consolidate/package."""
     steps = finalize_steps(session_id)
     record = post.record(session_id) if post is not None else None
     if record:
