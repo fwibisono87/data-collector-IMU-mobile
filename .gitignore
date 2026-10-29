@@ -287,11 +287,6 @@ master_backend/.env
 
 # Firebase leftovers — neither the native app nor the backend uses Firebase.
 google-services.json
-# Flutter leftovers (the app is native Kotlin since the rebuild); kept only so a stray
-# file from an old checkout is never committed.
-.flutter-plugins
-lib/firebase_options.dart
-android/app/google-services.json
 firebase.json
 
 # Recovered/rescued session data pulled off devices — large, not source

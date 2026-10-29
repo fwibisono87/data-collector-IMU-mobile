@@ -1,11 +1,19 @@
-name: Build Flutter APK
+name: Build APK
+
+# The phone app is native Kotlin since lane L3 (`mobile_node/app`, Gradle 8.9, JDK 17).
+# This workflow replaces one that built an APK this repository no longer produces, so
+# every push showed a red check nobody could fix by touching code.
+#
+# The release variant is signed with the debug keystore on purpose (see
+# mobile_node/app/build.gradle.kts), so CI needs no signing secret and produces the same
+# artefact `make apk` does on the field laptop.
 
 on:
   push:
-    branches: [main, master, experiment/**]
+    branches: [main, master, make-proper, 'experiment/**', 'lane/**']
   pull_request:
-    branches: [main, master, experiment/**]
-  workflow_dispatch:  # allow manual trigger from GitHub UI
+    branches: [main, master, make-proper]
+  workflow_dispatch:
 
 jobs:
   build-apk:
@@ -21,36 +29,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter (pinned)
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: '3.24.5'   # pinned: matches Gradle 8.5 / AGP 8.2.1 / Kotlin 1.9.22 toolchain
-          cache: true
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Accept Android SDK licenses
-        run: yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
+      # compileSdk 35 (mobile_node/app/build.gradle.kts); the runner's image only ships
+      # the platform the last Flutter build needed, so name it explicitly.
+      - name: Install SDK components
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Install Android SDK components
-        run: |
-          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "ndk;23.1.7779620" \
-            "ndk;25.1.8937393" \
-            "ndk;26.3.11579264"
-
-      - name: Flutter pub get
+      - name: Build release APK
         working-directory: mobile_node
-        run: flutter pub get
+        run: ./gradlew --no-daemon assembleRelease
 
-      - name: Build debug APK
-        working-directory: mobile_node
-        run: flutter build apk --debug
-
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: imu-node-debug-build-${{ github.run_number }}
-          path: mobile_node/build/app/outputs/flutter-apk/app-debug.apk
+          name: imu-node-${{ github.run_number }}
+          path: mobile_node/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
