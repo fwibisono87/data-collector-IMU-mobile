@@ -352,3 +352,33 @@ async def test_wait_settled_is_bounded_and_never_cancels_work(rig):
     assert await job.wait_settled("fake", timeout=0.2) is False
     release.set()
     await asyncio.wait_for(job._tasks["fake"], timeout=5)     # still alive, not cancelled
+
+
+def test_a_recovered_video_without_a_duration_is_remuxed_in_place(tmp_path):
+    """§4 restart path with a real MediaRecorder-style file (live WebM has no Duration)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg and ffprobe are backend requirements")
+
+    path = tmp_path / f"{SID}_cam1_video_sync.webm"
+    with open(path, "wb") as out:
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+             "testsrc=duration=1:size=64x64:rate=10", "-c:v", "libvpx", "-f", "webm", "pipe:1"],
+            stdout=out, stderr=subprocess.DEVNULL, check=True,
+        )
+    # A WebM written to a pipe never gets a Duration element — the same shape as a
+    # recording cut short by a backend crash.
+    assert asyncio.run(post_module._ffprobe_duration_ms(path)) is None
+
+    report = asyncio.run(post_module._inspect_video(path, "cam1"))
+    assert report.ok is True
+    assert report.error is None
+    assert 900 <= report.durationMs <= 1100
+    assert report.ebmlHeaders == 1
+    assert report.bytesWritten == path.stat().st_size
+    assert report.path == f"videos/{path.name}"
+    assert not list(tmp_path.glob("*.remux.tmp"))
+    assert asyncio.run(post_module._ffprobe_duration_ms(path)) is not None

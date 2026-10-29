@@ -682,9 +682,13 @@ async def _ffprobe_duration_ms(path: Path) -> int | None:
 async def _remux_in_place(path: Path) -> bool:
     """``ffmpeg -i in -c copy`` to a tmp file, then replace (spec §4 restart path)."""
     tmp = path.with_name(path.name + ".remux.tmp")
+    # Name the container explicitly: the tmp file has no usable extension, so ffmpeg
+    # cannot infer the muxer and would refuse to write it.
+    container = path.suffix.lower().lstrip(".")
+    fmt = ["-f", container] if container in ("webm", "mp4") else []
     try:
         proc = await asyncio.create_subprocess_exec(
-            FFMPEG, "-y", "-v", "error", "-i", str(path), "-c", "copy", str(tmp),
+            FFMPEG, "-y", "-v", "error", "-i", str(path), "-c", "copy", *fmt, str(tmp),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(proc.communicate(), timeout=120)
