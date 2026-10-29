@@ -111,14 +111,13 @@ async def lifespan(app: FastAPI):
     logger.info(
         "\n"
         "==================================================================\n"
-        "  IMU Telemetry Backend — READY\n"
-        "  Dashboard (this laptop) : http://localhost:3000\n"
-        "  Backend LAN IP          : %s:%s   <-- type THIS into phones & dashboard\n"
-        "  Phone telemetry WS      : ws://%s:%s/ws/telemetry\n"
-        "  Phone control   WS      : ws://%s:%s/ws/control\n"
+        "  IMU Collector — READY\n"
+        "  Dashboard               : http://localhost:%s/   (or http://%s:%s/ on the LAN)\n"
+        "  Phones                  : open the app; it finds this laptop automatically.\n"
+        "                            If it does not, type this IP into the phone: %s\n"
         "  Health check            : http://%s:%s/health\n"
         "==================================================================",
-        local_ip, port, local_ip, port, local_ip, port, local_ip, port,
+        port, local_ip, port, local_ip, local_ip, port,
     )
     yield
     # Shutdown — finalise an in-flight session so the CSV tail is fsynced, the file is
