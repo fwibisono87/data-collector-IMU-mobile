@@ -8,7 +8,13 @@
 # `adb install -r` impossible, it stops and tells you to pull the data off first.
 set -uo pipefail
 
+# Paths below are relative to the repository root, so make the script independent of the
+# caller's working directory (make runs it from the root, an operator may not).
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
 PKG="com.example.sensors_app"
+# Must stay in step with `make apk` (cd mobile_node && ./gradlew assembleRelease).
 APK="${1:-mobile_node/app/build/outputs/apk/release/app-release.apk}"
 
 if [ ! -f "$APK" ]; then
