@@ -991,28 +991,28 @@
           "kind": "consolidated_validation",
           "name": "<SID>_consolidated_validation.json",
           "path": "<volatile>",
-          "size": 1953
+          "size": "<volatile>"
         },
         {
           "folder": "<volatile>",
           "kind": "consolidation",
           "name": "<SID>_consolidation.json",
           "path": "<volatile>",
-          "size": 6095
+          "size": "<volatile>"
         },
         {
           "folder": "<volatile>",
           "kind": "integrity",
           "name": "<SID>_integrity_report.json",
           "path": "<volatile>",
-          "size": 7582
+          "size": "<volatile>"
         },
         {
           "folder": "<volatile>",
           "kind": "late_summary",
           "name": "<SID>_late_delivery.json",
           "path": "<volatile>",
-          "size": 412
+          "size": "<volatile>"
         },
         {
           "folder": "<volatile>",

@@ -78,6 +78,25 @@ async def run_zip_scenario(rig, monkeypatch) -> dict:
     }
 
 
+def _has_absolute_path(value) -> bool:
+    """True when a parsed JSON document embeds an absolute filesystem path.
+
+    Those paths come from the per-run pytest tmp directory, so the byte size of the
+    file changes with the length of that directory even though the *normalised*
+    content is identical. Such a size cannot be frozen in the golden file.
+    """
+    if isinstance(value, str):
+        return value.startswith("/")
+    if isinstance(value, list):
+        return any(_has_absolute_path(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _has_absolute_path(key) or _has_absolute_path(item)
+            for key, item in value.items()
+        )
+    return False
+
+
 def zip_snapshot(path: Path, session_id: str) -> dict:
     """Every entry name (in archive order) plus the content of the JSON/CSV entries."""
     out: dict = {"entries": [], "json": {}, "csv": {}, "binary_sizes": {}}
@@ -91,14 +110,21 @@ def zip_snapshot(path: Path, session_id: str) -> dict:
                 out["csv"][name] = _csv_payload(data.decode("utf-8", "replace"))
             else:
                 out["binary_sizes"][name] = len(data)
+    json_by_name = {name.rsplit("/", 1)[-1]: doc for name, doc in out["json"].items()}
     manifest = out["json"].get("data/manifest.json")
     if manifest:
         for entry in manifest.get("files", []):
-            if str(entry.get("name", "")).endswith("_bundle.zip"):
+            name = str(entry.get("name", ""))
+            if name.endswith("_bundle.zip"):
                 # The data bundle embeds absolute artifact paths in its own
                 # bundle_manifest.json, so its compressed size depends on the per-run
                 # temp directory.  The output contract freezes the bundle's contents,
                 # never its size — do the same here.
+                entry["size"] = "<volatile>"
+            elif name.endswith(".json") and _has_absolute_path(json_by_name.get(name)):
+                # Same weakness, one level down: late_summary, consolidation and the
+                # integrity report carry the session folder path. Their content is
+                # normalised; their byte count is not stable across tmp directories.
                 entry["size"] = "<volatile>"
     return normalise(out, session_id)
 
