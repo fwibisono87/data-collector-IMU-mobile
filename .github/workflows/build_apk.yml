@@ -4,9 +4,14 @@ name: Build APK
 # This workflow replaces one that built an APK this repository no longer produces, so
 # every push showed a red check nobody could fix by touching code.
 #
-# The release variant is signed with the debug keystore on purpose (see
-# mobile_node/app/build.gradle.kts), so CI needs no signing secret and produces the same
-# artefact `make apk` does on the field laptop.
+# The release variant is signed with the debug keystore on purpose when no release
+# keystore is configured (see mobile_node/app/build.gradle.kts). That throwaway debug
+# key is generated on the runner, so the artefact is NOT the same as a field build from
+# `make apk` unless the repository provides a release keystore.
+#
+# Set the secret IMU_KEYSTORE_BASE64 (plus IMU_KEYSTORE_PASSWORD, IMU_KEY_ALIAS and
+# IMU_KEY_PASSWORD) to build with the real release key; without it the uploaded APK is
+# explicitly named NOT-FOR-FIELD.
 
 on:
   push:
@@ -37,6 +42,25 @@ jobs:
       - name: Install SDK components
         run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
 
+      # When the repository has a release keystore, exported here as four env vars for
+      # mobile_node/app/build.gradle.kts. Without the secret the build stays on the
+      # throwaway debug key and the artifact is marked NOT-FOR-FIELD.
+      - name: Configure release keystore
+        if: ${{ secrets.IMU_KEYSTORE_BASE64 != '' }}
+        env:
+          IMU_KEYSTORE_BASE64: ${{ secrets.IMU_KEYSTORE_BASE64 }}
+          IMU_KEYSTORE_PASSWORD: ${{ secrets.IMU_KEYSTORE_PASSWORD }}
+          IMU_KEY_ALIAS: ${{ secrets.IMU_KEY_ALIAS }}
+          IMU_KEY_PASSWORD: ${{ secrets.IMU_KEY_PASSWORD }}
+        run: |
+          echo "$IMU_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/imu-release.jks"
+          {
+            echo "IMU_KEYSTORE_FILE=$RUNNER_TEMP/imu-release.jks"
+            echo "IMU_KEYSTORE_PASSWORD=$IMU_KEYSTORE_PASSWORD"
+            echo "IMU_KEY_ALIAS=$IMU_KEY_ALIAS"
+            echo "IMU_KEY_PASSWORD=$IMU_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Build release APK
         working-directory: mobile_node
         run: ./gradlew --no-daemon assembleRelease
@@ -44,6 +68,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: imu-node-${{ github.run_number }}
+          name: imu-node-${{ github.run_number }}${{ secrets.IMU_KEYSTORE_BASE64 == '' && '-NOT-FOR-FIELD' || '' }}
           path: mobile_node/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
