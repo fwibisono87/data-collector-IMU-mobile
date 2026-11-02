@@ -158,7 +158,7 @@ class CameraService(Protocol):
         """
         ...
 
-    async def start_recording(self, session_id: str, folder: Path) -> None:
+    async def start_recording(self, session_id: str, folder: Path) -> list[str]:
         """Start one encoder per selected live camera, writing into ``folder``.
 
         Obligations:
@@ -174,7 +174,11 @@ class CameraService(Protocol):
         * raises ``CameraError`` when no selected camera is live — the session core
           turns that into a preflight blocker, never a half-started recording;
         * returns within 2 s: the encoders are started in the background and the first
-          frames are awaited with a short timeout, not for the whole recording.
+          frames are awaited with a short timeout, not for the whole recording;
+        * returns the cam_ids that produced **no** first frame within that timeout
+          (empty list = every selected camera is delivering video). The recording is
+          not aborted: the session core reports the cameras and keeps the IMU session
+          going.
         """
         ...
 

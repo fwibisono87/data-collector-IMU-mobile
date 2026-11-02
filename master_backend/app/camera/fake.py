@@ -58,6 +58,7 @@ class FakeCameraService:
         self._files: dict[str, list[Path]] = {}
         self._events: list[CameraEvent] = []
         self._failed: dict[str, int] = {}  # cam_id -> at_ms of the simulated dropout
+        self._no_first_frame: set[str] = set()
 
     # -- internals ---------------------------------------------------------
     def _now_ms(self) -> int:
@@ -164,7 +165,7 @@ class FakeCameraService:
                 ))
         return blockers, []
 
-    async def start_recording(self, session_id: str, folder: Path) -> None:
+    async def start_recording(self, session_id: str, folder: Path) -> list[str]:
         if self._closed:
             raise CameraError("camera service is closed")
         if self._recording:
@@ -193,6 +194,8 @@ class FakeCameraService:
             # The anchors that keep <sid>_cameras.json identical to today.
             await self._mark(camera, "started", self._started_at_ms)
             await self._mark(camera, "flash", self._started_at_ms)
+        return [camera.cam_id for camera in selected
+                if camera.cam_id in self._no_first_frame]
 
     async def stop_recording(self, session_id: str) -> CameraStopResult:
         if not self._recording:
@@ -253,6 +256,7 @@ class FakeCameraService:
                   if not self._files.get(camera.cam_id)]
 
         self._recording = False
+        self._no_first_frame = set()
         return CameraStopResult(
             session_id=session_id,
             recordings=recordings,
@@ -279,3 +283,14 @@ class FakeCameraService:
         if cam_id not in cam_ids:
             raise CameraError(f"{cam_id!r} is not a selected camera")
         self._failed[cam_id] = self._now_ms()
+
+    def no_first_frame(self, cam_id: str) -> None:
+        """Simulate a camera that is live but produces no frame after START.
+
+        ``start_recording`` reports it in its result; the session core must warn and
+        keep recording the IMU data. Cleared by ``stop_recording``.
+        """
+        cam_ids = {camera.cam_id for camera in self.cameras()}
+        if cam_id not in cam_ids:
+            raise CameraError(f"{cam_id!r} is not a selected camera")
+        self._no_first_frame.add(cam_id)

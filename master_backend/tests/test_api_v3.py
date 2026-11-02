@@ -437,6 +437,34 @@ def test_ws_ui_sends_only_on_change_and_heartbeats(api):
         assert time.monotonic() - started < 1.2
 
 
+def test_camera_start_warns_when_a_camera_produces_no_frames(api, rig):
+    """A live-but-dark camera is a warning, not a failed session."""
+    client, rt = api
+    register_phone(rig)
+    fill_draft(client)
+    rt.camera_service.no_first_frame("cam2")
+
+    started = client.post("/api/session/start", json={})
+    assert started.status_code == 200, started.text
+    body = started.json()
+    assert [w["code"] for w in body["warnings"]] == ["camera_start_failed"]
+    assert "cam2" in body["warnings"][0]["message"]
+    assert "IMU recording continues" in body["warnings"][0]["message"]
+
+    state = client.get("/api/state").json()
+    assert state["state"] == "RECORDING"
+    notices = {n["code"]: n for n in state["notices"]}
+    assert "camera_start_failed" in notices
+    assert notices["camera_start_failed"]["level"] == "warn"
+    assert "cam2" in notices["camera_start_failed"]["message"]
+
+    # The recording continues for every camera, including the reported one.
+    assert client.post("/api/session/stop", json={}).status_code == 200
+    detail = wait_for_package(client, body["session_id"])
+    statuses = {step["name"]: step["status"] for step in detail["finalize"]}
+    assert statuses["package"] == "done", detail
+
+
 def test_camera_start_failure_warns_but_the_imu_session_keeps_recording(api, rig, monkeypatch):
     """§6: retry once after 1 s, raise an error notice, return the warning, record anyway."""
     client, rt = api

@@ -243,6 +243,35 @@ def test_fail_rejects_a_camera_that_is_not_selected():
         service.fail("cam5")
 
 
+def test_start_recording_reports_cameras_without_a_first_frame(rig):
+    """The seam reports a dark camera instead of pretending the start was clean."""
+    service = FakeCameraService(2)
+    select_all(service)
+    folder = session_folder(rig)
+
+    assert asyncio.run(service.start_recording(SESSION_ID, folder)) == []
+    asyncio.run(service.stop_recording(SESSION_ID))
+
+    service.no_first_frame("cam2")
+    assert asyncio.run(service.start_recording(SESSION_ID, folder)) == ["cam2"]
+    # Reporting the camera must not abort the recording.
+    assert service.is_recording()
+    result = asyncio.run(service.stop_recording(SESSION_ID))
+    assert [r.cam_id for r in result.recordings] == ["cam1", "cam2"]
+    # The simulated condition is per-start, not sticky.
+    assert asyncio.run(service.start_recording(SESSION_ID, folder)) == []
+    asyncio.run(service.stop_recording(SESSION_ID))
+
+
+def test_no_first_frame_rejects_a_camera_that_is_not_selected():
+    service = FakeCameraService(2)
+    with pytest.raises(CameraError):
+        service.no_first_frame("cam1")
+    select_all(service)
+    with pytest.raises(CameraError):
+        service.no_first_frame("cam5")
+
+
 def test_close_is_idempotent_and_aborts_a_recording(rig):
     service = FakeCameraService(2)
     select_all(service)

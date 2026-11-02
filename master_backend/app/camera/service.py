@@ -293,7 +293,7 @@ class RealCameraService:
             logger.exception("could not restore the camera selection")
 
     # -- recording -----------------------------------------------------------------
-    async def start_recording(self, session_id: str, folder: Path) -> None:
+    async def start_recording(self, session_id: str, folder: Path) -> list[str]:
         with self._lock:
             if self._closed:
                 raise CameraError("camera service is closed")
@@ -317,12 +317,18 @@ class RealCameraService:
             self._recorder = recorder
         try:
             recorder.start()
-            await asyncio.to_thread(recorder.wait_first_frames, FIRST_FRAME_WAIT_S)
+            first_frames = await asyncio.to_thread(
+                recorder.wait_first_frames, FIRST_FRAME_WAIT_S
+            )
         except BaseException:
             with self._lock:
                 self._recorder = None
             recorder.abort()
             raise
+        # Report the cameras that stayed dark. The recorder keeps running for them —
+        # they may still come back — and the IMU session must never be aborted for a
+        # video problem.
+        return [cam_id for cam_id, ok in first_frames.items() if not ok]
 
     async def stop_recording(self, session_id: str) -> CameraStopResult:
         with self._lock:

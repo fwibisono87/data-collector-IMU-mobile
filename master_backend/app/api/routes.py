@@ -75,13 +75,29 @@ async def _camera_start(rt, session_id: str) -> list[Issue]:
     first_error: Exception | None = None
     for attempt in range(2):
         try:
-            await rt.camera_service.start_recording(session_id, folder)
-            rt.notices.resolve(f"camera_start_failed:{session_id}")
-            return []
+            failed_cams = await rt.camera_service.start_recording(session_id, folder)
         except Exception as exc:  # camera service errors, ffmpeg, permissions…
             first_error = exc
             if attempt == 0:
                 await asyncio.sleep(_CAMERA_RETRY_S)
+            continue
+        rt.notices.resolve(f"camera_start_failed:{session_id}")
+        if failed_cams:
+            # Capture started for the others; this one is live but dark. Warn now so the
+            # operator can check the cable while the IMU session is still running.
+            message = (
+                f"{', '.join(failed_cams)} produced no video frames after start — check "
+                "it now; the IMU recording continues"
+            )
+            rt.notices.raise_(
+                code="camera_start_failed",
+                level="warn",
+                message=message,
+                session_id=session_id,
+                key=f"camera_start_failed:{session_id}",
+            )
+            return [Issue(code="camera_start_failed", message=message, subject="cameras")]
+        return []
     message = (
         f"Camera recording did not start for session {session_id}: {first_error}. "
         "The IMU session is still recording; install the footage or restart the "
