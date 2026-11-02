@@ -121,7 +121,11 @@ Replace the Flutter project in `mobile_node/` with a plain Android Gradle projec
   targetSdk 34, minSdk 26, Compose BOM 2024.09.x, OkHttp 4.12.x, kotlinx-coroutines,
   kotlinx-serialization-json.
 - `applicationId "com.example.sensors_app"`, `versionCode 5`, `versionName "3.0.0"`.
-- Release signed with the debug keystore, as today, so it installs over existing phones.
+- Release signed with a dedicated key from `mobile_node/keystore.properties` (gitignored;
+  example in `keystore.properties.example`). Field phones get one uninstall/reinstall when
+  moving off the old debug signature — rescue CSVs must be pulled first; see
+  `STARTUP.md` §3. Without a configured key Gradle falls back to the debug key, warns
+  loudly and appends `-debugsigned` to the version name.
 - APK output: `mobile_node/app/build/outputs/apk/release/app-release.apk`. Update the default
   path and the build hint in `ops/install_phones.sh`.
 

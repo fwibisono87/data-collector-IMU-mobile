@@ -52,6 +52,7 @@ dashboard:
 	cd dashboard && npm ci && npm run build
 
 ## apk: build the phone APK -> mobile_node/app/build/outputs/apk/release/app-release.apk
+##      (release key from mobile_node/keystore.properties; no key = -debugsigned APK)
 apk:
 	cd mobile_node && ./gradlew assembleRelease
 

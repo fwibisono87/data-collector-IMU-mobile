@@ -110,6 +110,14 @@ Panduan lengkap ada di **[STARTUP.md](STARTUP.md)**. Versi singkat:
 Hentikan semuanya dengan Ctrl+C di jendela backend, atau `.\ops\stop.ps1` (ikut
 mematikan ffmpeg yang dijalankan backend).
 
+> **Kunci rilis:** buat sekali `mobile_node/keystore.properties` dari
+> `keystore.properties.example` (atau set `IMU_KEYSTORE_*`), lalu **backup** file `.jks`-nya.
+> Tanpa kunci, Gradle memakai debug key, memberi peringatan keras, dan versi berakhiran
+> `-debugsigned` (jangan dipasang di ponsel lapangan). Ponsel yang masih memakai build lama
+> perlu **satu kali** uninstall/reinstall: unggah/ambil CSV rescue dulu (uninstall
+> menghapusnya), `adb uninstall com.example.sensors_app`, lalu install; `device_id` akan
+> dibuat ulang. Detail: [`STARTUP.md`](STARTUP.md) §3.
+
 ## 🛠️ Perintah Berguna
 
 Dari root repository (`make` dipakai di Linux; di Windows pakai `.ps1`):

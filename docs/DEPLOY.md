@@ -53,6 +53,24 @@ from instead.
 
 ## 3. Every phone on the same app version
 
+Builds are signed with the dedicated release key in `mobile_node/keystore.properties`
+(gitignored; create the key once with
+`keytool -genkeypair -v -keystore imu-release.jks -alias imu -keyalg RSA -keysize 4096 -validity 36500`
+and use the format in `mobile_node/keystore.properties.example`). Keep that `.jks` and its
+passwords backed up — every later build must be signed with the same key. Without one,
+Gradle warns and produces a `-debugsigned` APK that must not go to field phones.
+
+The **first** release-key install on phones still carrying the old debug-signed build
+needs a one-time uninstall. Upload/pull the rescue CSVs first, because uninstall deletes
+them and regenerates `device_id`:
+
+```bash
+adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
+adb -s <serial> uninstall com.example.sensors_app
+```
+
+After that, normal installs (and `ops/install_phones.sh`) never uninstall:
+
 ```bash
 make apk                              # cd mobile_node && ./gradlew assembleRelease
 ./ops/install_phones.sh               # make install-phones — never uninstalls

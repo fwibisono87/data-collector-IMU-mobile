@@ -114,6 +114,13 @@ cd mobile_node
 ./gradlew lint assembleRelease     # APK at app/build/outputs/apk/release/app-release.apk
 ```
 
+Release signing: create `mobile_node/keystore.properties` from `keystore.properties.example`
+(key once: `keytool -genkeypair -v -keystore imu-release.jks -alias imu -keyalg RSA -keysize 4096 -validity 36500`)
+or set `IMU_KEYSTORE_FILE`/`IMU_KEYSTORE_PASSWORD`/`IMU_KEY_ALIAS`/`IMU_KEY_PASSWORD`.
+With neither, Gradle signs with the debug key, warns loudly and the version becomes
+`…-debugsigned`; never deploy that build. Back the `.jks` up — field phones accept updates
+only from the same key, and uninstalling deletes their rescue CSVs.
+
 Proto vectors: `python3 tools/gen_proto_vectors.py` (repo root) regenerates
 `app/src/test/resources/proto_vectors.json` using `master_backend/proto` — Kotlin must encode
 to identical bytes and decode them back.

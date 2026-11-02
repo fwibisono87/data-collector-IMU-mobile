@@ -145,7 +145,50 @@ cd mobile_node && ./gradlew assembleRelease
 # -> mobile_node/app/build/outputs/apk/release/app-release.apk
 ```
 
-Install on every connected phone **without losing data**:
+**Release key (create it once, then back it up).** A release APK must always be signed
+with the same dedicated key, otherwise Android refuses `adb install -r` and the only way
+past it is an uninstall — which deletes the phone-local rescue CSVs. Create the key once:
+
+```bash
+cd mobile_node
+keytool -genkeypair -v -keystore imu-release.jks -alias imu \
+        -keyalg RSA -keysize 4096 -validity 36500
+```
+
+Then copy `mobile_node/keystore.properties.example` to `mobile_node/keystore.properties`
+(both the file and `*.jks` are gitignored) and fill it in:
+
+```properties
+storeFile=imu-release.jks        # relative to mobile_node/, or an absolute path
+storePassword=…
+keyAlias=imu
+keyPassword=…
+```
+
+For a one-off build the same values can come from the environment instead:
+`IMU_KEYSTORE_FILE`, `IMU_KEYSTORE_PASSWORD`, `IMU_KEY_ALIAS`, `IMU_KEY_PASSWORD`.
+Back up `imu-release.jks` and its passwords somewhere safe, never in git.
+
+With no key configured the build still succeeds, but prints
+`release APK is signed with this machine's DEBUG key — NOT FOR FIELD PHONES` and the
+app version ends in `-debugsigned` (visible on the dashboard). Do not deploy such an APK.
+
+**One-time reinstall after switching off the old debug signature.** The phones currently
+carry the old debug-signed build, so the first release-signed APK cannot upgrade over it.
+For each phone, **upload/pull its rescue data first — uninstall deletes it**:
+
+```bash
+adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
+adb -s <serial> uninstall com.example.sensors_app
+adb -s <serial> install mobile_node/app/build/outputs/apk/release/app-release.apk
+```
+
+The reinstall regenerates `device_id` (the identity file was app data), so the phone
+appears as a new device in the study; per-phone MIUI settings must also be redone. Every
+later build signed with the same release key upgrades normally with `adb install -r`.
+
+Install on every connected phone **without losing data** (after the one-time reinstall
+above, or on a phone already on the release key):
 
 ```bash
 ./ops/install_phones.sh          # or: make install-phones

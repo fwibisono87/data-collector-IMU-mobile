@@ -270,6 +270,13 @@ Data_Riset_IMU/
 upload_report_*.log
 master_backend/.sessions/
 
+# Release signing material — never commit. Create the key once (see
+# mobile_node/keystore.properties.example) and back the .jks up: every later field build
+# must be signed with it, or the phones need another data-destroying uninstall.
+mobile_node/keystore.properties
+*.jks
+*.keystore
+
 # SSH credentials (FAMS uploader)
 master_backend/*.pem
 master_backend/*.key

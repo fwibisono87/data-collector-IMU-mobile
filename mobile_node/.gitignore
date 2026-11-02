@@ -6,6 +6,11 @@ app/build/
 .kotlin/
 local.properties
 
+# Release signing password/key — never commit (see keystore.properties.example).
+keystore.properties
+*.jks
+*.keystore
+
 # Android Studio / IntelliJ per-user state
 .idea/
 *.iml

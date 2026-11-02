@@ -26,12 +26,28 @@ make apk                     # cd mobile_node && ./gradlew assembleRelease
 
 or by hand: `adb install -r mobile_node/app/build/outputs/apk/release/app-release.apk`.
 
-The same `applicationId` (`com.example.sensors_app`) installs **over** the old Flutter
-app and keeps the phone's `device_id`, its checkpoint and any buffered packets — so a
-phone keeps its identity in the study. Do **not** uninstall: Android deletes
-`/sdcard/Android/data/com.example.sensors_app/files/imu_sessions` (the rescue CSVs)
-on uninstall. If `adb install -r` fails with a signature mismatch, pull that folder
-first (`adb pull …`), then uninstall/reinstall.
+Builds use the dedicated release key from `mobile_node/keystore.properties` (create it
+once: `keytool -genkeypair -v -keystore imu-release.jks -alias imu -keyalg RSA -keysize 4096 -validity 36500`;
+format in `mobile_node/keystore.properties.example`). Back the `.jks` up: from now on every
+field build must be signed with the same key, or the phone needs another uninstall.
+
+The same `applicationId` (`com.example.sensors_app`) installs **over** an earlier build and
+keeps the phone's `device_id`, checkpoint and buffered packets. Do **not** uninstall:
+Android deletes `/sdcard/Android/data/com.example.sensors_app/files/imu_sessions` (the
+rescue CSVs) on uninstall.
+
+**One-time exception:** phones still carrying the old debug-signed build cannot accept the
+first release-key APK (`adb install -r` fails with a signature mismatch). Pull/upload the
+rescue data first, then uninstall and install:
+
+```bash
+adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
+adb -s <serial> uninstall com.example.sensors_app
+adb -s <serial> install mobile_node/app/build/outputs/apk/release/app-release.apk
+```
+
+The reinstall regenerates `device_id`, so the phone looks like a new device to the study;
+redo the MIUI settings below for it.
 
 ## 2. First launch — permissions
 

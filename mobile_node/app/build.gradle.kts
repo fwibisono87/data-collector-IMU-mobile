@@ -1,10 +1,56 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
+import java.io.FileInputStream
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+}
+
+// ── release signing ────────────────────────────────────────────────────────────
+// The field phones get ONE uninstall/reinstall (upload the rescue CSVs, then
+// `adb uninstall`, then install). From then on every release build must carry the same
+// dedicated key, so back the .jks up: a different signature again means another
+// uninstall, and Android deletes the phone-local rescue data on uninstall.
+//
+// Source order: mobile_node/keystore.properties first, then environment variables (for a
+// CI/one-off build). A missing key is not fatal: the build falls back to the debug key,
+// prints a loud warning and marks the app version "-debugsigned" so the dashboard shows it.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.isFile) {
+        FileInputStream(keystorePropertiesFile).use { load(it) }
+    }
+}
+
+fun signingValue(property: String, env: String): String? =
+    keystoreProperties.getProperty(property)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(env)?.takeIf { it.isNotBlank() }
+
+val releaseStorePath = signingValue("storeFile", "IMU_KEYSTORE_FILE")
+val releaseStorePassword = signingValue("storePassword", "IMU_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "IMU_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "IMU_KEY_PASSWORD")
+// storeFile is relative to mobile_node/ (the root project) unless absolute.
+val releaseStoreFile: File? = releaseStorePath?.let {
+    val candidate = File(it)
+    if (candidate.isAbsolute) candidate else rootProject.file(it)
+}
+val releaseSigningReady = releaseStoreFile != null &&
+    releaseStoreFile.isFile &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+val releaseSigningProblem: String? = when {
+    releaseStorePath == null && releaseStorePassword == null &&
+        releaseKeyAlias == null && releaseKeyPassword == null -> null // nothing configured
+    !releaseSigningReady ->
+        "release signing is incomplete or the keystore does not exist (" +
+            (releaseStoreFile?.path ?: "no storeFile") + ")"
+    else -> null
 }
 
 android {
@@ -32,6 +78,17 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             // No minification: the app is small, the field build must stay comparable to a
@@ -39,12 +96,20 @@ android {
             // benefit for an APK that only ever runs on lab handsets.
             isMinifyEnabled = false
             isShrinkResources = false
-            // Release stays signed with the debug keystore (~/.android/debug.keystore),
-            // exactly as the Flutter build was: a signature change makes `adb install -r`
-            // refuse to upgrade a field phone, and the only way past that is an uninstall,
-            // which deletes its un-uploaded rescue CSVs. Whoever builds the field APK must
-            // therefore keep building it on the machine that holds that keystore.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseSigningReady) {
+                signingConfigs.getByName("release")
+            } else {
+                // Do not fail an ordinary developer build, but make the fallback impossible
+                // to miss and visible on the dashboard through the version string.
+                logger.warn(
+                    "release APK is signed with this machine's DEBUG key — NOT FOR FIELD PHONES",
+                )
+                releaseSigningProblem?.let {
+                    logger.warn("configured $it — falling back to the debug key")
+                }
+                versionNameSuffix = "-debugsigned"
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false
