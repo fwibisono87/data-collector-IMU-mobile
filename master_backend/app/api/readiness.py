@@ -192,6 +192,32 @@ def _camera_issues(rt: Runtime) -> tuple[list[Issue], list[Issue]]:
         )], []
 
 
+def _cameras_finishing(rt: Runtime) -> Issue | None:
+    """The previous session's encoders are still writing.
+
+    STOP finalises the IMU data while the camera recorders stop concurrently, so the
+    session can be IDLE (and the dashboard can enable START) before the last video file
+    is finished. Starting then would collide with the recorder that is still open.
+    """
+    if session_manager.state == SessionState.RECORDING:
+        return None
+    service = getattr(rt, "camera_service", None)
+    if service is None:
+        return None
+    try:
+        if service.is_recording():
+            return Issue(
+                code="cameras_finishing",
+                message=(
+                    "The cameras are still saving the previous session's video. Wait "
+                    "a few seconds."
+                ),
+            )
+    except Exception:
+        return None
+    return None
+
+
 def compute_readiness(rt: Runtime) -> Readiness:
     anchor = _disk_anchor(rt)
     free = _free_bytes(anchor)
@@ -203,5 +229,8 @@ def compute_readiness(rt: Runtime) -> Readiness:
     state_blocker = _state_blocker()
     if state_blocker is not None:
         blockers.insert(0, state_blocker)
+    cameras_finishing = _cameras_finishing(rt)
+    if cameras_finishing is not None:
+        blockers.insert(0, cameras_finishing)
     warnings = disk_warnings + phone_warnings + camera_warnings
     return Readiness(blockers=blockers, warnings=warnings)

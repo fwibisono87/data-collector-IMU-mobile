@@ -106,6 +106,33 @@ def test_state_rules(rig, disk, state, expected):
         assert expected in found
 
 
+def test_cameras_finishing_blocks_start_until_the_recorder_is_released(rig, disk):
+    """The session can be IDLE while the previous video is still being saved."""
+    import asyncio
+
+    rt, service = make_rt(rig)
+    phone(rig)
+    assert "cameras_finishing" not in codes(compute_readiness(rt).blockers)
+
+    folder = rig.ssd_path / "Data_Riset_IMU" / "S01_walk"
+    asyncio.run(service.start_recording("1700000000123", folder))
+    ready = compute_readiness(rt)
+    blocker = next(i for i in ready.blockers if i.code == "cameras_finishing")
+    assert blocker.message == (
+        "The cameras are still saving the previous session's video. Wait a few seconds."
+    )
+
+    # During RECORDING the session is not startable for a different reason, and the
+    # camera state is the recording itself, not a stale finish.
+    rig.manager.state = SessionState.RECORDING
+    assert "cameras_finishing" not in codes(compute_readiness(rt).blockers)
+
+    rig.manager.state = SessionState.IDLE
+    asyncio.run(service.stop_recording("1700000000123"))
+    readiness = compute_readiness(rt)
+    assert "cameras_finishing" not in codes(readiness.blockers)
+
+
 def test_camera_readiness_is_merged(rig, disk):
     service = FakeCameraService(1)             # a known device, but nothing selected yet
     rt = create_runtime(camera_service=service)
