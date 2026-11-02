@@ -50,6 +50,13 @@ class RescueRecorder(
         private val sanitizePart = Regex("[^A-Za-z0-9_.-]+")
         private val sanitizeRuns = Regex("_+")
 
+        /** Column index of `sequence_number`, derived from the frozen header. */
+        private val SEQUENCE_INDEX: Int =
+            CSV_HEADER.trimEnd('\n').split(',').indexOf("sequence_number")
+
+        /** How many bytes of the tail [lastSequence] inspects: a few thousand 100 Hz rows. */
+        private const val TAIL_BYTES = 64 * 1024
+
         /** `[^A-Za-z0-9_.-]+`→`_` then `_+`→`_`, exactly as the Dart original (`[^\w.-]+`
          *  with Dart's ASCII `\w`). */
         fun sanitize(s: String): String =
@@ -112,6 +119,49 @@ class RescueRecorder(
         return dir.listFiles()
             ?.filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(suffix) }
             ?.maxWithOrNull(compareBy<File> { it.lastModified() }.thenBy { it.name })
+    }
+
+    /**
+     * Highest `sequence_number` in the complete rows of [f]'s last [TAIL_BYTES], or null.
+     *
+     * A restart must number new samples ABOVE everything that may already be on the backend
+     * and in this file, otherwise the backend's (device_id, sequence_number, first wins)
+     * dedup discards them. Only the tail is read (a 40-minute CSV can be tens of MB) and an
+     * unterminated final line is ignored: it is a torn write that [start] trims on reopen, so
+     * its sequence number is not evidence that the row survived.
+     */
+    fun lastSequence(f: File): Long? {
+        if (!f.isFile) return null
+        try {
+            val length = f.length()
+            if (length <= 0L) return null
+            val start = maxOf(0L, length - TAIL_BYTES)
+            val bytes = ByteArray((length - start).toInt())
+            RandomAccessFile(f, "r").use { raf ->
+                raf.seek(start)
+                raf.readFully(bytes)
+            }
+            var text = String(bytes, Charsets.UTF_8)
+            if (start > 0L) {
+                // The window begins mid-row; everything before the first newline is a fragment.
+                val nl = text.indexOf('\n')
+                if (nl < 0) return null
+                text = text.substring(nl + 1)
+            }
+            // Keep only lines terminated by '\n'; the last element after split is either a
+            // torn row or the empty string after a complete trailing newline.
+            var highest: Long? = null
+            for (line in text.split('\n').dropLast(1)) {
+                if (line.isEmpty() || line.startsWith("#") || line.startsWith("timestamp_ms")) {
+                    continue
+                }
+                val value = line.split(',').getOrNull(SEQUENCE_INDEX)?.toLongOrNull() ?: continue
+                if (highest == null || value > highest!!) highest = value
+            }
+            return highest
+        } catch (_: Exception) {
+            return null
+        }
     }
 
     /**

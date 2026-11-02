@@ -58,6 +58,9 @@ sealed interface Ev {
     data class ResumeCheckpoint(
         val sessionId: String,
         val lastSequence: Long,
+        /** First sequence number to use after the restart, derived from the checkpoint and
+         *  the rescue CSV tail by the Pipeline (which knows the flush interval). */
+        val resumeSequence: Long,
         val subject: String = "",
         val sessionTag: String = "",
         val operator: String = "",
@@ -521,14 +524,18 @@ class SessionLogic(private val nowMs: () -> Long = { System.currentTimeMillis() 
         subject = e.subject
         sessionTag = e.sessionTag
         operator = e.operator
-        // Resume at the checkpoint's NEXT sequence; the backend dedups the uncertain tail on
-        // (device_id, session_id, sequence_number) and the rescue CSV supplies any gaps. The
-        // old +5000 safety margin made every restart look like thousands of lost samples.
+        // Resume ABOVE every sequence number that may already be on the backend or in the rescue
+        // CSV — the Pipeline derives it from the CSV tail plus the flush margin. Samples
+        // written after the last checkpoint are NOT necessarily absent: up to one flush
+        // interval can have been sent while still buffered in the writer. Reusing their
+        // numbers makes the backend's (device_id, session_id, sequence_number, first wins)
+        // dedup discard the new readings; a gap is harmless. The old code resumed at
+        // lastSequence + 1 precisely because it wrongly assumed the backend dedup handled it.
         activeSessionId = e.sessionId
-        sequence = e.lastSequence + 1
+        sequence = e.resumeSequence
         sentThisSession = 0
         acts += Act.OpenRecorder(e.sessionId, subject, sessionTag, operator)
-        acts += Act.SaveCheckpoint(e.lastSequence)
+        acts += Act.SaveCheckpoint(e.resumeSequence)
         acts += Act.LogEvent("service_restart")
     }
 

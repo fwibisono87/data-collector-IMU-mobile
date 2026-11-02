@@ -9,6 +9,7 @@ import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -216,9 +217,9 @@ class RescueRecorderTest {
         first.flush() // make the pre-kill file tail observable, as after any 1 s flush tick
 
         val cp = checkpoints.loadInterrupted("dev-1")!!
-        // No CSV-tail reader in this item: the checkpoint interval is the safe upper bound.
-        val resumeAt = maxOf(250L, cp.lastSequenceNumber) + SessionLogic.CHECKPOINT_EVERY + 1
         val second = RescueRecorder(dir, listOf(markers), nowMs = { clock })
+        val existing = second.findExisting(cp.sessionId, cp.deviceRole, "dev-1")!!
+        val resumeAt = Pipeline.resumeSequence(cp.lastSequenceNumber, second.lastSequence(existing))
         second.start(cp.sessionId, cp.deviceRole, "dev-1", cp.subject, cp.sessionTag, cp.operator)
         for (seq in resumeAt until resumeAt + 50L) second.write(sample(seq = seq))
         second.flush()
@@ -254,6 +255,54 @@ class RescueRecorderTest {
         assertEquals("p01", meta["subject"])
         assertEquals("walk", meta["session_tag"])
         assertEquals("francis", meta["operator"])
+    }
+
+    @Test
+    fun lastSequenceReadsTheHighestCompleteRow() {
+        rec.start("s1", "chest", "dev-1", "", "", "")
+        for (seq in 3L..7L) rec.write(sample(seq = seq))
+        rec.flush()
+        val f = File(dir, "s1_chest_dev-1_rescue.csv")
+        assertEquals(7L, rec.lastSequence(f))
+    }
+
+    @Test
+    fun lastSequenceIgnoresATornLastLine() {
+        rec.start("s1", "chest", "dev-1", "", "", "")
+        for (seq in 0L..2L) rec.write(sample(seq = seq))
+        rec.flush()
+        val f = File(dir, "s1_chest_dev-1_rescue.csv")
+        // A kill during write leaves a row without its newline; start() trims it on reopen,
+        // so its sequence number must not be treated as evidence.
+        f.appendText(sample(seq = 999).csvRow().trimEnd('\n'))
+        assertEquals(2L, rec.lastSequence(f))
+    }
+
+    @Test
+    fun lastSequenceIsNullForHeaderOnlyAndMissingFiles() {
+        rec.start("s1", "chest", "dev-1", "", "", "")
+        rec.stop()
+        val headerOnly = File(dir, "s1_chest_dev-1_rescue.csv")
+        assertNull(rec.lastSequence(headerOnly))
+        assertNull(rec.lastSequence(File(dir, "does-not-exist_rescue.csv")))
+    }
+
+    @Test
+    fun resumeSequenceIsStrictlyAboveEveryRowAndTheCheckpoint() {
+        rec.start("s1", "chest", "dev-1", "", "", "")
+        for (seq in 0L..300L) rec.write(sample(seq = seq))
+        rec.flush()
+        val last = rec.lastSequence(File(dir, "s1_chest_dev-1_rescue.csv"))!!
+        val checkpointLast = 250L
+
+        val resume = Pipeline.resumeSequence(checkpointLast, last)
+        assertTrue("must be above the CSV tail", resume > last)
+        assertTrue("must be above the checkpoint", resume > checkpointLast)
+        assertTrue("a gap is required, not just +1", resume > last + 1)
+
+        // No readable CSV tail: a whole checkpoint interval is the safe upper bound.
+        val fallback = Pipeline.resumeSequence(checkpointLast, null)
+        assertEquals(checkpointLast + SessionLogic.CHECKPOINT_EVERY + 1, fallback)
     }
 
     @Test

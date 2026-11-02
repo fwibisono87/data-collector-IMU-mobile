@@ -46,6 +46,33 @@ class Pipeline(
         const val NOTICE_MS = 5000L
         const val PUBLISH_MIN_INTERVAL_MS = 100L // ≤ 10 snapshot publishes per second
         const val BATTERY_CACHE_MS = 10_000L
+
+        /**
+         * Sequence numbers to skip above the highest one a restart can prove was used.
+         *
+         * Samples are checkpointed every [SessionLogic.CHECKPOINT_EVERY], but that is not
+         * the whole story: the rescue CSV writer is buffered, and the pipeline flushes it
+         * once per [FLUSH_MS]. At [Sampler.EXPECTED_HZ] (100 Hz) one flush interval is 100
+         * samples; the default 8 KiB BufferedWriter would hold ~80 such rows, so the flush
+         * interval is the real bound. A sample can therefore have been SENT over the network
+         * while still sitting in that buffer when the process dies. Double it for safety and
+         * add 1, so the next emitted sample is strictly above any sample from this window.
+         */
+        val RESUME_MARGIN: Long =
+            (FLUSH_MS * Sampler.EXPECTED_HZ / 1000.0).toLong() * 2L
+
+        /** First sequence number safe to use after a restart. When no CSV tail exists the
+         *  checkpoint is the only evidence, so a whole checkpoint interval is covered (a new
+         *  checkpoint is written every [SessionLogic.CHECKPOINT_EVERY] samples). */
+        fun resumeSequence(checkpointLast: Long, csvLast: Long?): Long {
+            val highest = maxOf(checkpointLast, csvLast ?: checkpointLast)
+            val margin = if (csvLast == null) {
+                maxOf(RESUME_MARGIN, SessionLogic.CHECKPOINT_EVERY)
+            } else {
+                RESUME_MARGIN
+            }
+            return highest + margin + 1
+        }
         private val IPV4 =
             Regex("^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$")
         private val HOSTNAME = Regex("^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$")
@@ -244,10 +271,18 @@ class Pipeline(
             onEvent(Ev.RestoreDesired(cp.serverIp, cp.deviceRole))
         }
         if (cp != null) {
+            // Ask the recorder which file it will reopen, then start strictly above every
+            // number that may already be in it: the checkpoint is only written every
+            // CHECKPOINT_EVERY samples, while the tail after it can already be on the
+            // backend and in the (buffered) CSV.
+            val existing = recorder.findExisting(cp.sessionId, logic.role, identity.deviceId)
+            val csvLast = existing?.let { recorder.lastSequence(it) }
+            val resumeAt = resumeSequence(cp.lastSequenceNumber, csvLast)
             onEvent(
                 Ev.ResumeCheckpoint(
                     cp.sessionId,
                     cp.lastSequenceNumber,
+                    resumeAt,
                     cp.subject,
                     cp.sessionTag,
                     cp.operator,

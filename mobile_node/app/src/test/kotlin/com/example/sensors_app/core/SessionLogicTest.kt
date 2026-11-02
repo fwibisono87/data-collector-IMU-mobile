@@ -223,13 +223,34 @@ class SessionLogicTest {
 
     @Test
     fun resumeFromCheckpointContinuesSequence() {
-        val acts = l.handle(Ev.ResumeCheckpoint("s1", 7499))
+        val acts = l.handle(Ev.ResumeCheckpoint("s1", 7499, 7500))
         assertEquals(7500L, l.sequence)
         assertEquals("s1", l.activeSessionId)
         assertTrue(acts.any { it is Act.OpenRecorder && it.sessionId == "s1" })
-        assertTrue(acts.any { it is Act.SaveCheckpoint && it.lastSequence == 7499L })
+        assertTrue(acts.any { it is Act.SaveCheckpoint && it.lastSequence == 7500L })
         assertTrue(acts.any { it is Act.LogEvent && it.type == "service_restart" })
         assertEquals(7500L, l.nextSessionSequence())
+    }
+
+    @Test
+    fun resumeUsesTheSuppliedSequenceAndRestoresMetadata() {
+        // The Pipeline derives this above both the checkpoint AND the rescue CSV tail, so
+        // the logic must not add its own margin or fall back to lastSequence + 1.
+        val acts = l.handle(
+            Ev.ResumeCheckpoint("s1", 7499, 10_000, "p01", "walk", "francis"),
+        )
+        assertEquals(10_000L, l.sequence)
+        assertEquals(10_000L, l.nextSessionSequence())
+        assertEquals("p01", l.subject)
+        assertEquals("walk", l.sessionTag)
+        assertEquals("francis", l.operator)
+        assertTrue(
+            acts.any {
+                it is Act.OpenRecorder && it.sessionId == "s1" &&
+                    it.subject == "p01" && it.sessionTag == "walk" && it.operator == "francis"
+            },
+        )
+        assertTrue(acts.any { it is Act.SaveCheckpoint && it.lastSequence == 10_000L })
     }
 
     @Test
@@ -237,7 +258,7 @@ class SessionLogicTest {
         connect()
         start("s2")
         repeat(5) { l.nextSessionSequence() }
-        val acts = l.handle(Ev.ResumeCheckpoint("s1", 7499))
+        val acts = l.handle(Ev.ResumeCheckpoint("s1", 7499, 9000))
         assertTrue(acts.isEmpty())
         assertEquals("s2", l.activeSessionId)
         assertEquals(5L, l.sequence)
