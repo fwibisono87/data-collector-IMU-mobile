@@ -98,6 +98,23 @@ class RescueRecorder(
     val path: String? get() = file?.path
 
     /**
+     * The rescue CSV already on disk for this (session, phone), if any.
+     *
+     * The filename also contains subject/tag, which are empty after a restart when the
+     * checkpoint predates them (or when a session was adopted from a PONG). Matching on the
+     * stable part only — `<sessionId>_` … `_<role>_<deviceId>_rescue.csv` — makes the
+     * recorder append to the file it wrote before the kill instead of opening a second
+     * fragment that competes for the same (session, device) upload.
+     */
+    fun findExisting(sessionId: String, role: String, deviceId: String): File? {
+        val prefix = sanitize(sessionId) + "_"
+        val suffix = "_${sanitize(role)}_${sanitize(deviceId)}_rescue.csv"
+        return dir.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(suffix) }
+            ?.maxWithOrNull(compareBy<File> { it.lastModified() }.thenBy { it.name })
+    }
+
+    /**
      * Opens (or reopens) the rescue CSV for [sessionId]. Idempotent while the same session is
      * already open. Reopening an existing file trims any partial last line, appends, writes no
      * second header, and recounts rows from disk so a resumed session reports honest totals in
@@ -115,7 +132,11 @@ class RescueRecorder(
         stop()
         try {
             dir.mkdirs()
-            val csv = File(dir, csvFileName(sessionId, subject, sessionTag, role, deviceId))
+            // Prefer the file already on disk for this session/phone: after a restart the
+            // metadata may be missing, which changes csvFileName and would otherwise open a
+            // second file with a second header for the same session.
+            val csv = findExisting(sessionId, role, deviceId)
+                ?: File(dir, csvFileName(sessionId, subject, sessionTag, role, deviceId))
             val exists = csv.exists() && csv.length() > 0
             if (exists) trimIncompleteLine(csv)
             val out = java.io.FileOutputStream(csv, exists)

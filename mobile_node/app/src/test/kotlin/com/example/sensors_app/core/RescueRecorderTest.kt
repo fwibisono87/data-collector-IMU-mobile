@@ -175,6 +175,88 @@ class RescueRecorderTest {
     }
 
     @Test
+    fun startWithMissingMetadataAppendsToExistingSessionFile() {
+        // The first process wrote the file with subject/tag in its name and flushed it.
+        rec.start("s1", "chest", "dev-1", "p01", "walk", "francis")
+        rec.write(sample(seq = 0))
+        rec.write(sample(seq = 1))
+        rec.flush()
+        rec.stop()
+
+        // A restart has not restored metadata: empty subject/tag would produce a different
+        // csvFileName. The lookup must reopen the existing file instead.
+        val rec2 = RescueRecorder(dir, listOf(markers), nowMs = { clock })
+        rec2.start("s1", "chest", "dev-1", "", "", "")
+        rec2.write(sample(seq = 2))
+        rec2.flush()
+        rec2.stop()
+
+        val csvs = dir.listFiles()!!.filter { it.name.endsWith("_rescue.csv") }
+        assertEquals(1, csvs.size)
+        assertEquals("s1_p01_walk_chest_dev-1_rescue.csv", csvs.single().name)
+        val lines = csvs.single().readLines()
+        assertEquals(1, lines.count { it.startsWith("# session_id=") })
+        assertEquals(1, lines.count { it.startsWith("timestamp_ms,") })
+        assertEquals(5, lines.size) // metadata + header + three rows
+    }
+
+    @Test
+    fun restartSimulationKeepsOneFileOneHeaderAndIncreasingSequences() {
+        val checkpoints = CheckpointStore(listOf(dir), nowMs = { clock })
+        val first = RescueRecorder(dir, listOf(markers), nowMs = { clock })
+        first.start("s1", "chest", "dev-1", "p01", "walk", "francis")
+        for (seq in 0L until 250L) first.write(sample(seq = seq))
+        checkpoints.save(
+            sessionId = "s1", deviceId = "dev-1", serverIp = "192.168.1.5",
+            clockOffsetMs = 0, lastSequenceNumber = 250, deviceRole = "chest",
+            subject = "p01", sessionTag = "walk", operator = "francis",
+        )
+        for (seq in 250L until 300L) first.write(sample(seq = seq))
+        // "Kill": drop the recorder without stop()/flush().
+        first.flush() // make the pre-kill file tail observable, as after any 1 s flush tick
+
+        val cp = checkpoints.loadInterrupted("dev-1")!!
+        // No CSV-tail reader in this item: the checkpoint interval is the safe upper bound.
+        val resumeAt = maxOf(250L, cp.lastSequenceNumber) + SessionLogic.CHECKPOINT_EVERY + 1
+        val second = RescueRecorder(dir, listOf(markers), nowMs = { clock })
+        second.start(cp.sessionId, cp.deviceRole, "dev-1", cp.subject, cp.sessionTag, cp.operator)
+        for (seq in resumeAt until resumeAt + 50L) second.write(sample(seq = seq))
+        second.flush()
+        second.stop()
+
+        val csvs = dir.listFiles()!!.filter { it.name.endsWith("_rescue.csv") }
+        assertEquals(1, csvs.size)
+        val lines = csvs.single().readLines()
+        assertEquals(1, lines.count { it.startsWith("# session_id=") })
+        assertEquals(1, lines.count { it.startsWith("timestamp_ms,") })
+        val seqCol = RescueRecorder.CSV_HEADER.trimEnd('\n').split(',').indexOf("sequence_number")
+        val sequences = lines
+            .filter { it.isNotEmpty() && !it.startsWith("#") && !it.startsWith("timestamp_ms") }
+            .map { it.split(',')[seqCol].toLong() }
+        assertEquals("sequence numbers must never repeat", sequences.size, sequences.toSet().size)
+        assertEquals("sequence numbers must increase", sequences.sorted(), sequences)
+
+        // The uploader's directory scan + metadata parse must still see exactly one file
+        // for this session/device, not two competing fragments.
+        val uploader = RecoveryUploader(
+            RecoveryUploader.buildClient(),
+            listOf(markers),
+            { second.listSessions() },
+            { false },
+        )
+        val forSession = second.listSessions().mapNotNull { f ->
+            uploader.parseMeta(f)?.takeIf {
+                it["session_id"] == "s1" && it["device_id"] == "dev-1"
+            }?.let { f }
+        }
+        assertEquals(1, forSession.size)
+        val meta = uploader.parseMeta(forSession.single())!!
+        assertEquals("p01", meta["subject"])
+        assertEquals("walk", meta["session_tag"])
+        assertEquals("francis", meta["operator"])
+    }
+
+    @Test
     fun integritySidecarCarriesRowsBytesAndSha() {
         rec.start("s1", "chest", "dev-1", "", "", "")
         rec.write(sample(seq = 0))

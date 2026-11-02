@@ -27,6 +27,11 @@ data class CheckpointData(
     val deviceRole: String,
     val state: String,
     val savedAtMs: Long,
+    /** Session metadata, so a restart reopens the SAME rescue CSV. Optional keys in the
+     *  JSON: a checkpoint written by an older build simply loads them as empty. */
+    val subject: String = "",
+    val sessionTag: String = "",
+    val operator: String = "",
 )
 
 class CheckpointStore(
@@ -70,6 +75,9 @@ class CheckpointStore(
         clockOffsetMs: Long,
         lastSequenceNumber: Long,
         deviceRole: String,
+        subject: String = "",
+        sessionTag: String = "",
+        operator: String = "",
     ) {
         val o = buildJsonObject {
             put("session_id", sessionId)
@@ -80,6 +88,12 @@ class CheckpointStore(
             put("device_role", deviceRole)
             put("state", "RECORDING")
             put("saved_at_ms", nowMs())
+            // New optional keys: SessionLogic is otherwise empty on restart and the rescue
+            // file name (which includes subject + tag) would change, splitting one session
+            // across two files that compete for the same server-side upload.
+            put("subject", subject)
+            put("session_tag", sessionTag)
+            put("operator", operator)
         }
         atomicWrite(file(FILE_NAME), json.encodeToString(JsonObject.serializer(), o))
     }
@@ -99,6 +113,12 @@ class CheckpointStore(
                 deviceRole = (o["device_role"] as? JsonPrimitive)?.content ?: DEFAULT_ROLE,
                 state = "RECORDING",
                 savedAtMs = (o["saved_at_ms"] as? JsonPrimitive)?.longOrNull ?: 0,
+                // All three are optional: a checkpoint written before this change has no
+                // such keys and must still load (resuming then falls back to filename
+                // discovery in RescueRecorder.start).
+                subject = (o["subject"] as? JsonPrimitive)?.content ?: "",
+                sessionTag = (o["session_tag"] as? JsonPrimitive)?.content ?: "",
+                operator = (o["operator"] as? JsonPrimitive)?.content ?: "",
             )
             // A checkpoint from a different phone identity (restored backup, shared image)
             // must never hijack this device's sequence namespace.

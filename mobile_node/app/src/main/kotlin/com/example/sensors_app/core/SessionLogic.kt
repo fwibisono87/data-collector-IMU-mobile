@@ -53,8 +53,15 @@ sealed interface Ev {
     /** The scheduled reconnect backoff timer fired. */
     data class ReconnectTimer(val nowMs: Long) : Ev
 
-    /** A checkpoint from a previous process says this session was RECORDING. */
-    data class ResumeCheckpoint(val sessionId: String, val lastSequence: Long) : Ev
+    /** A checkpoint from a previous process says this session was RECORDING. The metadata
+     *  fields are empty for checkpoints written by an older build. */
+    data class ResumeCheckpoint(
+        val sessionId: String,
+        val lastSequence: Long,
+        val subject: String = "",
+        val sessionTag: String = "",
+        val operator: String = "",
+    ) : Ev
 
     /** In-app device reset: fresh identity, back to Setup. */
     data object ResetDevice : Ev
@@ -507,6 +514,13 @@ class SessionLogic(private val nowMs: () -> Long = { System.currentTimeMillis() 
 
     private fun handleResume(e: Ev.ResumeCheckpoint, acts: MutableList<Act>) {
         if (activeSessionId != null) return
+        // Restore the metadata the checkpoint carried, otherwise the reopened rescue CSV is
+        // named from empty subject/tag and a second file appears for the same (session,
+        // phone) — the uploader identifies a transfer by (session, device) and the two
+        // fragments would compete for it.
+        subject = e.subject
+        sessionTag = e.sessionTag
+        operator = e.operator
         // Resume at the checkpoint's NEXT sequence; the backend dedups the uncertain tail on
         // (device_id, session_id, sequence_number) and the rescue CSV supplies any gaps. The
         // old +5000 safety margin made every restart look like thousands of lost samples.

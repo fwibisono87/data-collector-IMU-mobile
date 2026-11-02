@@ -244,7 +244,15 @@ class Pipeline(
             onEvent(Ev.RestoreDesired(cp.serverIp, cp.deviceRole))
         }
         if (cp != null) {
-            onEvent(Ev.ResumeCheckpoint(cp.sessionId, cp.lastSequenceNumber))
+            onEvent(
+                Ev.ResumeCheckpoint(
+                    cp.sessionId,
+                    cp.lastSequenceNumber,
+                    cp.subject,
+                    cp.sessionTag,
+                    cp.operator,
+                ),
+            )
         }
         publish()
     }
@@ -430,6 +438,9 @@ class Pipeline(
             clockOffsetMs = clockSync.offsetMs,
             lastSequenceNumber = lastSequence,
             deviceRole = logic.role,
+            subject = logic.subject,
+            sessionTag = logic.sessionTag,
+            operator = logic.operator,
         )
     }
 
