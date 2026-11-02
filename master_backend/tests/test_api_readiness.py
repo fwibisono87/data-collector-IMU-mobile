@@ -13,6 +13,8 @@ from master_backend.app.session_manager import SessionState
 
 from conftest import FakeWs
 
+from master_backend.app.csv_schema import IDLE_SEQ_BASE
+
 GB = 1024**3
 
 
@@ -26,11 +28,13 @@ def make_rt(rig, cameras: int = 1):
     return rt, service
 
 
-def phone(rig, device_id="dev-chest", role="chest", version="2.0.0"):
+def phone(rig, device_id="dev-chest", role="chest", version="2.0.0", *, telemetry=True):
     rig.manager.register_device(
         device_id=device_id, role=role, model="Pixel", app_version=version,
         ws=FakeWs(),
     )
+    if telemetry:
+        rig.manager.note_telemetry(device_id)
 
 
 @pytest.fixture
@@ -143,6 +147,69 @@ def test_camera_readiness_is_merged(rig, disk):
 
     service.set_selection([CameraSelectionItem(device_key="fake:0")])
     assert "no_camera_selected" not in codes(compute_readiness(rt).blockers)
+
+
+def test_a_connected_phone_with_no_telemetry_blocks_start(rig, disk):
+    rt, _ = make_rt(rig)
+    phone(rig, telemetry=False)
+    dev = rig.manager.get_device("dev-chest")
+    # A stale healthy rate must not hide the fact that the stream is silent.
+    dev.packets_received = 100
+    dev.true_hz_avg = 100.0
+
+    readiness = compute_readiness(rt)
+    blocker = next(i for i in readiness.blockers if i.code == "phone_no_telemetry")
+    assert blocker.message == (
+        "chest is connected but not sending sensor data yet. Wait a few seconds; "
+        "if it persists, reopen the phone app."
+    )
+    assert blocker.subject == "dev-chest"
+    # The stale true_hz_avg must not also produce a rate warning.
+    assert "phone_rate_low" not in codes(readiness.warnings)
+
+
+def test_fresh_telemetry_keeps_the_phone_ready(rig, disk):
+    rt, _ = make_rt(rig)
+    phone(rig)
+    assert "phone_no_telemetry" not in codes(compute_readiness(rt).blockers)
+    assert "phone_telemetry_stale" not in codes(compute_readiness(rt).blockers)
+
+
+def test_stale_telemetry_blocks_start(rig, disk, monkeypatch):
+    rt, _ = make_rt(rig)
+    phone(rig)
+    dev = rig.manager.get_device("dev-chest")
+    dev.last_telemetry_monotonic = 100.0
+    dev.packets_received = 100
+    dev.true_hz_avg = 10.0          # would be phone_rate_low if it were still fresh
+    monkeypatch.setattr(readiness_module.time, "monotonic", lambda: 105.0)
+
+    readiness = compute_readiness(rt)
+    blocker = next(i for i in readiness.blockers if i.code == "phone_telemetry_stale")
+    assert blocker.message == (
+        "chest stopped sending sensor data 5 s ago. Check the phone."
+    )
+    assert "phone_rate_low" not in codes(readiness.warnings)
+
+
+def test_idle_sequence_packets_count_as_fresh_telemetry(rig, disk):
+    """The pre-START idle stream is exactly what proves the phone is alive."""
+    import asyncio
+
+    from master_backend.app import ws_handler
+    from conftest import packet
+
+    rt, _ = make_rt(rig)
+    phone(rig, telemetry=False)
+    assert "phone_no_telemetry" in codes(compute_readiness(rt).blockers)
+
+    asyncio.run(ws_handler._ingest_packet(
+        packet("dev-chest", IDLE_SEQ_BASE + 1, 1_700_000_000_000, acc=1.0)
+    ))
+    # Research counters are not what the liveness check reads; only the marker moves.
+    dev = rig.manager.get_device("dev-chest")
+    assert dev.last_telemetry_monotonic > 0.0
+    assert "phone_no_telemetry" not in codes(compute_readiness(rt).blockers)
 
 
 def test_streaming_rate_and_version_warnings(rig, disk):

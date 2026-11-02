@@ -19,6 +19,11 @@ from .schema import Issue, Readiness
 #: Block START when the recording would not be usable at the phone's measured rate.
 MIN_TRUE_HZ = 90.0
 
+#: A phone whose last telemetry packet is older than this is not streaming right now.
+#: Idle telemetry counts: before START that is exactly what proves the sensor stream
+#: is alive (SPEC §6.3).
+TELEMETRY_STALE_S = 3.0
+
 #: Writability probes are tiny but the snapshot rebuild runs at up to 5 Hz; cache briefly.
 _PROBE_TTL_S = 1.0
 _probe_cache: dict[str, tuple[float, bool]] = {}
@@ -140,7 +145,37 @@ def _phone_issues() -> tuple[list[Issue], list[Issue]]:
         ))
         return blockers, warnings
 
+    now = time.monotonic()
+    # These checks are about START. While RECORDING a silent phone is a session
+    # integrity matter (offline intervals), not a reason the previous START was wrong.
+    check_telemetry = session_manager.state != SessionState.RECORDING
     for dev in phones:
+        role = dev.device_role or dev.device_id
+        if check_telemetry:
+            last = float(dev.last_telemetry_monotonic or 0.0)
+            if last <= 0.0:
+                blockers.append(Issue(
+                    code="phone_no_telemetry",
+                    message=(
+                        f"{role} is connected but not sending sensor data yet. Wait a "
+                        "few seconds; if it persists, reopen the phone app."
+                    ),
+                    subject=dev.device_id,
+                ))
+                # true_hz_avg is 0 (or a value from before a reconnect); a rate warning
+                # would just repeat the same fact in a less actionable way.
+                continue
+            age = now - last
+            if age > TELEMETRY_STALE_S:
+                blockers.append(Issue(
+                    code="phone_telemetry_stale",
+                    message=(
+                        f"{role} stopped sending sensor data {round(age)} s ago. "
+                        "Check the phone."
+                    ),
+                    subject=dev.device_id,
+                ))
+                continue
         if dev.packets_received > 0 and dev.true_hz_avg < MIN_TRUE_HZ:
             warnings.append(Issue(
                 code="phone_rate_low",

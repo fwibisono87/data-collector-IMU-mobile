@@ -97,6 +97,10 @@ class DeviceInfo:
     offline_intervals: list = field(default_factory=list)  # [{start_ms, end_ms}]
     telemetry_gaps: list = field(default_factory=list)  # telemetry-only gaps
     last_packet_at: float = 0.0             # time.monotonic() of the last accepted packet
+    # time.monotonic() of the last telemetry packet of ANY kind, idle included. This is
+    # the preflight liveness signal ("is the phone streaming at all?"); unlike
+    # last_packet_at it is never a research value and is not reset at START.
+    last_telemetry_monotonic: float = 0.0
     # time.monotonic() of the last IDLE-seq packet seen while RECORDING. Idle traffic
     # must not touch the session counters (they land in integrity_report.json), but a
     # phone that is connected-and-idling during a session — e.g. it missed START —
@@ -281,6 +285,18 @@ class SessionManager:
         dev = self._devices.get(device_id)
         if dev is not None:
             dev.idle_last_at = time.monotonic()
+
+    def note_telemetry(self, device_id: str) -> None:
+        """Record that *any* telemetry packet arrived (idle packets included).
+
+        Readiness uses this to tell "connected but silent" from "streaming": a phone
+        with an open control socket but no telemetry is not ready for START. It is
+        deliberately separate from ``last_packet_at``, which is a research value and
+        only advances for session data.
+        """
+        dev = self._devices.get(device_id)
+        if dev is not None:
+            dev.last_telemetry_monotonic = time.monotonic()
 
     def get_device(self, device_id: str) -> DeviceInfo | None:
         return self._devices.get(device_id)

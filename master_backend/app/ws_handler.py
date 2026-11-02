@@ -145,6 +145,9 @@ async def _ingest_packet(pkt: SensorPacket) -> None:
     the Setup view's chart would be empty if it only saw RECORDING traffic.
     """
     device_id = pkt.device_id
+    # Every telemetry packet proves the phone is streaming, idle or session data. This
+    # marker is liveness only; it never feeds a research counter.
+    session_manager.note_telemetry(device_id)
     idle = pkt.sequence_number >= IDLE_SEQ_BASE
 
     if session_manager.state != SessionState.RECORDING:

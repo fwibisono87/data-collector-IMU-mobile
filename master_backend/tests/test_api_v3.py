@@ -41,6 +41,9 @@ def register_phone(rig, device_id="dev-chest", role="chest"):
         device_id=device_id, role=role, model="Pixel", app_version="2.0.0",
         ws=FakeWs(),
     )
+    # Readiness requires telemetry, not merely an open control socket: the phone
+    # streams from the moment it connects (stub-mode tests have no real stream).
+    rig.manager.note_telemetry(device_id)
 
 
 def wait_for_package(client, session_id, timeout=30.0) -> dict:
