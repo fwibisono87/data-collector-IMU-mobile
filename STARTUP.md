@@ -218,6 +218,7 @@ environment yourself wins over the file (python-dotenv does not override).
 | `IMU_FAKE_CAMERAS` | `2` | How many fake cameras (`fake:0`…`fake:n-1`). |
 | `IMU_VIDEO_CODEC` | `vp9` | `vp9` or `vp8`. Read at every recording start. VP9 sustains 5×720p30 at ~37 % CPU; VP8 does not keep up on the current laptop (see `master_backend/app/camera/README.md`). |
 | `IMU_FFMPEG` / `IMU_FFPROBE` | `vendor/ffmpeg/`, then `PATH` | Explicit binary paths when ffmpeg is not vendored. |
+| `IMU_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Comma-separated browser origins allowed to call the API. The packaged dashboard is served same-origin and needs none; these are the Vite dev server addresses. |
 | `IMU_CAM_WIDTH` / `IMU_CAM_HEIGHT` / `IMU_CAM_FPS` | `1280` / `720` / `30` | Capture geometry requested from the cameras. |
 | `FSYNC_INTERVAL_SEC` | `5` | CSV fsync interval during recording. |
 | `LATE_ACCEPT_SEC` | `600` | How long after STOP late phone data is still merged. |

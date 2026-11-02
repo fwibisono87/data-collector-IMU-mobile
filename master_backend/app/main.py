@@ -163,6 +163,19 @@ async def lifespan(app: FastAPI):
     await _stop_mdns()
 
 
+def cors_origins() -> list[str]:
+    """Browser origins allowed to call the API from another origin.
+
+    The dashboard is served by this backend (same origin), so CORS is only needed for
+    the Vite dev server. Phones talk over WebSockets, where CORS does not apply.
+    ``IMU_CORS_ORIGINS`` is a comma-separated list; the defaults are the two Vite
+    addresses (localhost and 127.0.0.1 are different origins to a browser).
+    """
+    raw = os.getenv("IMU_CORS_ORIGINS", "")
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
 app = FastAPI(
     title="IMU Telemetry Backend",
     version="2.0.0",
@@ -171,7 +184,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Frontend on same LAN; tighten via LAN_SUBNET if needed
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

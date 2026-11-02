@@ -440,6 +440,15 @@ def test_ws_ui_sends_only_on_change_and_heartbeats(api):
         assert time.monotonic() - started < 1.2
 
 
+def test_cors_allows_only_the_configured_dashboard_origin(api):
+    client, _rt = api
+    allowed = client.get("/api/state", headers={"Origin": "http://localhost:5173"})
+    assert allowed.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+    denied = client.get("/api/state", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in denied.headers
+
+
 def test_camera_start_warns_when_a_camera_produces_no_frames(api, rig):
     """A live-but-dark camera is a warning, not a failed session."""
     client, rt = api
