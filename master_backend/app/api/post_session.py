@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from ..camera.bins import FFmpegNotFound, ffmpeg_exe, ffprobe_exe
 from ..camera.interface import (
     CameraEvent,
     CameraRecording,
@@ -77,8 +78,6 @@ CONSOLIDATE_POLL_S = 3.0
 #: so a session whose phone never connects does not hold the ZIP for a full minute.
 CONSOLIDATE_STABLE_POLLS = 3
 
-FFPROBE = os.getenv("FFPROBE", "ffprobe")
-FFMPEG = os.getenv("FFMPEG", "ffmpeg")
 _EBML_MAGIC = b"\x1a\x45\xdf\xa3"
 
 
@@ -828,8 +827,12 @@ def _count_ebml_headers(path: Path) -> int:
 
 async def _ffprobe_duration_ms(path: Path) -> int | None:
     try:
+        exe = ffprobe_exe()
+    except FFmpegNotFound:
+        return None
+    try:
         proc = await asyncio.create_subprocess_exec(
-            FFPROBE, "-v", "error", "-show_entries", "format=duration",
+            exe, "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", str(path),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
@@ -855,8 +858,12 @@ async def _remux_in_place(path: Path) -> bool:
     container = path.suffix.lower().lstrip(".")
     fmt = ["-f", container] if container in ("webm", "mp4") else []
     try:
+        exe = ffmpeg_exe()
+    except FFmpegNotFound:
+        return False
+    try:
         proc = await asyncio.create_subprocess_exec(
-            FFMPEG, "-y", "-v", "error", "-i", str(path), "-c", "copy", *fmt, str(tmp),
+            exe, "-y", "-v", "error", "-i", str(path), "-c", "copy", *fmt, str(tmp),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(proc.communicate(), timeout=120)

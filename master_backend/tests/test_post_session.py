@@ -382,3 +382,17 @@ def test_a_recovered_video_without_a_duration_is_remuxed_in_place(tmp_path):
     assert report.path == f"videos/{path.name}"
     assert not list(tmp_path.glob("*.remux.tmp"))
     assert asyncio.run(post_module._ffprobe_duration_ms(path)) is not None
+
+
+def test_the_post_session_probe_honours_imu_ffprobe(tmp_path, monkeypatch):
+    """The post-session helper resolves the binary at call time, like the camera service."""
+    import os
+
+    exe = tmp_path / "imu-probe"
+    exe.write_text("#!/bin/sh\nprintf '1.250000\\n'\n", encoding="utf-8")
+    os.chmod(exe, 0o755)
+    monkeypatch.setenv("IMU_FFPROBE", str(exe))
+
+    assert asyncio.run(
+        post_module._ffprobe_duration_ms(tmp_path / "video.webm")
+    ) == 1250
