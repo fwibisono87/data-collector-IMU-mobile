@@ -17,6 +17,31 @@ Setup → Start.
 
 ## 1. First-time setup on Windows (field laptop)
 
+### 1.0 Recommended: the portable bundle (no admin rights, no installers)
+
+Build it on the Linux machine (`./tools/build_windows_dist.sh` →
+`dist/fams-server-<sha>-win64.zip`) and copy the zip to the Windows machine. It contains the
+backend, the dashboard built from the same commit, a self-contained Python 3.12 with every
+dependency already installed (`vendor\python`), and ffmpeg (`vendor\ffmpeg\bin`).
+
+1. Unzip it somewhere you can write without admin, e.g. `%USERPROFILE%\fams-server`.
+   Right-click the zip → Properties → **Unblock** first if Windows marks it as downloaded.
+2. Create `master_backend\.env` from `master_backend\.env.example` (§1.3). Point
+   `SSD_PATH`/`RESCUE_PATH` at folders you can write to.
+3. Double-click `start.bat`. It uses `vendor\python` automatically: no venv, no pip, no
+   network. §1.1, §1.2 and §1.4 below are not needed with the bundle.
+
+To upgrade, unzip the new bundle next to the old one and copy `master_backend\.env` over.
+Recorded data lives under `SSD_PATH`, not in the bundle folder.
+
+**Firewall — the one thing that may need IT.** Phones connect *into* this machine (TCP
+8000, plus UDP 5353 for mDNS discovery). Allowing inbound traffic in Windows Defender
+Firewall needs admin rights; without them, the "Windows Security Alert" shown on first start
+cannot be approved. Check it before a recording day: start the server, then on a phone on the
+same Wi-Fi open `http://<laptop-ip>:8000/health` in the browser. If it does not load, ask IT
+to allow `vendor\python\python.exe` (or TCP 8000) inbound on the Private network. If only mDNS
+is blocked, type the IP printed by the launcher into the app instead.
+
 ### 1.1 Python 3.12
 
 Install **Python 3.12 (64-bit)** from <https://www.python.org/downloads/windows/> and tick

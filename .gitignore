@@ -314,3 +314,6 @@ dashboard/node_modules/
 dashboard/coverage/
 dashboard/.vite/
 dashboard/*.local
+
+# Portable Windows server bundles (tools/build_windows_dist.sh)
+/dist/
