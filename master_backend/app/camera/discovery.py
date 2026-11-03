@@ -42,7 +42,7 @@ _PROBE_TIMEOUT_S = 5
 _DEFAULT_FAKE_COUNT = 2
 
 #: ``[dshow @ 0x000001f2b3c4d5e0] `` prefix on every line of the listing.
-_DSHOW_PREFIX = re.compile(r"^\[dshow @ (?:0x)?[0-9a-fA-F]+\]\s?")
+_DSHOW_PREFIX = re.compile(r"^\[[^\]@]+ @ (?:0x)?[0-9a-fA-F]+\]\s?")  # [dshow @ ..] or newer ffmpeg [in#0 @ ..]
 _DSHOW_DEVICE = re.compile(r'^\s*"(?P<label>.+?)"(?:\s+\((?P<kind>video|audio|none)\))?\s*$')
 _DSHOW_ALTERNATIVE = re.compile(r'^\s*Alternative name\s+"(?P<name>.*)"\s*$')
 
