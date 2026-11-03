@@ -189,6 +189,6 @@ CSV existed. To read one, use `tools/decode_fallback_buffer.py <file> --device-r
   formats, the state machine these settings are protecting.
 - [`../mobile_node/ARCHITECTURE.md`](../mobile_node/ARCHITECTURE.md) — what runs on the
   phone and which files it keeps.
-- `../connectivity_ops_fixes_plan.md` — **historical** (pre-v3): the full analysis of why
+- [`history/connectivity_ops_fixes_plan.md`](history/connectivity_ops_fixes_plan.md) — **historical** (pre-v3): the full analysis of why
   mid-session drops are ~80 % phone / 20 % app hygiene, and the screen-off test used to
   confirm the cause on a given unit. The OS settings above still apply unchanged.

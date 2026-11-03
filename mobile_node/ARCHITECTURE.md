@@ -101,9 +101,11 @@ Key invariants (all unit-tested in SessionLogicTest):
 | `filesDir/device_identity.json` | device UUID (migrated from Flutter `device_config.json` / shared prefs) |
 | `filesDir/recovery_uploaded_<sid>_<dev>.json` | upload completion markers (legacy dirs are also read) |
 
-Upgrade path: the same `applicationId` installs over the Flutter build; identity, markers,
-checkpoints and a surviving `fallback_buffer*` under `filesDir/app_flutter` are migrated
-(moved, never deleted).
+Upgrade path: the app id is `id.ac.ui.cs.csl.fams.sapper`, so it installs alongside the old
+Flutter build (`com.example.sensors_app`) rather than over it, and cannot read that app's
+files. The Flutter-migration code in `Identity.kt` (moving `filesDir/app_flutter` identity,
+markers, checkpoints and `fallback_buffer*`) is therefore inert on field phones: each phone
+starts with a fresh identity. Later `sapper` builds signed with the same key upgrade in place.
 
 ## How to test
 
