@@ -62,8 +62,11 @@ class ImuService : Service() {
         if (!startForegroundCompat(buildNotification(initial, now))) return
         val p = Pipeline(applicationContext, Runtime.mutableState) { stopSelf() }
         pipeline = p
-        Runtime.attach(p)
+        // start() BEFORE attach(): attach replays queued UI commands (the first Connect) onto
+        // the pipeline thread, and they need the identity that start()'s init loads. In the
+        // other order the first Connect ran before init and crashed ("identity not loaded").
         p.start()
+        Runtime.attach(p)
         scope.launch {
             while (isActive) {
                 delay(RENDER_INTERVAL_MS)

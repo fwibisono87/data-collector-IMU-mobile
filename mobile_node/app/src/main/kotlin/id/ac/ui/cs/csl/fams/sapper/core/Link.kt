@@ -76,6 +76,14 @@ class Link(
                 }
             }
 
+            // The server closing (e.g. 4002 role collision) arrives here first; OkHttp only
+            // calls onClosed after we close our side, so without this the link hangs half-open.
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                runCatching { webSocket.close(code, null) }
+                if (gen != generation) return
+                post { if (gen == generation) listener.onClosed(code, reason.ifEmpty { null }) }
+            }
+
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 if (gen != generation) return
                 post { if (gen == generation) listener.onClosed(code, reason.ifEmpty { null }) }
@@ -98,6 +106,14 @@ class Link(
                         listener.onClosed(response?.code, t.message ?: t.javaClass.simpleName)
                     }
                 }
+            }
+
+            // The server closing (e.g. 4002 role collision) arrives here first; OkHttp only
+            // calls onClosed after we close our side, so without this the link hangs half-open.
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                runCatching { webSocket.close(code, null) }
+                if (gen != generation) return
+                post { if (gen == generation) listener.onClosed(code, reason.ifEmpty { null }) }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
