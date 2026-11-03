@@ -5,7 +5,7 @@ import { useNow } from '../../lib/useNow';
 import { useSnapshot, useTransport } from '../../state/store';
 
 const MAX_LABEL = 50; // labels stay numeric 0–50, 0 = baseline (SPEC non-goals)
-const LABELS = Array.from({ length: MAX_LABEL + 1 }, (_, i) => i);
+const LABELS = Array.from({ length: MAX_LABEL }, (_, i) => i + 1); // 1–50; 0 has its own row
 
 function isTypingTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
@@ -24,6 +24,9 @@ function isTypingTarget(t: EventTarget | null): boolean {
 export function LabelPanel() {
   const transport = useTransport();
   const label = useSnapshot((s) => s.snapshot?.session?.label ?? null);
+  const sessionId = useSnapshot((s) => s.snapshot?.session?.session_id ?? null);
+  // Labels already used this session, so the operator can see how far along the protocol is.
+  const [visited, setVisited] = useState<Set<number>>(() => new Set());
   const [buffer, setBuffer] = useState('');
   const [pending, setPending] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -39,10 +42,16 @@ export function LabelPanel() {
     }
     setPending(id);
     setError(null);
+    setVisited((v) => (v.has(id) ? v : new Set(v).add(id)));
     transport
       .setLabel(id)
       .then(() => {
-        if (pendingRef.current === id) setPending(null);
+        // Do not clear here: the snapshot carrying the new label may arrive a moment later,
+        // and clearing first briefly showed the previous label again (0 -> 50 flashed 0).
+        // The effect below clears pending once the snapshot agrees; this is only a backstop.
+        setTimeout(() => {
+          if (pendingRef.current === id) setPending(null);
+        }, 3000);
       })
       .catch((e) => {
         setPending((p) => (p === id ? null : p));
@@ -82,6 +91,18 @@ export function LabelPanel() {
   }, []);
 
   const activeId = label?.id ?? 0;
+
+  useEffect(() => {
+    if (pending !== null && activeId === pending) setPending(null);
+  }, [activeId, pending]);
+
+  useEffect(() => {
+    setVisited(new Set());
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (label) setVisited((v) => (v.has(label.id) ? v : new Set(v).add(label.id)));
+  }, [label]);
   const shownId = pending ?? activeId;
   const elapsed = label ? fmtDuration(now - label.since_ms) : '0:00';
 
@@ -128,27 +149,41 @@ export function LabelPanel() {
         </p>
       )}
 
-      <div className="mt-2 grid min-h-0 flex-1 grid-cols-10 content-start gap-1 overflow-y-auto">
-        {LABELS.map((id) => {
-          const isActive = shownId === id;
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => applyRef.current(id)}
-              aria-pressed={isActive}
-              className={`rounded py-1.5 text-lg font-black tabular-nums transition-colors ${
-                isActive
-                  ? 'bg-cyan-400 text-black'
-                  : id === 0
-                    ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                    : 'bg-zinc-950 text-zinc-300 hover:bg-zinc-800'
-              } ${pending === id ? 'opacity-60' : ''}`}
-            >
-              {id}
-            </button>
-          );
-        })}
+      <div className="mt-2 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+        <button
+          type="button"
+          onClick={() => applyRef.current(0)}
+          aria-pressed={shownId === 0}
+          className={`w-full rounded py-1.5 text-lg font-black uppercase tracking-wider transition-colors ${
+            shownId === 0 ? 'bg-cyan-400 text-black' : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
+          } ${pending === 0 ? 'opacity-60' : ''}`}
+        >
+          0 · reset
+        </button>
+        <div className="grid grid-cols-10 content-start gap-1">
+          {LABELS.map((id) => {
+            const isActive = shownId === id;
+            const done = !isActive && visited.has(id);
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => applyRef.current(id)}
+                aria-pressed={isActive}
+                data-visited={done || undefined}
+                className={`rounded py-1.5 text-lg font-black tabular-nums transition-colors ${
+                  isActive
+                    ? 'bg-cyan-400 text-black'
+                    : done
+                      ? 'bg-emerald-800 text-emerald-100 hover:bg-emerald-700'
+                      : 'bg-zinc-950 text-zinc-300 hover:bg-zinc-800'
+                } ${pending === id ? 'opacity-60' : ''}`}
+              >
+                {id}
+              </button>
+            );
+          })}
+        </div>
       </div>
     </section>
   );

@@ -80,7 +80,7 @@ describe('Label panel (SPEC §5.2)', () => {
     expect(transport.setLabel).not.toHaveBeenCalled();
   });
 
-  it('shows a pending state until the REST call resolves', async () => {
+  it('keeps showing the new label after the REST call resolves (no flash back to the old one)', async () => {
     let resolveLabel: (v: LabelResponse) => void = () => {};
     const transport = stubTransport({
       setLabel: vi.fn(
@@ -98,7 +98,9 @@ describe('Label panel (SPEC §5.2)', () => {
     await act(async () => {
       resolveLabel({ label_id: 7, since_ms: Date.now() });
     });
-    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+    // Pending now clears when the snapshot reports label 7, not when REST resolves: clearing
+    // on resolve showed the previous label until the next snapshot (the 0 -> 50 flicker).
+    expect(screen.getByTestId('active-label').textContent).toBe('7');
   });
 
   it('a failed label change shows the message inline and clears pending', async () => {
