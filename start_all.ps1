@@ -14,7 +14,7 @@
 #   2. a previous backend and its ffmpeg children are gone (a webcam can be opened by
 #      one process at a time; a stuck ffmpeg breaks the next recording).
 #   3. ffmpeg + ffprobe exist (vendor\ffmpeg, PATH, or IMU_FFMPEG/IMU_FFPROBE).
-#   4. master_backend\.venv exists, runs, and has the requirements installed (-NoInstall
+#   4. master_backend\venv exists, runs, and has the requirements installed (-NoInstall
 #      skips this - that is what start.ps1 does every day).
 #   5. the backend answers /health, then the dashboard is opened and the LAN IP + phone
 #      instructions are printed.
@@ -30,7 +30,10 @@ param(
 
 $root = $PSScriptRoot
 $backendDir = Join-Path $root 'master_backend'
-$venvDir = Join-Path $backendDir '.venv'
+# master_backend\venv is the path the old launcher used. Windows Firewall rules are per
+# executable, and a venv runs the host python.exe underneath, so staying on the host Python
+# keeps the inbound permission the PC already has - no admin prompt.
+$venvDir = Join-Path $backendDir 'venv'
 $venvPy = Join-Path (Join-Path $venvDir 'Scripts') 'python.exe'
 $requirements = Join-Path $backendDir 'requirements.txt'
 $envFile = Join-Path $backendDir '.env'
@@ -208,7 +211,9 @@ if (-not (Test-Path -LiteralPath $staticIndex)) {
 # no network - so it skips the venv/pip machinery below entirely.
 $vendorPy = Join-Path $root 'vendor\python\python.exe'
 $buildIdFile = Join-Path $root 'BUILD_ID'
-$usingVendorPython = Test-Path -LiteralPath $vendorPy
+# Disabled: a downloaded python.exe is a new program to Windows Firewall, and allowing it
+# inbound needs admin rights. The host Python (via master_backend\venv) is used instead.
+$usingVendorPython = $false
 if ((Test-Path -LiteralPath $buildIdFile) -and -not [Environment]::GetEnvironmentVariable('BUILD_ID', 'Process')) {
     [Environment]::SetEnvironmentVariable('BUILD_ID', (Get-Content -LiteralPath $buildIdFile -TotalCount 1).Trim(), 'Process')
 }
@@ -253,7 +258,7 @@ if ($usingVendorPython) {
             Write-Host "WARNING: $venvPy missing - falling back to '$sysPython'. Run start_all.ps1 once to create it." -ForegroundColor Yellow
         } else {
             if (Test-Path -LiteralPath $venvDir) {
-                Write-Host "Backend    : .venv exists but has no python.exe - recreating it ..." -ForegroundColor Cyan
+                Write-Host "Backend    : venv exists but has no python.exe - recreating it ..." -ForegroundColor Cyan
                 Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
             }
             Write-Host "Backend    : creating venv at $venvDir ..." -ForegroundColor Cyan
@@ -343,7 +348,7 @@ if (-not $ready) {
         Write-Host "      It is still starting or stuck - see the log above." -ForegroundColor Red
     }
     Write-Host "      Common causes: another program on port $port, a broken venv (delete" -ForegroundColor Red
-    Write-Host "      master_backend\.venv and re-run start_all.ps1), or an SSD_PATH that does not exist." -ForegroundColor Red
+    Write-Host "      master_backend\venv and re-run start_all.ps1), or an SSD_PATH that does not exist." -ForegroundColor Red
     exit 1
 }
 
