@@ -221,6 +221,30 @@ async def _preview_stream(request: Request, worker, cam_id: str, width: int,
                 _preview_counts.pop(cam_id, None)
 
 
+@router.get("/cameras/{cam_id}/frame.jpg")
+async def get_frame_jpg(request: Request, cam_id: str,
+                        w: int = Query(default=320, ge=64, le=1920)):
+    """One preview frame. The dashboard polls this instead of holding a preview.mjpg stream
+    open per camera: four never-ending streams plus the snapshot socket used up Chrome's
+    six connections per host, and the STOP POST then queued in the browser forever."""
+    service = get_service(request)
+    worker_for = getattr(service, "worker", None)
+    worker = worker_for(cam_id) if callable(worker_for) else None
+    if worker is None:
+        return error_response("not_found", f"unknown camera {cam_id!r}")
+    sub = worker.subscribe(1, drop_oldest=True)
+    try:
+        frame = await asyncio.to_thread(sub.get, 1.5)
+    finally:
+        worker.unsubscribe(sub)
+    if frame is None:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    jpeg = await asyncio.to_thread(_downscale_jpeg, frame.data, w)
+    if jpeg is None:
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+    return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @router.get("/cameras/{cam_id}/preview.mjpg")
 async def get_preview_mjpg(request: Request, cam_id: str,
                            w: int = Query(default=640, ge=64, le=1920),

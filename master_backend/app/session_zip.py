@@ -235,7 +235,9 @@ def build_session_zip(
             )
 
         # Durability before the rename: a crash must not leave a visible partial archive.
-        fd = os.open(tmp, os.O_RDONLY)
+        # O_RDWR, not O_RDONLY: Windows' fsync (_commit) rejects a read-only descriptor with
+        # EBADF ("[Errno 9] Bad file descriptor"), which failed every package step there.
+        fd = os.open(tmp, os.O_RDWR | getattr(os, "O_BINARY", 0))
         try:
             os.fsync(fd)
         finally:

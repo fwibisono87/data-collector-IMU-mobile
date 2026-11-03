@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface Props {
   /** Either a real URL (MJPEG stream, JPEG still) or a `mock://` URL from MockTransport. */
@@ -17,7 +17,46 @@ interface Props {
  */
 export function CamPreview({ url, alt, className }: Props) {
   if (url.startsWith('mock://')) return <MockCanvas url={url} alt={alt} className={className} />;
+  if (url.includes('/preview.mjpg')) return <PolledFrame url={url} alt={alt} className={className} />;
   return <img src={url} alt={alt} className={className} />;
+}
+
+/**
+ * Live preview by polling `/frame.jpg` instead of holding a `preview.mjpg` stream open.
+ * Each MJPEG <img> pins one HTTP/1.1 connection for as long as it is mounted; with four
+ * cameras Chrome's six-per-host limit was exhausted and the STOP POST queued in the browser
+ * forever. A poll holds a connection only for one frame, and the next request starts after
+ * the previous one finished, so requests never pile up on a slow link.
+ */
+function PolledFrame({ url, alt, className }: Props) {
+  const [src, setSrc] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alive = useRef(true);
+  const parsed = new URL(url, 'http://x');
+  const w = parsed.searchParams.get('w') ?? '320';
+  const fps = Math.max(1, Math.min(10, Number(parsed.searchParams.get('fps') ?? '5') || 5));
+  const base = `${parsed.pathname.replace('/preview.mjpg', '/frame.jpg')}?w=${w}`;
+
+  const next = () => {
+    if (!alive.current) return;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => {
+      if (alive.current) setSrc(`${base}&t=${Date.now()}`);
+    }, 1000 / fps);
+  };
+
+  useEffect(() => {
+    alive.current = true;
+    setSrc(`${base}&t=${Date.now()}`);
+    return () => {
+      alive.current = false;
+      if (timer.current) clearTimeout(timer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [base]);
+
+  if (!src) return null;
+  return <img src={src} alt={alt} className={className} onLoad={next} onError={next} />;
 }
 
 function hashCode(s: string): number {
