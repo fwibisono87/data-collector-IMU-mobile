@@ -173,22 +173,20 @@ With no key configured the build still succeeds, but prints
 `release APK is signed with this machine's DEBUG key — NOT FOR FIELD PHONES` and the
 app version ends in `-debugsigned` (visible on the dashboard). Do not deploy such an APK.
 
-**One-time reinstall after switching off the old debug signature.** The phones currently
-carry the old debug-signed build, so the first release-signed APK cannot upgrade over it.
-For each phone, **upload/pull its rescue data first — uninstall deletes it**:
+**Old app on the phones.** The app id is now `id.ac.ui.cs.csl.fams.sapper`; the old build
+was `com.example.sensors_app`. The new app installs **alongside** the old one, so no uninstall
+is needed and nothing is lost. It gets a fresh `device_id` (the phone appears as a new device
+in the study) and its per-phone MIUI settings must be applied to the new app. Remove the old
+app only after pulling its rescue data:
 
 ```bash
 adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
 adb -s <serial> uninstall com.example.sensors_app
-adb -s <serial> install mobile_node/app/build/outputs/apk/release/app-release.apk
 ```
 
-The reinstall regenerates `device_id` (the identity file was app data), so the phone
-appears as a new device in the study; per-phone MIUI settings must also be redone. Every
-later build signed with the same release key upgrades normally with `adb install -r`.
+Every later build signed with the same release key upgrades normally with `adb install -r`.
 
-Install on every connected phone **without losing data** (after the one-time reinstall
-above, or on a phone already on the release key):
+Install on every connected phone **without losing data**:
 
 ```bash
 ./ops/install_phones.sh          # or: make install-phones
@@ -201,7 +199,7 @@ data off first. Manual equivalent:
 
 ```bash
 adb install -r mobile_node/app/build/outputs/apk/release/app-release.apk
-adb shell dumpsys package com.example.sensors_app | grep versionName   # confirm
+adb shell dumpsys package id.ac.ui.cs.csl.fams.sapper | grep versionName   # confirm
 ```
 
 Then, on each phone: open **IMU Node**, pick a role, and let it connect. Discovery is mDNS

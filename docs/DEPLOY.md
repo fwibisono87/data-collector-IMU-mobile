@@ -60,16 +60,16 @@ and use the format in `mobile_node/keystore.properties.example`). Keep that `.jk
 passwords backed up — every later build must be signed with the same key. Without one,
 Gradle warns and produces a `-debugsigned` APK that must not go to field phones.
 
-The **first** release-key install on phones still carrying the old debug-signed build
-needs a one-time uninstall. Upload/pull the rescue CSVs first, because uninstall deletes
-them and regenerates `device_id`:
+The app id is `id.ac.ui.cs.csl.fams.sapper`. Phones still carrying the old app
+(`com.example.sensors_app`) need no uninstall: the new app installs alongside it with a fresh
+`device_id`. Remove the old app only after pulling its rescue CSVs:
 
 ```bash
 adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
 adb -s <serial> uninstall com.example.sensors_app
 ```
 
-After that, normal installs (and `ops/install_phones.sh`) never uninstall:
+Normal installs (and `ops/install_phones.sh`) never uninstall:
 
 ```bash
 make apk                              # cd mobile_node && ./gradlew assembleRelease
@@ -149,7 +149,7 @@ the subject.
 2. **The session ZIP** — `<subject>_<tag>_<sid>.zip` in the same folder, written by the
    backend after finalize; downloading it is optional.
 3. **Each phone's rescue CSV** — written for the whole session regardless of the network,
-   at `/sdcard/Android/data/com.example.sensors_app/files/imu_sessions/`.
+   at `/sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions/`.
 
 Recovery moves, in order:
 

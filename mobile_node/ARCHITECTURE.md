@@ -7,7 +7,7 @@ state machine, file formats, how to test. The hard wire/file compatibility contr
 ## Components
 
 ```
-app/src/main/kotlin/com/example/sensors_app/
+app/src/main/kotlin/id/ac/ui/cs/csl/fams/sapper/
   MainActivity.kt          Compose host; Runtime.preload() BEFORE setContent (relaunch lands
                            on the right screen immediately); POST_NOTIFICATIONS +
                            ACTIVITY_RECOGNITION requests; back = moveTaskToBack on Status

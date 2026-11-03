@@ -51,7 +51,7 @@ di-deploy, satu APK di ponsel.
    Android: IMU Node (Kotlin, foreground service)                    kamera USB 1–5
 
    Data di laptop : <SSD_PATH>/Data_Riset_IMU/<subject>_<tag>/<sid>_…  (+ ZIP satu file)
-   Data di ponsel : /sdcard/Android/data/com.example.sensors_app/files/imu_sessions/
+   Data di ponsel : /sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions/
 ```
 
 Prinsip yang mengikat desain ini (lihat [`docs/rebuild/SPEC.md`](docs/rebuild/SPEC.md)):
@@ -113,10 +113,10 @@ mematikan ffmpeg yang dijalankan backend).
 > **Kunci rilis:** buat sekali `mobile_node/keystore.properties` dari
 > `keystore.properties.example` (atau set `IMU_KEYSTORE_*`), lalu **backup** file `.jks`-nya.
 > Tanpa kunci, Gradle memakai debug key, memberi peringatan keras, dan versi berakhiran
-> `-debugsigned` (jangan dipasang di ponsel lapangan). Ponsel yang masih memakai build lama
-> perlu **satu kali** uninstall/reinstall: unggah/ambil CSV rescue dulu (uninstall
-> menghapusnya), `adb uninstall com.example.sensors_app`, lalu install; `device_id` akan
-> dibuat ulang. Detail: [`STARTUP.md`](STARTUP.md) §3.
+> `-debugsigned` (jangan dipasang di ponsel lapangan). ID aplikasi sekarang
+> `id.ac.ui.cs.csl.fams.sapper`: aplikasi ini terpasang **berdampingan** dengan aplikasi lama
+> (`com.example.sensors_app`) tanpa perlu uninstall, dengan `device_id` baru. Hapus aplikasi
+> lama hanya setelah CSV rescue-nya diambil. Detail: [`STARTUP.md`](STARTUP.md) §3.
 
 ## 🛠️ Perintah Berguna
 

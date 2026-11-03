@@ -25,7 +25,7 @@ def _plan(overrides: dict | None = None, faults: object | None = None) -> dict:
         "duration_sec": 60,
         "poll_sec": 5,
         "startup_timeout_sec": 120,
-        "package_name": "com.example.sensors_app",
+        "package_name": "id.ac.ui.cs.csl.fams.sapper",
         "faults": faults if faults is not None else [
             {"at_sec": 10, "serial": "phone-a", "action": "wifi_off",
              "duration_sec": 20},
@@ -41,7 +41,7 @@ class PlanValidationTest(unittest.TestCase):
     def test_valid_plan_loads_and_synthesizes_wifi_on(self):
         with tempfile.TemporaryDirectory() as td:
             plan, faults = sm.load_and_validate_plan(_write_plan(td, _plan()))
-        self.assertEqual(plan["package_name"], "com.example.sensors_app")
+        self.assertEqual(plan["package_name"], "id.ac.ui.cs.csl.fams.sapper")
         synced = [f for f in faults if f.action == "wifi_on" and f.source_index == 0]
         self.assertEqual(len(synced), 1)
         self.assertAlmostEqual(synced[0].at_sec, 30.0)
@@ -124,7 +124,7 @@ class PlanValidationTest(unittest.TestCase):
 
 class CommandBuildTest(unittest.TestCase):
     SERIAL = "phone-a"
-    PKG = "com.example.sensors_app"
+    PKG = "id.ac.ui.cs.csl.fams.sapper"
 
     def test_each_action_builds_expected_argument_list(self):
         cases = {

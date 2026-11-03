@@ -54,15 +54,17 @@ val releaseSigningProblem: String? = when {
 }
 
 android {
-    namespace = "com.example.sensors_app"
+    namespace = "id.ac.ui.cs.csl.fams.sapper"
     // compileSdk 35 because the build laptop has platforms 35/36/37 only; targetSdk stays 34,
     // the level the field phones were validated at, so runtime behaviour does not change.
     compileSdk = 35
 
     defaultConfig {
-        // Same applicationId as the Flutter build: the new APK installs OVER the old one and
-        // keeps its data, which is how device_id and the local rescue CSVs survive (PHONE.md).
-        applicationId = "com.example.sensors_app"
+        // New applicationId (was com.example.sensors_app, the Flutter build). It installs
+        // ALONGSIDE the old app rather than over it: each phone gets a fresh device_id, and the
+        // old app's rescue CSVs stay under Android/data/com.example.sensors_app until it is
+        // uninstalled.
+        applicationId = "id.ac.ui.cs.csl.fams.sapper"
         minSdk = 26
         targetSdk = 34
         versionCode = 5

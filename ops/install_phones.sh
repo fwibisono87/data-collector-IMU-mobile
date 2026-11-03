@@ -3,7 +3,7 @@
 #
 # WHY the care around uninstall: the phone-local rescue CSVs — the system's data
 # guarantee — live in app-specific external storage
-# (/sdcard/Android/data/com.example.sensors_app/files/imu_sessions), which Android
+# (/sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions), which Android
 # DELETES on uninstall. So this script never uninstalls. If a signature mismatch makes
 # `adb install -r` impossible, it stops and tells you to pull the data off first.
 set -uo pipefail
@@ -13,7 +13,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PKG="com.example.sensors_app"
+PKG="id.ac.ui.cs.csl.fams.sapper"
 # Must stay in step with `make apk` (cd mobile_node && ./gradlew assembleRelease).
 APK="${1:-mobile_node/app/build/outputs/apk/release/app-release.apk}"
 

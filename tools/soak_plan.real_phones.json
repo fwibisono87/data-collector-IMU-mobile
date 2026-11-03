@@ -2,7 +2,7 @@
   "duration_sec": 1200,
   "poll_sec": 5,
   "startup_timeout_sec": 60,
-  "package_name": "com.example.sensors_app",
+  "package_name": "id.ac.ui.cs.csl.fams.sapper",
   "faults": [
     {
       "at_sec": 180,

@@ -125,14 +125,14 @@ Data_Riset_IMU/_calibration/              reference stills, overlays, session dr
 Data_Riset_IMU/_state/                    notices, draft, session ledger (not research data)
 ```
 
-**On each phone** (`/sdcard/Android/data/com.example.sensors_app/files/imu_sessions/`): the
+**On each phone** (`/sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions/`): the
 rescue CSV for every session the phone took part in, plus `events.jsonl` and
 `integrity.json` sidecars. This copy is written from START to STOP regardless of Wi-Fi and
 **carries no labels** (labels are applied server-side), but it is the only copy guaranteed to
 be complete if the phone never got its data out:
 
 ```bash
-adb pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup
+adb pull /sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions ./local_backup
 ```
 
 Pulling it does not remove it; the app keeps the newest ~20 sessions.

@@ -74,7 +74,7 @@ from pathlib import Path
 from typing import TextIO
 
 DEFAULT_BACKEND = "http://127.0.0.1:8000"
-DEFAULT_PACKAGE_NAME = "com.example.sensors_app"
+DEFAULT_PACKAGE_NAME = "id.ac.ui.cs.csl.fams.sapper"
 DEFAULT_RUN_ROOT = "soak_runs"
 RECORDING_STATE = "RECORDING"
 

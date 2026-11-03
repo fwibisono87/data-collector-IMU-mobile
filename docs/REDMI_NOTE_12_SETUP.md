@@ -31,23 +31,22 @@ once: `keytool -genkeypair -v -keystore imu-release.jks -alias imu -keyalg RSA -
 format in `mobile_node/keystore.properties.example`). Back the `.jks` up: from now on every
 field build must be signed with the same key, or the phone needs another uninstall.
 
-The same `applicationId` (`com.example.sensors_app`) installs **over** an earlier build and
-keeps the phone's `device_id`, checkpoint and buffered packets. Do **not** uninstall:
-Android deletes `/sdcard/Android/data/com.example.sensors_app/files/imu_sessions` (the
-rescue CSVs) on uninstall.
+The `applicationId` is `id.ac.ui.cs.csl.fams.sapper`. Later builds signed with the same key
+install **over** it and keep the phone's `device_id`, checkpoint and buffered packets. Do
+**not** uninstall: Android deletes
+`/sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions` (the rescue CSVs) on
+uninstall.
 
-**One-time exception:** phones still carrying the old debug-signed build cannot accept the
-first release-key APK (`adb install -r` fails with a signature mismatch). Pull/upload the
-rescue data first, then uninstall and install:
+**Old app (`com.example.sensors_app`):** the first `sapper` install sits *alongside* the old
+Flutter/debug-signed app instead of replacing it, so nothing is lost by installing. The new
+app gets a fresh `device_id` — the phone looks like a new device to the study — and its MIUI
+settings below must be applied to the new app. Remove the old app only after its rescue data
+is pulled:
 
 ```bash
 adb -s <serial> pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup_<serial>
 adb -s <serial> uninstall com.example.sensors_app
-adb -s <serial> install mobile_node/app/build/outputs/apk/release/app-release.apk
 ```
-
-The reinstall regenerates `device_id`, so the phone looks like a new device to the study;
-redo the MIUI settings below for it.
 
 ## 2. First launch — permissions
 
@@ -134,7 +133,7 @@ Every session is also written to phone-local storage from START to STOP, regardl
 Wi-Fi state:
 
 ```
-/sdcard/Android/data/com.example.sensors_app/files/imu_sessions/
+/sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions/
   <sid>_<tag>_<subject>_<role>_<devid>_rescue.csv
   <csv>.events.jsonl          service start/restart, connection lost/restored, buffer events
   <csv>.integrity.json        written when the session closes
@@ -147,10 +146,10 @@ The backend's own copy of the same session is
 Pull the phone copy with:
 
 ```
-adb pull /sdcard/Android/data/com.example.sensors_app/files/imu_sessions ./local_backup
+adb pull /sdcard/Android/data/id.ac.ui.cs.csl.fams.sapper/files/imu_sessions ./local_backup
 ```
 
-or over USB/MTP: **Internal storage → Android → data → com.example.sensors_app → files →
+or over USB/MTP: **Internal storage → android → data → id.ac.ui.cs.csl.fams.sapper → files →
 imu_sessions**. No root or special permission is needed — this is app-private external
 storage. The app keeps the last 20 sessions (~25 MB/hour each).
 
