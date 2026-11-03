@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window background shown before Compose draws its first frame. Matches the dark
+         palette in ui/Theme.kt so a cold launch does not flash white. -->
+    <color name="window_background">#FF101018</color>
+</resources>

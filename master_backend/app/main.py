@@ -10,7 +10,9 @@ pyproject.toml declares the package root one level up:
 import logging
 import os
 import socket
+import subprocess
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 
 import asyncio
@@ -28,10 +30,48 @@ logger = logging.getLogger(__name__)
 
 from .audit_logger import audit
 from .session_manager import SessionState, session_manager
+
+
+@lru_cache(maxsize=1)
+def build_id() -> str:
+    """Identity of the running backend, for the dashboard's preflight version check.
+
+    The dashboard bakes its own git sha in at build time and compares the two, so a skew is
+    caught before a session instead of surfacing as a render crash at save — the 2026-08-11
+    failure, where a browser ran a bundle that existed on no disk and matched no commit.
+
+    Returns "unknown" rather than guessing when this is not a git checkout; the preflight check
+    treats "unknown" as pending, never as a mismatch, so a false alarm can never block an
+    operator mid-study.
+    """
+    env = os.getenv("BUILD_ID", "").strip()
+    if env:
+        return env
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 from .upload import router as recovery_router
 from .export import router as export_router
 from .cameras import router as cameras_router
 from .ws_handler import router as ws_router, _live_broadcaster_loop
+from .api.routes import router as api_router
+from .api.errors import install_error_handlers
+from .api.post_session import PostSessionJob
+from .api.runtime import (
+    camera_router_or_none,
+    check_disk,
+    create_runtime,
+    set_runtime,
+    watchdog_loop,
+    wire_lifecycle,
+)
+from .api.static_site import mount_static
+from .api.ws_ui import UiHub, router as ui_ws_router
 
 
 @asynccontextmanager
@@ -40,36 +80,100 @@ async def lifespan(app: FastAPI):
     _ensure_dirs()
     await _start_audit()
     await _start_mdns()
+    # Capture the list before recovery: recovery finalises those sessions and makes them
+    # terminal, but the post-session job still owes them cameras + package.
+    interrupted = [
+        str(record.get("session_id"))
+        for record in session_manager.get_interrupted_sessions()
+        if record.get("session_id")
+    ]
+    await session_manager.recover_interrupted_sessions()
     _check_interrupted_sessions()
     asyncio.create_task(_live_broadcaster_loop())
     asyncio.create_task(session_manager.run_idle_reaper())
+
+    # v3 runtime: camera seam, notice/draft stores, post-session job and the UI hub.
+    rt = create_runtime()
+    set_runtime(rt)
+    # The camera routes must use THIS service. Without it they lazily built a second
+    # RealCameraService that tried to open the same webcams a second time.
+    app.state.camera_service = rt.camera_service
+    rt.post = PostSessionJob(rt)
+    rt.hub = UiHub(rt)
+    rt.hub.start()
+    unwire_lifecycle = wire_lifecycle(rt)
+    rt.post.start()
+    check_disk(rt)
+    watchdog = asyncio.create_task(watchdog_loop(rt), name="notice-watchdog")
+    await rt.post.resume_pending(interrupted)
     local_ip = _get_local_ip()
     port = int(os.getenv("PORT", "8000"))
     logger.info(
         "\n"
         "==================================================================\n"
-        "  IMU Telemetry Backend — READY\n"
-        "  Dashboard (this laptop) : http://localhost:3000\n"
-        "  Backend LAN IP          : %s:%s   <-- type THIS into phones & dashboard\n"
-        "  Phone telemetry WS      : ws://%s:%s/ws/telemetry\n"
-        "  Phone control   WS      : ws://%s:%s/ws/control\n"
+        "  IMU Collector — READY\n"
+        "  Dashboard               : http://localhost:%s/   (or http://%s:%s/ on the LAN)\n"
+        "  Phones                  : open the app; it finds this laptop automatically.\n"
+        "                            If it does not, type this IP into the phone: %s\n"
         "  Health check            : http://%s:%s/health\n"
         "==================================================================",
-        local_ip, port, local_ip, port, local_ip, port, local_ip, port,
+        port, local_ip, port, local_ip, local_ip, port,
     )
     yield
     # Shutdown — finalise an in-flight session so the CSV tail is fsynced, the file is
     # closed, and an integrity report exists. Ctrl-C used to lose up to FSYNC_INTERVAL_SEC
     # of rows and leave the session unfinalised (plan D8).
+    shutdown_session = ""
     try:
         if session_manager.state == SessionState.RECORDING:
+            shutdown_session = session_manager.session_id
             logger.warning("Shutdown during RECORDING — finalising session %s",
-                           session_manager.session_id)
+                           shutdown_session)
             await session_manager.stop_recording("backend_shutdown")
     except Exception as exc:
         logger.error("Shutdown finalisation failed: %s", exc)
+    # That finalize ran outside the REST stop handler, so nothing started the cameras step
+    # or the package one. Without this, a restart mid-session leaves a terminal session
+    # with no ZIP and no post record for the next startup to resume from.
+    if rt.post is not None and shutdown_session:
+        try:
+            await rt.post.on_stopped(shutdown_session)
+            await rt.post.wait_settled(shutdown_session)
+        except Exception as exc:
+            logger.error("Shutdown packaging failed: %s", exc)
+    # Tear down the v3 layer in reverse order. The post job goes first so no new package
+    # run starts while the writers are closing; the camera service is closed last.
+    watchdog.cancel()
+    try:
+        await rt.post.close()
+        await rt.hub.close()
+    except Exception as exc:
+        logger.error("v3 shutdown failed: %s", exc)
+    try:
+        unwire_lifecycle()
+    except Exception:
+        pass
+    try:
+        await rt.camera_service.close()
+    except Exception as exc:
+        logger.debug("camera service close failed: %s", exc)
+    app.state.camera_service = None
+    set_runtime(None)
     await audit.close()
     await _stop_mdns()
+
+
+def cors_origins() -> list[str]:
+    """Browser origins allowed to call the API from another origin.
+
+    The dashboard is served by this backend (same origin), so CORS is only needed for
+    the Vite dev server. Phones talk over WebSockets, where CORS does not apply.
+    ``IMU_CORS_ORIGINS`` is a comma-separated list; the defaults are the two Vite
+    addresses (localhost and 127.0.0.1 are different origins to a browser).
+    """
+    raw = os.getenv("IMU_CORS_ORIGINS", "")
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return origins or ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
 app = FastAPI(
@@ -80,7 +184,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Frontend on same LAN; tighten via LAN_SUBNET if needed
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -89,6 +193,13 @@ app.include_router(ws_router)
 app.include_router(recovery_router)
 app.include_router(export_router)
 app.include_router(cameras_router)
+app.include_router(api_router)
+app.include_router(ui_ws_router)
+# Lane L5's /api/cameras/* + /api/calibration/* router, when this checkout has it.
+_camera_router = camera_router_or_none()
+if _camera_router is not None:
+    app.include_router(_camera_router)
+install_error_handlers(app)
 
 
 @app.get("/health")
@@ -98,6 +209,8 @@ async def health():
     return {
         "status": "ok",
         "version": "2.0.0",
+        # Real commit identity. `version` is left untouched for any existing consumer.
+        "build_id": build_id(),
         "session_state": session_manager.state,
         "session_id": session_manager.session_id or None,
         "online_devices": len(session_manager.online_devices),
@@ -126,6 +239,24 @@ async def session_info():
         "subject": session_manager.subject_name,
         "devices": devices,
     }
+
+
+@app.get("/session/recovery")
+async def session_recovery_list():
+    """List terminal/interrupted sessions for a dashboard that just reconnected."""
+    return {
+        "sessions": session_manager.list_recovery_sessions(),
+    }
+
+
+@app.get("/session/recovery/{session_id}")
+async def session_recovery(session_id: str):
+    """Return the durable lifecycle record even when no live WebSocket exists."""
+    record = session_manager.get_recovery_session(session_id)
+    if record is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="session ledger record not found")
+    return record
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -196,3 +327,9 @@ def _get_local_ip() -> str:
             return s.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+
+
+# Serves the built dashboard at /. Its catch-all GET must be registered LAST: FastAPI
+# matches routes in registration order, so mounting it earlier swallowed /health,
+# /session and /session/recovery (all defined above) with a 404.
+mount_static(app)

@@ -17,6 +17,8 @@ never collide with a concurrent one.
 import json
 import logging
 import os
+import asyncio
+import inspect
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -31,7 +33,22 @@ router = APIRouter(tags=["cameras"])
 SSD_PATH = Path(os.getenv("SSD_PATH", "./data"))
 PENDING_CAMERAS = SSD_PATH / "Data_Riset_IMU" / "_pending_cameras"
 
-_VALID_EVENTS = ("started", "flash", "stopped")
+_VALID_EVENTS = ("started", "flash", "stopped", "track_ended", "write_error")
+_camera_locks: dict[str, asyncio.Lock] = {}
+
+# Optional listeners invoked after an anchor is persisted: (session_id, event, record).
+# The v3 notice layer (app/api/runtime.py) uses these to surface track_ended/write_error
+# the moment a camera reports them, instead of only at stop. May be sync or async; a
+# failing hook is logged and swallowed — anchors are the contract, hooks are reporting.
+_mark_hooks: list = []
+
+
+def add_mark_hook(callback) -> None:
+    _mark_hooks.append(callback)
+
+
+def remove_mark_hook(callback) -> None:
+    _mark_hooks.remove(callback)
 
 
 def _slug(s: str) -> str:
@@ -47,7 +64,15 @@ def _validate_session_id(session_id: str) -> str:
 def _cameras_path(session_id: str) -> Path:
     folders = _session_folders(session_id)
     if folders:
-        return folders[0] / f"{session_id}_cameras.json"
+        target = folders[0] / f"{session_id}_cameras.json"
+        pending = PENDING_CAMERAS / f"{session_id}_cameras.json"
+        # A START anchor can arrive before the first CSV flush creates the session folder.
+        # Move that pending file into the real folder before the next mark so the anchors do
+        # not split across two locations and the bundle always sees one complete record.
+        if pending.exists() and not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pending, target)
+        return target
     return PENDING_CAMERAS / f"{session_id}_cameras.json"
 
 
@@ -70,7 +95,18 @@ def _read_cameras(path: Path, session_id: str) -> dict:
 
 def _write_cameras(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 @router.post("/cameras/{session_id}/mark")
@@ -90,28 +126,39 @@ async def cameras_mark(session_id: str, body: dict):
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="ts_ms must be an integer")
 
-    path = _cameras_path(session_id)
-    data = _read_cameras(path, session_id)
+    lock = _camera_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        path = _cameras_path(session_id)
+        data = _read_cameras(path, session_id)
 
-    record = next(
-        (c for c in data["cameras"] if c.get("cam_id") == cam_id),
-        None,
-    )
-    if record is None:
-        record = {
-            "session_id": session_id,
-            "cam_id": cam_id,
-            "device_id": (body.get("device_id") or "").strip(),
-            "browser_label": (body.get("label") or "").strip(),
-            "mime": (body.get("mime") or "").strip(),
-            "started_at_ms": 0,
-            "flash_at_ms": 0,
-            "stopped_at_ms": 0,
-        }
-        data["cameras"].append(record)
+        record = next(
+            (c for c in data["cameras"] if c.get("cam_id") == cam_id),
+            None,
+        )
+        if record is None:
+            record = {
+                "session_id": session_id,
+                "cam_id": cam_id,
+                "device_id": (body.get("device_id") or "").strip(),
+                "browser_label": (body.get("label") or "").strip(),
+                "mime": (body.get("mime") or "").strip(),
+                "started_at_ms": 0,
+                "flash_at_ms": 0,
+                "stopped_at_ms": 0,
+                "track_ended_at_ms": 0,
+            }
+            data["cameras"].append(record)
 
-    record[f"{event}_at_ms"] = ts_ms
-    _write_cameras(path, data)
+        record[f"{event}_at_ms"] = ts_ms
+        _write_cameras(path, data)
+
+    for hook in list(_mark_hooks):
+        try:
+            result = hook(session_id, event, record)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("camera mark hook failed: %s", exc)
 
     note = "camera_mark_pending_folder" if not _session_folders(session_id) else "camera_mark"
     await audit.log("INFO", note, {

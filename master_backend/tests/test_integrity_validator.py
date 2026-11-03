@@ -59,12 +59,19 @@ class _FakeIo:
     def dropped_no_writer(self, device_id: str) -> int:
         return 0
 
+    def write_failures(self, device_id: str) -> int:
+        return 0
+
+    def rows_lost_after_failover(self, device_id: str) -> int:
+        return 0
+
 
 @pytest.fixture
 def run_validator(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(iv_mod, "io_manager", _FakeIo())
 
-    def _run(session_id, device_specs, devices, scheduled_start_ms=0):
+    def _run(session_id, device_specs, devices, scheduled_start_ms=0,
+            label_timeline=None, session_start_ms=0, session_end_ms=0):
         file_results = {}
         for device_id, csv_path in device_specs.items():
             text = csv_path.read_text(encoding="utf-8").splitlines()
@@ -76,7 +83,8 @@ def run_validator(tmp_path: Path, monkeypatch):
                 "reordered": 0,
             }
         return asyncio.run(iv_mod.IntegrityValidator().run(
-            session_id, file_results, devices, scheduled_start_ms
+            session_id, file_results, devices, scheduled_start_ms,
+            label_timeline, session_start_ms, session_end_ms
         ))
 
     return _run
@@ -180,3 +188,70 @@ def test_half_rate_device_with_offline_intervals_stays_fail(tmp_path: Path, run_
     assert report["status"] == "FAIL"
     assert any("true rate" in r for r in device["reasons"])
     assert any("offline" in r for r in device["reasons"])
+
+
+def test_all_devices_completed_reflects_actual_rows(tmp_path: Path, run_validator):
+    """The flag must read file_results' "rows" key, not "row_count".
+
+    io_manager.close_session() returns {path, rows, sha256, reordered}. Reading "row_count"
+    defaulted to 0 for every device, so a session where all three devices wrote 103k rows
+    still reported all_devices_completed=False (observed 2026-08-11).
+    """
+    csv1 = _write_csv(tmp_path / "s_chest_sensor_data.csv", _clean_rows("DEV1"))
+    csv2 = _write_csv(tmp_path / "s_waist_sensor_data.csv", _clean_rows("DEV2"))
+    devices = [_device("DEV1", first_packet_ts=1000), _device("DEV2", first_packet_ts=1000)]
+
+    report = run_validator("s", {"DEV1": csv1, "DEV2": csv2}, devices, scheduled_start_ms=900)
+
+    assert report["cross_device_checks"]["all_devices_completed"] is True
+
+
+def test_all_devices_completed_false_when_a_device_wrote_nothing(tmp_path: Path, monkeypatch):
+    """Still False when a device genuinely produced no rows — the flag must stay meaningful."""
+    monkeypatch.setattr(iv_mod, "io_manager", _FakeIo())
+    csv1 = _write_csv(tmp_path / "s_chest_sensor_data.csv", _clean_rows("DEV1"))
+    empty = tmp_path / "s_waist_sensor_data.csv"
+    empty.write_text(HEADER + "\n", encoding="utf-8")
+
+    report = asyncio.run(iv_mod.IntegrityValidator().run(
+        "s",
+        {
+            "DEV1": {"path": str(csv1), "rows": 100, "sha256": "a", "reordered": 0},
+            "DEV2": {"path": str(empty), "rows": 0, "sha256": "b", "reordered": 0},
+        },
+        [_device("DEV1", first_packet_ts=1000), _device("DEV2", first_packet_ts=1000)],
+        900,
+    ))
+
+    assert report["cross_device_checks"]["all_devices_completed"] is False
+
+
+def test_short_gap_returning_to_zero_is_analysis_ready(tmp_path: Path, run_validator):
+    rows = [_row(i * 10, float(i), i if i < 1000 else i + 1, "DEV1") for i in range(2000)]
+    csv = _write_csv(tmp_path / "s_waist_sensor_data.csv", rows)
+    report = run_validator(
+        "s", {"DEV1": csv}, [_device("DEV1")],
+        label_timeline=[
+            {"timestamp_ms": 9_990, "label_id": 1, "label_name": "1"},
+            {"timestamp_ms": 10_000, "label_id": 0, "label_name": "0"},
+        ],
+        session_start_ms=0,
+        session_end_ms=20_000,
+    )
+    device = _device_report(report, "DEV1")
+    assert device["label_aware_sequence_gaps"][0]["waived"] is True
+    assert report["analysis_ready"] is True
+
+
+def test_gap_over_task_label_is_not_analysis_ready(tmp_path: Path, run_validator):
+    rows = [_row(i * 10, float(i), i if i < 1000 else i + 1, "DEV1") for i in range(2000)]
+    csv = _write_csv(tmp_path / "s_waist_sensor_data.csv", rows)
+    report = run_validator(
+        "s", {"DEV1": csv}, [_device("DEV1")],
+        label_timeline=[{"timestamp_ms": 5_000, "label_id": 1, "label_name": "1"}],
+        session_start_ms=0,
+        session_end_ms=20_000,
+    )
+    device = _device_report(report, "DEV1")
+    assert device["label_aware_sequence_gaps"][0]["waived"] is False
+    assert report["analysis_ready"] is False

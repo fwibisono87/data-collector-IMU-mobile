@@ -1,0 +1,18 @@
+# Gradle / build output. The wrapper itself (gradlew, gradle/wrapper/*) IS committed so
+# `cd mobile_node && ./gradlew assembleRelease` works on a fresh clone with no Gradle install.
+.gradle/
+build/
+app/build/
+.kotlin/
+local.properties
+
+# Release signing password/key — never commit (see keystore.properties.example).
+keystore.properties
+*.jks
+*.keystore
+
+# Android Studio / IntelliJ per-user state
+.idea/
+*.iml
+captures/
+.cxx/

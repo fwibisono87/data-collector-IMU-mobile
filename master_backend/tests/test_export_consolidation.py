@@ -5,6 +5,7 @@ helpers, and the /export consolidate + manifest contract with per-role primacy f
 "whole" verdict.
 """
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -64,12 +65,14 @@ def _recovery_info(recovery: Path, device: str, *, role: str, seq1: int, n: int)
         "device_id": device,
         "role": role,
         "complete": True,
+        "sha256_verified": True,
+        "state": "verified",
         "done": False,
     }
-    (d / f"{slug}.info.json").write_text(
-        __import__("json").dumps(info), encoding="utf-8"
-    )
-    return _write_csv(d / f"{slug}.csv", [_row(1000 + i, seq1 + i, device) for i in range(n)])
+    csv = _write_csv(d / f"{slug}.csv", [_row(1000 + i, seq1 + i, device) for i in range(n)])
+    info["total_bytes"] = csv.stat().st_size
+    (d / f"{slug}.info.json").write_text(__import__("json").dumps(info), encoding="utf-8")
+    return csv
 
 
 def _slug_impl(s: str) -> str:
@@ -208,6 +211,27 @@ def test_consolidate_and_manifest_whole(store: dict):
     assert after["recovery_pending"] is False
     assert set(after["per_roles"]) == {"chest", "waist"}
     assert after["whole"] is True
+    assert after["validation"]["status"] == "PASS"
+
+
+def test_consolidation_revalidation_rejects_remaining_sequence_gap(store: dict):
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(1, 1, "DEV-CHEST"), _row(2, 2, "DEV-CHEST"),
+        _row(3, 3, "DEV-CHEST"), _row(4, 4, "DEV-CHEST"),
+    ])
+    _recovery_info(store["recovery"], "DEV-CHEST", role="chest", seq1=6, n=3)
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status": "PASS", "devices": []}', encoding="utf-8"
+    )
+
+    result = _run(export_consolidate(SESSION_ID))
+    assert result["validation"]["status"] == "FAIL"
+
+    manifest = _run(export_manifest(SESSION_ID))
+    assert manifest["status"] == "FAIL"
+    assert manifest["whole"] is False
+    assert any("final consolidated validation" in reason for reason in manifest["reasons"])
 
 
 def test_manifest_prefers_per_role_pending(store: dict):
@@ -234,6 +258,22 @@ def test_manifest_prefers_per_role_pending(store: dict):
     assert m["late_pending"] is True
     assert m["recovery_pending"] is False
     assert m["whole"] is False
+
+
+def test_manifest_ignores_empty_late_sidecar(store: dict):
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(1, 1, "DEV-CHEST"),
+    ])
+    (folder / f"{SESSION_ID}_chest_sensor_data_late.csv").write_bytes(b"")
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status": "PASS", "devices": []}', encoding="utf-8"
+    )
+
+    manifest = _run(export_manifest(SESSION_ID))
+
+    assert manifest["late_pending"] is False
+    assert manifest["recovery_pending"] is False
 
 
 # ── Version-tolerant merge ────────────────────────────────────────────────────
@@ -339,3 +379,113 @@ def test_scan_rows_ignores_v1_header(tmp_path: Path):
     row_count, _labels = _scan_rows([v1, v2])
 
     assert row_count == 7, "header lines of either schema version must not be counted"
+
+
+# ── Server-side bundle ───────────────────────────────────────────────────────
+
+
+def test_bundle_contains_data_artifacts_and_excludes_video(store: dict):
+    """The bundle must be assemblable without the browser.
+
+    The 2026-08-11 incident cost the deliverable — not the data — because the zip was built
+    entirely in the dashboard, so a render crash at save left the operator with nothing to hand
+    over even though every byte was on disk.
+    """
+    import zipfile
+    from master_backend.app.export import export_bundle
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv",
+               [_row(1, 1, "DEV-CHEST"), _row(2, 2, "DEV-CHEST")])
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text('{"status":"PASS"}', encoding="utf-8")
+    # Video lives only in the browser; if one is ever on disk it must not silently bloat the zip.
+    (folder / f"{SESSION_ID}_cam1_video_sync.webm").write_bytes(b"\x1a\x45\xdf\xa3fake")
+
+    result = _run(export_bundle(SESSION_ID))
+
+    assert result["contains_video"] is False
+    out = Path(result["path"])
+    assert out.name == f"{SESSION_ID}_bundle.zip" and out.is_file()
+
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        manifest = json.loads(z.read("bundle_manifest.json"))
+
+    assert f"data/{SESSION_ID}_chest_sensor_data.csv" in names
+    assert f"data/{SESSION_ID}_integrity_report.json" in names
+    assert manifest["session_id"] == SESSION_ID
+    assert manifest["contains_video"] is False
+    # No leftover temp file masquerading as a finished archive.
+    assert not (folder / f"{SESSION_ID}_bundle.zip.tmp").exists()
+
+
+def test_bundle_is_not_nested_into_itself_on_rebuild(store: dict):
+    import zipfile
+    from master_backend.app.export import export_bundle
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [_row(1, 1, "DEV-CHEST")])
+
+    _run(export_bundle(SESSION_ID))
+    second = _run(export_bundle(SESSION_ID))
+
+    with zipfile.ZipFile(Path(second["path"])) as z:
+        assert not any(n.endswith("_bundle.zip") for n in z.namelist())
+
+
+def test_bundle_unknown_session_is_404_not_500(store: dict):
+    from fastapi import HTTPException
+    from master_backend.app.export import export_bundle
+
+    with pytest.raises(HTTPException) as exc:
+        _run(export_bundle("no-such-session"))
+    assert exc.value.status_code == 404
+
+
+def test_partial_session_bundle_is_downloadable(store: dict):
+    """A FAIL/PARTIAL verdict warns the operator; it must never hide captured CSVs."""
+    from fastapi.responses import FileResponse
+    from master_backend.app.export import export_bundle, export_bundle_file
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [_row(1, 1, "DEV-CHEST")])
+    (folder / f"{SESSION_ID}_integrity_report.json").write_text(
+        '{"status":"PARTIAL"}', encoding="utf-8")
+
+    _run(export_bundle(SESSION_ID))
+    response = _run(export_bundle_file(SESSION_ID))
+
+    assert isinstance(response, FileResponse)
+    assert str(response.path).endswith(f"{SESSION_ID}_bundle.zip")
+
+
+def test_consolidation_revalidates_the_files_delivered_to_analysis(store: dict):
+    """The final verdict must cover merged/late/recovery rows, not only STOP-time files."""
+    from master_backend.app.session_ledger import SessionLedger
+
+    folder = _session_folder(store["ssd"])
+    _write_csv(folder / f"{SESSION_ID}_chest_sensor_data.csv", [
+        _row(i + 1, i, "DEV-CHEST") for i in range(100)
+    ])
+    SessionLedger(store["ssd"] / ".sessions").write(SESSION_ID, {
+        "session_id": SESSION_ID,
+        "state": "IDLE",
+        "terminal": True,
+        "subject_name": "Alice",
+        "session_tag": "T1",
+        "operator": "operator",
+        "scheduled_start_ms": 0,
+        "recording_started_ms": 0,
+        "label_timeline": [],
+        "devices": [{
+            "device_id": "DEV-CHEST", "role": "chest", "packets": 100,
+            "offline_intervals": [], "first_packet_ts": None,
+        }],
+        "integrity_report": {"status": "PARTIAL", "devices": []},
+    })
+
+    result = _run(export_consolidate(SESSION_ID))
+    assert result["integrity_report"]["validation_scope"] == "consolidated_sources"
+    updated = SessionLedger(store["ssd"] / ".sessions").read(SESSION_ID)
+    assert updated is not None
+    assert updated["revalidated_after_consolidation_ms"] > 0

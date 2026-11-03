@@ -1,0 +1,89 @@
+name: Tests
+
+# Same triggers as build_apk.yml: this is the check that must stay green before a
+# build is worth downloading.
+on:
+  push:
+    branches: [main, master, make-proper, 'experiment/**', 'lane/**']
+  pull_request:
+    branches: [main, master, make-proper]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: master_backend/requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r master_backend/requirements.txt pytest pytest-asyncio httpx
+
+      # Run from the repository root: the package imports are master_backend.*.
+      - name: pytest (fast suite)
+        run: python -m pytest master_backend/tests -q -m "not slow"
+
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Lint
+        working-directory: dashboard
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: dashboard
+        run: npm run typecheck
+
+      - name: API schema/types are current
+        working-directory: dashboard
+        run: npm run check:api
+
+      - name: Unit tests
+        working-directory: dashboard
+        run: npm test -- --run
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # compileSdk 35 (mobile_node/app/build.gradle.kts), same components as the APK job.
+      - name: Install SDK components
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Unit tests and lint
+        working-directory: mobile_node
+        run: ./gradlew --no-daemon testDebugUnitTest lint

@@ -4,6 +4,7 @@ WebSocket endpoints for telemetry and control channels (CLAUDE.md §8).
 /ws/control   — Command binary channel (bidirectional)
 """
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -17,9 +18,10 @@ from master_backend.proto.commands import (
     make_ack, make_clock_sync_response, make_error_alert, make_pong,
 )
 from .audit_logger import audit
+from .csv_schema import IDLE_SEQ_BASE
 from .dedup_store import dedup
 from .io_manager import io_manager
-from .session_manager import SessionState, session_manager
+from .session_manager import IllegalTransition, SessionState, session_manager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,14 +38,30 @@ _latest_samples: dict[str, dict] = {}
 _ACCEPTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
-def _state_pong(command_id: str = "") -> bytes:
-    """Authoritative session state, delivered on the PONG heartbeat (plan DD-1)."""
+def _state_pong(command_id: str = "", device_id: str = "") -> bytes:
+    """Authoritative state plus per-device telemetry progress on a device PONG."""
+    dev = session_manager.get_device(device_id) if device_id else None
+    telemetry_age_ms = None
+    telemetry_packets = None
+    if dev is not None:
+        telemetry_packets = dev.packets_received
+        telemetry_age_ms = (
+            int((time.monotonic() - dev.last_packet_at) * 1000)
+            if dev.last_packet_at else -1
+        )
     return make_pong(
         command_id,
         state=session_manager.state.value,
         session_id=session_manager.session_id or "",
         late_sid=io_manager.late_session_id,
+        telemetry_packets=telemetry_packets,
+        telemetry_age_ms=telemetry_age_ms,
     )
+
+
+def latest_samples() -> dict[str, dict]:
+    """Read-only view of the display cache the /ws/ui live stream publishes."""
+    return dict(_latest_samples)
 
 
 def drop_latest_sample(device_id: str) -> None:
@@ -90,55 +108,7 @@ async def telemetry_ws(websocket: WebSocket) -> None:
                 )
                 continue
 
-            if session_manager.state != SessionState.RECORDING:
-                # Rate accounting must run in EVERY state, not just RECORDING. Phones stream
-                # telemetry from the moment they connect (attachSensorStream is persistent),
-                # and preflight gates START on true_hz — so counting only while RECORDING left
-                # the gate reading 0 Hz before every session and blocked recording outright.
-                # start_recording() resets these counters, so idle traffic never contaminates
-                # a session's totals. Deliberately outside the dedup path below: that one is
-                # gated on the session id and exists to keep duplicate rows off disk.
-                session_manager.increment_packets(device_id)
-                session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
-                # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
-                # flushing the buffered tail of the session that just ended. Dropping it
-                # here (and letting the phone then erase its own copy) was a total-loss
-                # path (plan D3).
-                late_sid = io_manager.late_session_id
-                if late_sid:
-                    dev = session_manager.get_device(device_id)
-                    role = dev.device_role if dev else "unknown"
-                    if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
-                        dedup.add(device_id, late_sid, pkt.sequence_number)
-                        await io_manager.write_late(pkt, role)
-                continue
-
-            if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
-                continue
-
-            dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
-            # A device that joined or rejoined after START has no writer yet; without this
-            # every one of its packets is discarded while the dashboard counts them (plan D2).
-            if not io_manager.has_writer(device_id):
-                dev = session_manager.get_device(device_id)
-                if dev is not None:
-                    await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
-            session_manager.increment_packets(device_id)
-            session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
-            session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
-            try:
-                await io_manager.write_packet(pkt)
-            except OSError as exc:
-                logger.error("write_packet failed for %s: %s", device_id[:8], exc)
-                await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
-                # Do not re-raise — an I/O error must not drop the WebSocket.
-                # The mobile will activate its blackbox buffer on next reconnect.
-            # Cache latest sample for /ws/live dashboard chart.
-            _latest_samples[device_id] = {
-                "acc": [round(pkt.acc_x, 4), round(pkt.acc_y, 4), round(pkt.acc_z, 4)],
-                "gyro": [round(pkt.gyro_x, 4), round(pkt.gyro_y, 4), round(pkt.gyro_z, 4)],
-                "ts": pkt.timestamp_ms,
-            }
+            await _ingest_packet(pkt)
 
     except WebSocketDisconnect:
         pass
@@ -154,12 +124,105 @@ async def telemetry_ws(websocket: WebSocket) -> None:
         await audit.log("INFO", "ws_disconnect", {"channel": "telemetry", "device_id": device_id})
 
 
+async def _ingest_packet(pkt: SensorPacket) -> None:
+    """One parsed telemetry packet: accounting in every state, writes only for session data.
+
+    Extracted from telemetry_ws so the ingest rules can be driven directly by tests.
+    Packets with ``sequence_number >= IDLE_SEQ_BASE`` are the phone's idle stream
+    (SPEC §6.3): they never touch the dedup store, a session CSV, a late CSV, a
+    writer or the first-packet marker, because they are not session data.
+
+    While NOT recording, idle packets keep feeding the rate/liveness accounting —
+    that is the whole point of streaming before START, and the preflight true_hz
+    gate reads it. While RECORDING they must not: ``packets_received`` and
+    ``acc_changes`` end up in the research file integrity_report.json, so an idle
+    packet still in flight at START (or from a phone that missed START) would
+    inflate a research value. During RECORDING an idle packet only sets the
+    separate ``idle_last_at`` marker ("connected, but not recording").
+
+    The ``_latest_samples`` display cache is updated for every packet in every
+    state — it feeds the live chart (/ws/live today, /ws/ui ``live`` later), and
+    the Setup view's chart would be empty if it only saw RECORDING traffic.
+    """
+    device_id = pkt.device_id
+    # Every telemetry packet proves the phone is streaming, idle or session data. This
+    # marker is liveness only; it never feeds a research counter.
+    session_manager.note_telemetry(device_id)
+    idle = pkt.sequence_number >= IDLE_SEQ_BASE
+
+    if session_manager.state != SessionState.RECORDING:
+        # Rate accounting must run in EVERY non-recording state. Phones stream
+        # telemetry from the moment they connect (attachSensorStream is persistent),
+        # and preflight gates START on true_hz — so counting only while RECORDING left
+        # the gate reading 0 Hz before every session and blocked recording outright.
+        # start_recording() resets these counters, so idle traffic never contaminates
+        # a session's totals. Deliberately outside the dedup path below: that one is
+        # gated on the session id and exists to keep duplicate rows off disk.
+        session_manager.increment_packets(device_id)
+        session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
+        # Post-STOP grace window: a phone reconnecting within LATE_ACCEPT_SEC is
+        # flushing the buffered tail of the session that just ended. Dropping it
+        # here (and letting the phone then erase its own copy) was a total-loss
+        # path (plan D3).
+        late_sid = io_manager.late_session_id
+        if late_sid and not idle:
+            dev = session_manager.get_device(device_id)
+            role = dev.device_role if dev else "unknown"
+            if not dedup.is_duplicate(device_id, late_sid, pkt.sequence_number):
+                dedup.add(device_id, late_sid, pkt.sequence_number)
+                try:
+                    await io_manager.write_late(pkt, role)
+                except OSError as exc:
+                    await audit.log("ERROR", "late_write_failed", {
+                        "device_id": device_id, "error": str(exc),
+                    })
+        _cache_latest_sample(pkt)
+        return
+
+    if idle:
+        session_manager.note_idle_packet(device_id)
+        _cache_latest_sample(pkt)
+        return
+
+    if dedup.is_duplicate(device_id, session_manager.session_id, pkt.sequence_number):
+        return
+
+    dedup.add(device_id, session_manager.session_id, pkt.sequence_number)
+    # A device that joined or rejoined after START has no writer yet; without this
+    # every one of its packets is discarded while the dashboard counts them (plan D2).
+    if not io_manager.has_writer(device_id):
+        dev = session_manager.get_device(device_id)
+        if dev is not None:
+            await io_manager.ensure_writer(device_id, dev.device_role, dev.true_hz_avg)
+    session_manager.increment_packets(device_id)
+    session_manager.note_sample(device_id, (pkt.acc_x, pkt.acc_y, pkt.acc_z))
+    session_manager.mark_first_packet(device_id, pkt.timestamp_ms)
+    try:
+        await io_manager.write_packet(pkt)
+    except OSError as exc:
+        logger.error("write_packet failed for %s: %s", device_id[:8], exc)
+        await audit.log("ERROR", "write_packet_failed", {"device_id": device_id, "error": str(exc)})
+        # Do not re-raise — an I/O error must not drop the WebSocket.
+        # The mobile will activate its blackbox buffer on next reconnect.
+    _cache_latest_sample(pkt)
+
+
+def _cache_latest_sample(pkt: SensorPacket) -> None:
+    """Refresh the display-only latest-sample cache for the live chart."""
+    _latest_samples[pkt.device_id] = {
+        "acc": [round(pkt.acc_x, 4), round(pkt.acc_y, 4), round(pkt.acc_z, 4)],
+        "gyro": [round(pkt.gyro_x, 4), round(pkt.gyro_y, 4), round(pkt.gyro_z, 4)],
+        "ts": pkt.timestamp_ms,
+    }
+
+
 # ── Control channel ───────────────────────────────────────────────────────────
 
 @router.websocket("/ws/control")
 async def control_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     device_id: str | None = None
+    heartbeat_task: asyncio.Task[None] | None = None
 
     try:
         # First binary message must be DeviceRegister.
@@ -198,7 +261,24 @@ async def control_ws(websocket: WebSocket) -> None:
         # Reconciliation on (re)connect: tell the device what the backend believes is
         # happening RIGHT NOW. Without this a phone that was offline during STOP stays
         # stuck showing "RECORDING" forever (plan D1).
-        await websocket.send_bytes(_state_pong())
+        await websocket.send_bytes(_state_pong(device_id=reg.device_id))
+
+        async def heartbeat() -> None:
+            """Keep the control channel alive even if a phone misses its own PING timer.
+
+            The app treats a PONG as proof that the backend is reachable.  Previously the
+            backend only sent one in response to a client PING; when that timer was
+            delayed, both sides declared a healthy open WebSocket dead after eight
+            seconds and the idle reaper removed the device from the dashboard.
+            """
+            while True:
+                await asyncio.sleep(2)
+                await websocket.send_bytes(_state_pong())
+                session_manager.mark_ping(device_id)
+
+        heartbeat_task = asyncio.create_task(
+            heartbeat(), name=f"control-heartbeat-{device_id[:8]}"
+        )
 
         # Subsequent messages are Commands.
         async for raw in websocket.iter_bytes():
@@ -219,17 +299,78 @@ async def control_ws(websocket: WebSocket) -> None:
     except Exception as exc:
         await audit.log("ERROR", "control_ws_error", {"error": str(exc), "device_id": device_id})
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat_task
         session_manager.unregister_device(device_id)
         await audit.log("INFO", "ws_disconnect", {"channel": "control", "device_id": device_id})
         # Notify frontend so device shows as offline immediately.
         await broadcast_to_frontends(_state_snapshot())
 
 
+async def broadcast_start_to_phones(
+    *, command_id: str = "", with_metadata: bool = False
+) -> None:
+    """Send START to every phone after a successful ``start_recording``.
+
+    The dashboard path and the phone path disagree on the payload and this preserves both
+    exactly (frozen behavior): the phone-initiated START carries the subject/tag/operator
+    so the other handsets can name their rescue CSVs and embed the CSV header; the
+    dashboard-initiated one has always sent only the session id and scheduled start.
+    """
+    payload: dict = {
+        "session_id": session_manager.session_id,
+        "scheduled_start_ms": session_manager.scheduled_start_ms,
+    }
+    if with_metadata:
+        payload.update({
+            "subject": session_manager.subject_name,
+            "session_tag": session_manager.session_tag,
+            "operator": session_manager.operator,
+        })
+    await session_manager.broadcast_control(
+        Command(
+            type=CommandType.START_SESSION,
+            payload=json.dumps(payload),
+            command_id=command_id,
+        ).to_bytes()
+    )
+
+
+async def broadcast_state_update(**extra) -> None:
+    """Publish the legacy STATE_UPDATE shape to connected dashboards."""
+    await broadcast_to_frontends({"type": "STATE_UPDATE", **_state_snapshot(), **extra})
+
+
+async def apply_label(label_id: int, label_name: str) -> None:
+    """Apply a task label and checkpoint it while RECORDING (shared by both channels).
+
+    The label timeline is part of the crash-recovery contract: if the backend dies before
+    STOP, the next validator still knows which sequence gaps were inside task labels.
+    """
+    io_manager.set_label(label_id, label_name)
+    if session_manager.state == SessionState.RECORDING:
+        await session_manager._save_state()
+    await audit.log("INFO", "label_injected", {
+        "label_id": label_id,
+        "label_name": label_name,
+        "applied_at_ms": int(time.time() * 1000),
+    })
+
+
+async def reset_all_connections() -> None:
+    """Close every phone link and clear connectivity history (RESET)."""
+    await session_manager.reset_all()
+    _latest_samples.clear()   # stop /ws/live re-broadcasting stale device samples
+    await audit.log("INFO", "operator_reset", {})
+
+
 async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
     match cmd.type:
         case CommandType.PING:
             session_manager.mark_ping(device_id)
-            await ws.send_bytes(_state_pong(cmd.command_id))
+            await ws.send_bytes(_state_pong(cmd.command_id, device_id))
 
         case CommandType.CLOCK_SYNC:
             t1_ms = int(time.time() * 1000)
@@ -252,20 +393,11 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
             await ws.send_bytes(make_ack(cmd.command_id, "ok" if ok else "fail", "" if ok else detail))
             if ok:
                 await audit.log("INFO", "session_start", {"initiated_by": device_id[:8]})
-                # Broadcast START to all other connected devices, carrying the metadata the
-                # phones need to name their local rescue CSVs (subject/tag/operator) and embed
-                # in the CSV header.
-                start_cmd = Command(
-                    type=CommandType.START_SESSION,
-                    payload=json.dumps({
-                        "session_id": session_manager.session_id,
-                        "subject": session_manager.subject_name,
-                        "session_tag": session_manager.session_tag,
-                        "operator": session_manager.operator,
-                    }),
-                    command_id=cmd.command_id,
-                ).to_bytes()
-                await session_manager.broadcast_control(start_cmd)
+                # Carries subject/tag/operator so the phones can name their local rescue
+                # CSVs; the dashboard-initiated START has always sent only the session id.
+                await broadcast_start_to_phones(
+                    command_id=cmd.command_id, with_metadata=True
+                )
 
         case CommandType.STOP_SESSION:
             if session_manager.state != SessionState.RECORDING:
@@ -288,13 +420,8 @@ async def _handle_command(cmd: Command, device_id: str, ws: WebSocket) -> None:
             except Exception:
                 await ws.send_bytes(make_ack(cmd.command_id, "fail", "Bad SET_LABEL payload"))
                 return
-            io_manager.set_label(label_id, label_name)
+            await apply_label(label_id, label_name)
             await ws.send_bytes(make_ack(cmd.command_id, "ok"))
-            await audit.log(
-                "INFO",
-                "label_injected",
-                {"label_id": label_id, "label_name": label_name, "applied_at_ms": int(time.time() * 1000)},
-            )
 
         case _:
             logger.debug("Unhandled command type %s from %s", cmd.type, device_id[:8])
@@ -318,7 +445,26 @@ async def frontend_ws(websocket: WebSocket) -> None:
                 msg = json.loads(text)
             except Exception:
                 continue
-            await _handle_frontend_msg(msg, websocket)
+            try:
+                await _handle_frontend_msg(msg, websocket)
+            except Exception as exc:
+                # Mirrors the device control channel: one failed command must not close
+                # the operator's connection. Losing this socket at STOP was indistinguish-
+                # able from the backend dying, right when the operator needed to know
+                # whether their recording had survived.
+                logger.warning("frontend command error: %s", exc, exc_info=True)
+                await audit.log("ERROR", "frontend_command_failed", {
+                    "type": msg.get("type", ""), "error": str(exc),
+                })
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "ACK",
+                        "command_id": msg.get("command_id", ""),
+                        "status": "fail",
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    }))
+                except Exception:
+                    return
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -344,43 +490,40 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
             }))
             if ok:
                 # Broadcast coordinated START to all mobile devices (CLAUDE.md §22.5)
-                start_cmd = Command(
-                    type=CommandType.START_SESSION,
-                    payload=json.dumps({
-                        "session_id": session_manager.session_id,
-                        "scheduled_start_ms": session_manager.scheduled_start_ms,
-                    }),
-                ).to_bytes()
-                await session_manager.broadcast_control(start_cmd)
-                await broadcast_to_frontends({
-                    "type": "STATE_UPDATE",
-                    **_state_snapshot(),
-                    "scheduled_start_ms": session_manager.scheduled_start_ms,
-                })
+                await broadcast_start_to_phones()
+                await broadcast_state_update(
+                    scheduled_start_ms=session_manager.scheduled_start_ms
+                )
 
         case "STOP_SESSION":
+            # STOP now only *starts* finalization. It returns as soon as the session has
+            # left RECORDING, and the job's progress arrives as broadcast state. Three
+            # failure modes die with this: the ACK can no longer time out, a retry can no
+            # longer re-enter finalization and blank the integrity report, and an
+            # exception can no longer escape into the socket handler.
             reason = payload.get("reason", "operator_stop")
-            report = await session_manager.stop_recording(reason)
+            try:
+                await session_manager.request_stop(reason)
+            except IllegalTransition as exc:
+                await ws.send_text(json.dumps({
+                    "type": "ACK",
+                    "command_id": command_id,
+                    "status": "fail",
+                    "detail": str(exc),
+                }))
+                return
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
                 "status": "ok",
+                "detail": "finalizing",
             }))
-            await broadcast_to_frontends({
-                "type": "STATE_UPDATE",
-                **_state_snapshot(),
-                "integrity_report": report,
-            })
+            await audit.log("INFO", "session_stop", {"reason": reason})
 
         case "SET_LABEL":
             label_id = int(payload.get("label_id", 0))
             label_name = str(payload.get("label_name", str(label_id)))
-            io_manager.set_label(label_id, label_name)
-            await audit.log("INFO", "label_injected", {
-                "label_id": label_id,
-                "label_name": label_name,
-                "applied_at_ms": int(time.time() * 1000),
-            })
+            await apply_label(label_id, label_name)
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
@@ -399,14 +542,12 @@ async def _handle_frontend_msg(msg: dict, ws: WebSocket) -> None:
                     "detail": "Cannot reset connections while a session is recording",
                 }))
                 return
-            await session_manager.reset_all()
-            _latest_samples.clear()   # stop /ws/live re-broadcasting stale device samples
+            await reset_all_connections()
             await ws.send_text(json.dumps({
                 "type": "ACK",
                 "command_id": command_id,
                 "status": "ok",
             }))
-            await audit.log("INFO", "operator_reset", {})
             await broadcast_to_frontends(_state_snapshot())
 
 
@@ -418,12 +559,16 @@ def _state_snapshot() -> dict:
         "subject": session_manager.subject_name,
         "session_tag": session_manager.session_tag,
         "operator": session_manager.operator,
+        # Include the original coordinated start on every snapshot so a dashboard that
+        # reloads during RECORDING can resume camera capture against the same session.
+        "scheduled_start_ms": session_manager.scheduled_start_ms or None,
         # Use control_ws presence as source of truth for online status.
         "devices": [
             {
                 "device_id": d.device_id,
                 "role": d.device_role,
                 "is_online": d.control_ws is not None,
+                "control_alive": d.is_alive,
                 "packets": d.packets_received,
                 # Surfaced so a stale handset build is visible on the dashboard. Three phones
                 # ran a pre-v2 build for days on 2026-08-07, leaving acc_ts_ms/sample_kind
@@ -433,10 +578,15 @@ def _state_snapshot() -> dict:
                 "substate": d.substate,
                 "first_packet_ts": d.first_packet_ts,
                 "offline_intervals": len(d.offline_intervals),
+                "telemetry_gaps": len(d.telemetry_gaps),
                 "rate_hz": round(d.rate_hz, 1),
                 "true_hz": round(d.true_hz, 1),
                 "true_hz_avg": round(d.true_hz_avg, 1),
                 "held_pct": round(d.held_pct, 1),
+                "telemetry_age_ms": (
+                    int((time.monotonic() - d.last_packet_at) * 1000)
+                    if d.last_packet_at else -1
+                ),
                 "streaming": (time.monotonic() - d.last_packet_at) < 3.0 if d.last_packet_at else False,
             }
             for d in session_manager._devices.values()
@@ -445,7 +595,37 @@ def _state_snapshot() -> dict:
             "connected": len(session_manager.online_devices),
             "roles": session_manager.connected_roles,
         },
+        # Per-step finalization progress, so a dashboard that connects mid-finalize sees
+        # what is happening instead of an unexplained non-IDLE state.
+        "finalize": session_manager.finalize_snapshot,
     }
+
+
+async def _on_lifecycle_event(event: dict) -> None:
+    """Publish every lifecycle event the session manager emits.
+
+    Registered once at import. This is the only reason FINALIZING and VALIDATING are
+    visible to an operator at all — previously a transition wrote an audit line and
+    nothing else, so the dashboard held RECORDING for the entire finalize.
+    """
+    kind = event.get("type")
+    if kind == "STATE_TRANSITION":
+        await broadcast_to_frontends({"type": "STATE_UPDATE", **_state_snapshot()})
+        # Re-assert to phones too: one that reconnected mid-finalize would otherwise sit
+        # in RECORDING until its next heartbeat (plan D1).
+        await session_manager.broadcast_control(_state_pong())
+    elif kind == "FINALIZE_PROGRESS":
+        await broadcast_to_frontends(event)
+    elif kind == "FINALIZE_COMPLETE":
+        await broadcast_to_frontends({
+            "type": "STATE_UPDATE",
+            **_state_snapshot(),
+            "integrity_report": event.get("integrity_report") or None,
+            "finalize": event.get("finalize"),
+        })
+
+
+session_manager.add_observer(_on_lifecycle_event)
 
 
 # ── Live sensor data stream for dashboard chart (JSON, 20 fps) ───────────────
