@@ -317,3 +317,6 @@ dashboard/*.local
 
 # Portable Windows server bundles (tools/build_windows_dist.sh)
 /dist/
+
+# Portable Python/ffmpeg fetched by setup_windows.ps1
+/vendor/
