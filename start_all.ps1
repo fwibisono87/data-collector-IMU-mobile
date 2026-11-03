@@ -203,93 +203,109 @@ if (-not (Test-Path -LiteralPath $staticIndex)) {
 }
 
 # ---------------------------------------------------------------- python ------------
-# 'py -3' is the fallback when the Store shim or a PATH-less install has no `python`.
-$sysPython = 'python'
-$sysPythonArgs = @()
-$pythonCmd = Get-Command 'python' -ErrorAction SilentlyContinue
-if (-not $pythonCmd) {
-    $pyLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
-    if (-not $pyLauncher) {
-        Write-Host "FAIL: no Python on PATH. Install Python 3.12 (64-bit) from" -ForegroundColor Red
-        Write-Host "      https://www.python.org/downloads/windows/ and tick 'Add python.exe to PATH'." -ForegroundColor Red
-        exit 1
-    }
-    $sysPython = $pyLauncher.Source
-    $sysPythonArgs = @('-3')
-}
-& $sysPython @sysPythonArgs -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "WARNING: Python here is older than 3.12 - the spec pins 3.12 and the wheels are built for it." -ForegroundColor Yellow
-    Write-Host "         Continuing; if imports fail later, install Python 3.12 and re-run." -ForegroundColor Yellow
+# Portable build (tools/build_windows_dist.sh): a relocatable CPython with every dependency
+# already in its site-packages ships in vendor\python. Nothing to install, no admin rights,
+# no network - so it skips the venv/pip machinery below entirely.
+$vendorPy = Join-Path $root 'vendor\python\python.exe'
+$buildIdFile = Join-Path $root 'BUILD_ID'
+$usingVendorPython = Test-Path -LiteralPath $vendorPy
+if ((Test-Path -LiteralPath $buildIdFile) -and -not [Environment]::GetEnvironmentVariable('BUILD_ID', 'Process')) {
+    [Environment]::SetEnvironmentVariable('BUILD_ID', (Get-Content -LiteralPath $buildIdFile -TotalCount 1).Trim(), 'Process')
 }
 
-function Install-BackendDeps {
-    # Uses the caller's $runPyArgs on purpose: it is either @() or @('-3'), and splatting
-    # an inherited script-scope array avoids binding an empty array to a [string[]] param.
-    param([string]$Python, [string]$Requirements)
-    & $Python @runPyArgs -m pip install --disable-pip-version-check -r $Requirements
-}
-
-$runPy = $sysPython
-$runPyArgs = $sysPythonArgs
-
-if (-not (Test-Path -LiteralPath $venvPy)) {
-    if ($NoInstall) {
-        Write-Host "WARNING: $venvPy missing - falling back to '$sysPython'. Run start_all.ps1 once to create it." -ForegroundColor Yellow
-    } else {
-        if (Test-Path -LiteralPath $venvDir) {
-            Write-Host "Backend    : .venv exists but has no python.exe - recreating it ..." -ForegroundColor Cyan
-            Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host "Backend    : creating venv at $venvDir ..." -ForegroundColor Cyan
-        & $sysPython @sysPythonArgs -m venv $venvDir
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPy)) {
-            Write-Host "FAIL: could not create the venv (install Python 3.12 from python.org first)." -ForegroundColor Red
+if ($usingVendorPython) {
+    Write-Host "Backend    : portable Python $vendorPy" -ForegroundColor Cyan
+    $runPy = $vendorPy
+    $runPyArgs = @()
+} else {
+    # 'py -3' is the fallback when the Store shim or a PATH-less install has no `python`.
+    $sysPython = 'python'
+    $sysPythonArgs = @()
+    $pythonCmd = Get-Command 'python' -ErrorAction SilentlyContinue
+    if (-not $pythonCmd) {
+        $pyLauncher = Get-Command 'py' -ErrorAction SilentlyContinue
+        if (-not $pyLauncher) {
+            Write-Host "FAIL: no Python on PATH. Install Python 3.12 (64-bit) from" -ForegroundColor Red
+            Write-Host "      https://www.python.org/downloads/windows/ and tick 'Add python.exe to PATH'." -ForegroundColor Red
             exit 1
         }
+        $sysPython = $pyLauncher.Source
+        $sysPythonArgs = @('-3')
     }
-}
+    & $sysPython @sysPythonArgs -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: Python here is older than 3.12 - the spec pins 3.12 and the wheels are built for it." -ForegroundColor Yellow
+        Write-Host "         Continuing; if imports fail later, install Python 3.12 and re-run." -ForegroundColor Yellow
+    }
 
-if (Test-Path -LiteralPath $venvPy) {
+    function Install-BackendDeps {
+        # Uses the caller's $runPyArgs on purpose: it is either @() or @('-3'), and splatting
+        # an inherited script-scope array avoids binding an empty array to a [string[]] param.
+        param([string]$Python, [string]$Requirements)
+        & $Python @runPyArgs -m pip install --disable-pip-version-check -r $Requirements
+    }
+
+    $runPy = $sysPython
+    $runPyArgs = $sysPythonArgs
+
+    if (-not (Test-Path -LiteralPath $venvPy)) {
+        if ($NoInstall) {
+            Write-Host "WARNING: $venvPy missing - falling back to '$sysPython'. Run start_all.ps1 once to create it." -ForegroundColor Yellow
+        } else {
+            if (Test-Path -LiteralPath $venvDir) {
+                Write-Host "Backend    : .venv exists but has no python.exe - recreating it ..." -ForegroundColor Cyan
+                Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host "Backend    : creating venv at $venvDir ..." -ForegroundColor Cyan
+            & $sysPython @sysPythonArgs -m venv $venvDir
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $venvPy)) {
+                Write-Host "FAIL: could not create the venv (install Python 3.12 from python.org first)." -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+
+    if (Test-Path -LiteralPath $venvPy) {
+        if (-not $NoInstall) {
+            # A venv whose interpreter does not even start is unrecoverable; rebuild it now
+            # rather than after a confusing traceback.
+            & $venvPy -c 'import sys' 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Backend    : the venv's python does not run - rebuilding it ..." -ForegroundColor Yellow
+                Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
+                & $sysPython @sysPythonArgs -m venv $venvDir
+            }
+            $runPy = $venvPy
+            $runPyArgs = @()
+        } else {
+            $runPy = $venvPy
+            $runPyArgs = @()
+        }
+    }
+
     if (-not $NoInstall) {
-        # A venv whose interpreter does not even start is unrecoverable; rebuild it now
-        # rather than after a confusing traceback.
-        & $venvPy -c 'import sys' 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "Backend    : the venv's python does not run - rebuilding it ..." -ForegroundColor Yellow
+        # Probe the whole requirement set, not just fastapi: a half-installed venv (killed
+        # install, moved checkout) fails later inside the camera service instead of here.
+        & $runPy @runPyArgs -c 'import fastapi, uvicorn, websockets, google.protobuf, aiofiles, dotenv, zeroconf, paramiko, scipy, numpy, PIL' 2>$null
+        $depsOk = ($LASTEXITCODE -eq 0)
+        if ($depsOk) {
+            Write-Host "Backend    : dependencies already installed." -ForegroundColor Cyan
+        } else {
+            Write-Host "Backend    : installing dependencies from requirements.txt ..." -ForegroundColor Cyan
+            Install-BackendDeps -Python $runPy -Requirements $requirements
+            $depsOk = ($LASTEXITCODE -eq 0)
+        }
+        if (-not $depsOk) {
+            Write-Host "Backend    : install failed - rebuilding the venv from scratch (one retry) ..." -ForegroundColor Yellow
             Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
             & $sysPython @sysPythonArgs -m venv $venvDir
-        }
-        $runPy = $venvPy
-        $runPyArgs = @()
-    } else {
-        $runPy = $venvPy
-        $runPyArgs = @()
-    }
-}
-
-if (-not $NoInstall) {
-    # Probe the whole requirement set, not just fastapi: a half-installed venv (killed
-    # install, moved checkout) fails later inside the camera service instead of here.
-    & $runPy @runPyArgs -c 'import fastapi, uvicorn, websockets, google.protobuf, aiofiles, dotenv, zeroconf, paramiko, scipy, numpy, PIL' 2>$null
-    $depsOk = ($LASTEXITCODE -eq 0)
-    if ($depsOk) {
-        Write-Host "Backend    : dependencies already installed." -ForegroundColor Cyan
-    } else {
-        Write-Host "Backend    : installing dependencies from requirements.txt ..." -ForegroundColor Cyan
-        Install-BackendDeps -Python $runPy -Requirements $requirements
-        $depsOk = ($LASTEXITCODE -eq 0)
-    }
-    if (-not $depsOk) {
-        Write-Host "Backend    : install failed - rebuilding the venv from scratch (one retry) ..." -ForegroundColor Yellow
-        Remove-Item -LiteralPath $venvDir -Recurse -Force -ErrorAction SilentlyContinue
-        & $sysPython @sysPythonArgs -m venv $venvDir
-        $runPy = $venvPy
-        $runPyArgs = @()
-        Install-BackendDeps -Python $runPy -Requirements $requirements
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "FAIL: pip install failed twice. Check the network/proxy, then re-run start_all.ps1." -ForegroundColor Red
-            exit 1
+            $runPy = $venvPy
+            $runPyArgs = @()
+            Install-BackendDeps -Python $runPy -Requirements $requirements
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "FAIL: pip install failed twice. Check the network/proxy, then re-run start_all.ps1." -ForegroundColor Red
+                exit 1
+            }
         }
     }
 }
