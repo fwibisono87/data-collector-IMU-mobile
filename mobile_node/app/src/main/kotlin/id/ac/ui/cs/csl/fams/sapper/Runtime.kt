@@ -97,7 +97,21 @@ object Runtime {
         enqueue { it.connect(ip, role) }
     }
 
-    fun disconnect() = enqueue { it.disconnect() }
+    /** With the service running, the pipeline handles it (and refuses mid-session). Without
+     *  one, queuing would wait for a service that never starts, so the button did nothing:
+     *  clear the persisted endpoint directly and return the UI to Setup. */
+    fun disconnect() {
+        val p = pipeline
+        if (p != null) {
+            p.disconnect()
+            return
+        }
+        val files = appContext?.filesDir
+        if (files != null) {
+            runCatching { CheckpointStore(listOf(files, File(files, "app_flutter"))).clearDesired() }
+        }
+        _state.value = _state.value.copy(desired = null)
+    }
 
     fun silenceAlarm() = enqueue { it.silenceAlarm() }
 

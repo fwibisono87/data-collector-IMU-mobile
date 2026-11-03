@@ -159,6 +159,7 @@ class Pipeline(
         }
 
         override fun onClosed(code: Int?, failure: String?) {
+            android.util.Log.w("sapper.link", "link closed code=$code failure=$failure ip=${logic.desired?.ip}")
             controlOpen = false
             telemetryOpen = false
             if (!everUpThisAttempt && code == null) {

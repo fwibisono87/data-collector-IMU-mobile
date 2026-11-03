@@ -36,6 +36,7 @@
          on its own via START_STICKY). -->
 
     <application
+        android:usesCleartextTraffic="true"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.SensorsApp"

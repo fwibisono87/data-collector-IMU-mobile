@@ -321,3 +321,4 @@ dashboard/*.local
 # Portable Python/ffmpeg fetched by setup_windows.ps1
 /vendor/
 /master_backend/venv/
+/camera_list.txt
