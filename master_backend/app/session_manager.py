@@ -432,6 +432,10 @@ class SessionManager:
             )
 
         self._stop_reason = reason
+        # The session ends when STOP is requested. Taking the end time later (after the state
+        # broadcast and the STOP fan-out) made every phone look like it stopped seconds early,
+        # so integrity reported a false "trailing coverage gap" PARTIAL on every session.
+        self._stop_requested_ms = int(time.time() * 1000)
         # Arm late delivery before STOP reaches phones. Once we transition out of
         # RECORDING, a reconnecting phone may immediately flush its buffered tail.
         io_manager.arm_late_window()
@@ -472,7 +476,7 @@ class SessionManager:
             reason=reason,
             scheduled_start_ms=self.scheduled_start_ms,
             session_start_ms=self._recording_started_epoch_ms,
-            session_end_ms=int(time.time() * 1000),
+            session_end_ms=getattr(self, "_stop_requested_ms", None) or int(time.time() * 1000),
             devices=list(self._devices.values()),
             label_timeline=io_manager.label_timeline,
             true_hz=self._session_true_hz(),
